@@ -34,6 +34,7 @@
 //!   GET    /v1/images/progress            stage and steps of the picture being made, or null
 //!   POST   /v1/audio/speech               OpenAI-compatible: {"model", "input", "voice", "speed"}; answers with a WAV
 //!   GET    /v1/audio/files/{id}.wav       a saved reading; DELETE removes it
+//!   POST   /v1/audio/transcriptions       OpenAI-compatible, multipart: "file" (16-bit PCM WAV), "model", "language"
 //!   POST   /v1/videos/generations         {"model", "prompt", "size", "frames", "steps", "seed"}: a clip, made in the background
 //!   GET    /v1/videos/jobs[/{id}]         progress of clips; DELETE /v1/videos/jobs/{id} stops one
 //!   GET    /v1/videos/files/{id}.webm     a saved clip; DELETE removes it
@@ -162,6 +163,8 @@ struct App {
     telemetry_off: bool,
     /// Held while the voice engine reads something aloud.
     voice: tokio::sync::Mutex<()>,
+    /// Held while the listening engine writes down a recording.
+    listen: tokio::sync::Mutex<()>,
     /// Video clips of this run, by job id.
     videos: Mutex<HashMap<String, video::VideoJob>>,
     /// Where the picture being made is: stage and steps, for the app's card.
@@ -257,6 +260,12 @@ fn engine_build_for(app: &App, kind: EngineKind) -> Option<EngineBuild> {
 /// engines listed in the signed manifest, downloading and unpacking the build on first use.
 async fn engine_program(app: &App, kind: EngineKind) -> Result<PathBuf, String> {
     let name = engine_binary_name(kind).ok_or("this engine does not run as a separate program")?;
+    engine_tool(app, kind, name).await
+}
+
+/// Path of the program `name` from the engine build for `kind` (a build can carry several, like
+/// sherpa-onnx's voice and listening programs), installing the build on first use.
+async fn engine_tool(app: &App, kind: EngineKind, name: &str) -> Result<PathBuf, String> {
     if let Some(dir) = std::env::var_os("RIGBREW_ENGINE_DIR") {
         let file = if cfg!(windows) { format!("{name}.exe") } else { name.to_string() };
         return Ok(PathBuf::from(dir).join(file));
@@ -1068,6 +1077,7 @@ async fn main() {
         sync_now: tokio::sync::Notify::new(),
         telemetry_off: cloud::telemetry_off(),
         voice: tokio::sync::Mutex::new(()),
+        listen: tokio::sync::Mutex::new(()),
         videos: Mutex::new(HashMap::new()),
         image_progress: Mutex::new(None),
     });
@@ -1117,6 +1127,10 @@ async fn main() {
         .route("/v1/images/files/{name}", get(library::image_get).delete(library::image_delete))
         .route("/v1/activity/recent", get(library::recent))
         .route("/v1/audio/speech", post(speech::speech))
+        .route(
+            "/v1/audio/transcriptions",
+            post(speech::transcribe).layer(axum::extract::DefaultBodyLimit::max(rigbrew_core::listen::MAX_WAV_BYTES + 64 * 1024)),
+        )
         .route("/v1/audio/files/{name}", get(speech::audio_get).delete(speech::audio_delete))
         .route("/v1/videos/generations", post(video::generate))
         .route("/v1/videos/jobs", get(video::jobs))

@@ -14,7 +14,7 @@ model for an image, and the app shows which model did what.
 | **Crema** | Pictures from a description | Crema 6B | Yes |
 | **Pour** | Short video clips from a description, in a few minutes | Pour 5B | Yes |
 | **Whistle** | Reading answers aloud, in English | Whistle 82M | Yes |
-| **Sift** | Listening: speech to text | — | Planned |
+| **Sift** | Listening: writes down what you say, in English, Turkish and most other languages | Sift 809M | Yes |
 
 Package ids are `<family>-<size>` (`steep-4b`); files are `<id>-v<version>.<part>.<precision>.<ext>`. People see
 versions by what they mean ("Smallest", "Balanced", "Best quality", "Recommended for this Mac"); the precision tags

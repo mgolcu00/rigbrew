@@ -150,6 +150,32 @@ async function send(method: string, path: string, body?: unknown, signal?: Abort
 	return response;
 }
 
+/** A multipart upload (a recording), with the same connection, token and errors as `send`. */
+async function sendForm(path: string, form: FormData): Promise<Response> {
+	const conn = await (connection ??= connect()).catch((e) => {
+		connection = null;
+		lost();
+		throw new ApiError(e instanceof Error ? e.message : String(e));
+	});
+	let response: Response;
+	try {
+		response = await fetch(conn.base + path, { method: 'POST', headers: { Authorization: `Bearer ${conn.token}` }, body: form });
+	} catch {
+		lost();
+		throw new ApiError(LOST);
+	}
+	if (!response.ok) {
+		let message = `The local service answered ${response.status}.`;
+		try {
+			message = (await response.json())?.error?.message ?? message;
+		} catch {
+			// not JSON
+		}
+		throw new ApiError(message, response.status);
+	}
+	return response;
+}
+
 async function json<T>(method: string, path: string, body?: unknown): Promise<T> {
 	return (await send(method, path, body)).json() as Promise<T>;
 }
@@ -273,6 +299,16 @@ export async function speak(model: string, input: string, signal?: AbortSignal):
 		audioSeconds: Number(response.headers.get('x-rigbrew-audio-seconds') ?? 0),
 		seconds: Number(response.headers.get('x-rigbrew-seconds') ?? 0)
 	};
+}
+
+// --- listening ---------------------------------------------------------------------------------
+
+/** Writes down a recording with the installed listening package. `language`: a code such as "tr"; none lets the model tell. */
+export async function transcribe(recording: Blob, language?: string) {
+	const form = new FormData();
+	form.append('file', recording, 'recording.wav');
+	if (language) form.append('language', language);
+	return (await sendForm('/v1/audio/transcriptions', form)).json() as Promise<{ text: string; language: string | null; duration: number; seconds: number }>;
 }
 
 // --- video ---------------------------------------------------------------------------------------

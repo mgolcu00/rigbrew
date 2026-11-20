@@ -9,7 +9,7 @@
 
 <p align="center">
   <strong>Open models, fitted to your rig.</strong><br>
-  Chat, pictures, voice and short video clips, all running on your own computer.
+  Chat, pictures, voice, dictation and short video clips, all running on your own computer.
 </p>
 
 <p align="center">
@@ -84,7 +84,7 @@ ready and never switches by itself.
 | **Crema** | Pictures from a description | Crema 6B | Runs |
 | **Pour** | Short video clips, in a few minutes | Pour 5B | Runs |
 | **Whistle** | Reading answers aloud, in English | Whistle 82M | Runs |
-| **Sift** | Speech to text | — | Planned |
+| **Sift** | Writing down what you say: talk instead of typing | Sift 809M | Runs |
 
 Only models under Apache-2.0, MIT or CC-BY-4.0 are packaged. More in [docs/models.md](docs/models.md).
 

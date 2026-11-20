@@ -391,6 +391,7 @@ mod tests {
             sync_now: tokio::sync::Notify::new(),
             telemetry_off: false,
             voice: tokio::sync::Mutex::new(()),
+            listen: tokio::sync::Mutex::new(()),
             videos: std::sync::Mutex::new(std::collections::HashMap::new()),
             image_progress: std::sync::Mutex::new(None),
         };

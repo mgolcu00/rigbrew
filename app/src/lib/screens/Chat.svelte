@@ -6,6 +6,7 @@
 	import { guide, type ChecklistId } from '#lib/guide.svelte.ts';
 	import { copyText, openExternal } from '#lib/api.ts';
 	import { looksEnglish, reader } from '#lib/voice.svelte.ts';
+	import { dictation } from '#lib/dictate.svelte.ts';
 	import { ago, budgetOf, count, duration, elapsed, familyOf, installedVariant, minute, seconds, size as bytes, speedOf, tierOf, variantName } from '#lib/format.ts';
 	import { renderMarkdown } from '#lib/markdown.ts';
 	import { machine, mod, nameOf, plainDoes, roleOf, speedAnywhere, speedHere, speedWord, versionLabel } from '#lib/words.ts';
@@ -57,7 +58,7 @@
 	});
 
 	$effect(() => {
-		if (!chat.busy && chat.videosRunning === 0) return;
+		if (!chat.busy && chat.videosRunning === 0 && dictation.state !== 'recording') return;
 		now = Date.now();
 		const timer = setInterval(() => (now = Date.now()), 500);
 		return () => clearInterval(timer);
@@ -249,6 +250,18 @@
 		if (!voice) return;
 		await reader.toggle(message.id, voice.id, message.content);
 		if (reader.error) app.say(`Could not read the answer aloud. ${reader.error}`);
+	}
+
+	/** First press opens the microphone, the second writes down what was said into the box. */
+	async function dictate() {
+		if (dictation.state === 'recording') {
+			const text = await dictation.stop();
+			if (text) setDraft(draft.trim() ? `${draft.trimEnd()} ${text}` : text);
+			if (dictation.error) app.say(`Dictation did not work. ${dictation.error}`);
+			return;
+		}
+		await dictation.start();
+		if (dictation.error) app.say(dictation.error);
 	}
 
 	let copiedId = $state(0);
@@ -825,6 +838,20 @@
 							</button>
 						{/if}
 						<span class="grow"></span>
+						{#if app.listenPackage}
+							<button
+								type="button"
+								class="mic"
+								class:live={dictation.state === 'recording'}
+								onclick={dictate}
+								disabled={dictation.state === 'working' || !usable}
+								title={dictation.state === 'recording' ? 'Stop and write it down' : dictation.state === 'working' ? `${app.listenPackage.name} is writing it down` : `Talk instead of typing: ${app.listenPackage.name} writes it down on this ${machine}`}
+								aria-label={dictation.state === 'recording' ? 'Stop dictating' : 'Dictate'}
+							>
+								<Icon name="listening" size={14} />
+								{#if dictation.state === 'recording'}<span class="num">{elapsed((now - dictation.startedAt) / 1000)}</span>{:else if dictation.state === 'working'}<span>Writing…</span>{/if}
+							</button>
+						{/if}
 						{#if chat.busy}
 							<button type="button" class="go stop" onclick={() => chat.stop()} title="Stop{flags.keyHints ? ' (Esc)' : ''}">Stop{#if flags.keyHints}&nbsp;<kbd>esc</kbd>{/if}</button>
 						{:else}
@@ -1189,6 +1216,28 @@
 		color: var(--muted);
 		opacity: 0;
 		transition: opacity var(--quick);
+	}
+
+	.mic {
+		display: inline-flex;
+		align-items: center;
+		gap: 5px;
+		height: 26px;
+		padding: 0 7px;
+		border-radius: 3px;
+		font-size: 12px;
+		color: var(--muted);
+	}
+
+	.mic:hover:not(:disabled) {
+		background: var(--hover);
+		color: var(--ink);
+	}
+
+	/* Listening: the one red thing on the screen, so it is never left on by mistake. */
+	.mic.live {
+		color: var(--fail);
+		box-shadow: inset 0 0 0 1px var(--fail);
 	}
 
 	.mini + .mini {

@@ -389,7 +389,7 @@ SvelteKit 3 uses in place of `$lib`.
 
 ## Not here yet
 
-- Chat, picture, voice and video models run. Voice reads answers aloud in English; a video clip
+- Chat, picture, voice, listening and video models run. Voice reads answers aloud in English; a video clip
   takes a few minutes and blocks other models until it is done or stopped.
 - On machines where a chat model and a picture model do not fit together, one picture asked for in
   Chat mode costs two engine swaps. Where they fit, both stay in memory and there is no swap.

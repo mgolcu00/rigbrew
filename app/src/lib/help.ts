@@ -40,7 +40,7 @@ export const articles: Article[] = [
 		title: 'What a model is, and what each kind does',
 		body: [
 			`A model is a large file that has learned from many examples how to do one kind of thing, such as answering in words or drawing a picture. Rigbrew loads it into your ${Mac}’s memory and runs it there.`,
-			'Chat (Steep) answers questions, writes and explains. Pictures (Crema) makes an image from a description. Voice (Whistle) reads answers aloud, in English: press Read aloud next to an answer. Video (Pour) makes a short clip from a description in a few minutes: choose Video in the box below. Listening (Sift) is planned.',
+			'Chat (Steep) answers questions, writes and explains. Pictures (Crema) makes an image from a description. Voice (Whistle) reads answers aloud, in English: press Read aloud next to an answer. Video (Pour) makes a short clip from a description in a few minutes: choose Video in the box below. Listening (Sift) writes down what you say: press the microphone in the box below, talk, press it again.',
 			'Each kind installs separately, and the installed ones work together in the same chat: ask Chat for a drawing and it hands the job to Pictures.',
 			'The name after the kind is the model’s own name and its size: Steep 4B has about 4 billion learned numbers.'
 		],

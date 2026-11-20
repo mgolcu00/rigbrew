@@ -4,7 +4,10 @@
 //!                                         with the WAV, and saves it as /v1/audio/files/<id>.wav
 //!   GET    /v1/audio/files/{id}.wav       a saved reading; DELETE removes it
 //!
-//! The voice engine runs on the processor next to whatever model is loaded, one reading at a time.
+//!   POST   /v1/audio/transcriptions       OpenAI-compatible, multipart: "file" (16-bit PCM WAV), "model"
+//!                                         (optional: the installed listening package), "language" (optional)
+//!
+//! Both run on the processor next to whatever model is loaded, one at a time each.
 
 use axum::body::Body;
 use axum::extract::{Path, State};
@@ -16,7 +19,7 @@ use rigbrew_core::voice::{self, Speech, VoiceModel};
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::{engine_program, fail, App, Shared};
+use crate::{engine_program, engine_tool, fail, App, Shared};
 
 #[derive(Deserialize)]
 pub struct SpeechBody {
@@ -124,5 +127,79 @@ pub async fn audio_delete(State(app): State<Shared>, Path(name): Path<String>) -
     match tokio::fs::remove_file(&path).await {
         Ok(()) => Json(json!({"deleted": name})).into_response(),
         Err(_) => fail(StatusCode::NOT_FOUND, "no such audio"),
+    }
+}
+
+/// Writes down what is said in a recording, with the installed listening package (the Sift family).
+pub async fn transcribe(State(app): State<Shared>, mut form: axum::extract::Multipart) -> Response {
+    let (mut wav, mut model, mut language) = (None::<Vec<u8>>, None::<String>, None::<String>);
+    loop {
+        match form.next_field().await {
+            Ok(Some(field)) => {
+                let name = field.name().unwrap_or("").to_string();
+                let Ok(bytes) = field.bytes().await else {
+                    return fail(StatusCode::BAD_REQUEST, "the upload was cut off");
+                };
+                match name.as_str() {
+                    "file" => wav = Some(bytes.to_vec()),
+                    "model" => model = Some(String::from_utf8_lossy(&bytes).trim().to_string()),
+                    "language" => language = Some(String::from_utf8_lossy(&bytes).trim().to_lowercase()),
+                    _ => {}
+                }
+            }
+            Ok(None) => break,
+            Err(e) => return fail(StatusCode::BAD_REQUEST, format!("not a multipart form: {e}")),
+        }
+    }
+    let Some(wav) = wav.filter(|w| w.len() > 44 && &w[0..4] == b"RIFF" && &w[8..12] == b"WAVE") else {
+        return fail(StatusCode::BAD_REQUEST, "send the recording as \"file\": a 16-bit PCM WAV");
+    };
+    let package = match model.as_deref().filter(|m| !m.is_empty()) {
+        Some(id) => app.manifest.package(id).filter(|p| p.modality == Modality::Listen),
+        None => app.manifest.packages.iter().find(|p| p.modality == Modality::Listen && !app.installed(p).is_empty()),
+    };
+    let Some(package) = package else {
+        return fail(StatusCode::NOT_FOUND, "no listening package is installed");
+    };
+    let Some(variant) = app.installed(package).into_iter().next() else {
+        return fail(StatusCode::CONFLICT, format!("{} is not installed", package.name));
+    };
+    let Some(bundle) = variant.files.iter().find(|f| rigbrew_core::bundle::is_bundle(f)) else {
+        return fail(StatusCode::INTERNAL_SERVER_ERROR, format!("{} has no model bundle", package.name));
+    };
+    let binary = match engine_tool(&app, EngineKind::Sherpa, rigbrew_core::listen::PROGRAM).await {
+        Ok(p) => p,
+        Err(e) => return fail(StatusCode::SERVICE_UNAVAILABLE, e),
+    };
+    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).clamp(2, 6);
+    let model = rigbrew_core::listen::ListenModel { binary, dir: rigbrew_core::bundle::dir(&app.packages_dir(), bundle), threads };
+
+    // The recording only lives as long as the request.
+    let dir = app.root.join("tmp");
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        return fail(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+    }
+    let path = dir.join(format!("{}.wav", uuid::Uuid::new_v4().simple()));
+    if let Err(e) = std::fs::write(&path, &wav) {
+        return fail(StatusCode::INTERNAL_SERVER_ERROR, e.to_string());
+    }
+    let heard = {
+        let _turn = app.listen.lock().await;
+        rigbrew_core::listen::transcribe(&model, &path, language.as_deref()).await
+    };
+    std::fs::remove_file(&path).ok();
+    match heard {
+        Ok(t) => {
+            app.record(
+                "transcribed",
+                json!({"package": package.id, "variant": variant.id, "text": t.text, "language": t.language,
+                       "audio_seconds": t.audio_seconds, "seconds": t.seconds, "threads": threads}),
+            );
+            Json(json!({"text": t.text, "language": t.language, "duration": t.audio_seconds, "seconds": t.seconds})).into_response()
+        }
+        Err(e) => {
+            app.record("transcribe_failed", json!({"package": package.id, "variant": variant.id, "error": e.to_string()}));
+            fail(StatusCode::BAD_GATEWAY, e.to_string())
+        }
     }
 }
