@@ -223,6 +223,7 @@ async fn run(app: Shared, id: String, package: rigbrew_core::manifest::Package, 
                     j.stage = "done".into();
                     j.video = saved;
                 });
+                crate::touch(&app, &package.id).await;
                 finish("done", None);
                 return;
             }

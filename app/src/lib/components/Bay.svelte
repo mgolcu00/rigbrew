@@ -70,6 +70,14 @@
 		return () => clearInterval(timer);
 	});
 
+	// The service takes idle models out of memory by itself; keep the readout honest.
+	$effect(() => {
+		const timer = setInterval(() => {
+			if (!chat.busy && !chat.work) chat.syncEngine();
+		}, 15_000);
+		return () => clearInterval(timer);
+	});
+
 	// The totals and the queue move when an answer or a picture ends.
 	let wasBusy = false;
 	$effect(() => {

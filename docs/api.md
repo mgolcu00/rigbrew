@@ -94,4 +94,5 @@ packed as a tar: after it is verified it is unpacked next to itself (plain files
 | `RIGBREW_BASE_URL` | Download package files from another mirror (files are still checked against the signed manifest). |
 | `RIGBREW_ENGINE_DIR` | Use engine programs from this folder instead of downloading them. |
 | `RIGBREW_PORT` | Listen on a fixed port. |
+| `RIGBREW_IDLE_MINUTES` | Take models out of memory after this many minutes without use (10; 0 keeps them). |
 | `DO_NOT_TRACK`, `RIGBREW_NO_TELEMETRY` | Send nothing. |

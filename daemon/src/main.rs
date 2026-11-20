@@ -90,6 +90,8 @@ struct Loaded {
     variant: String,
     /// Memory the variant needs on the GPU, from the manifest.
     mem_mb: u64,
+    /// When a request last used it; idle models are taken out of memory (`idle_loop`).
+    last_used: std::time::Instant,
     server: Engine,
 }
 
@@ -571,7 +573,8 @@ async fn ensure_engine(app: &App, package: &Package) -> Result<(u16, String, Str
     let mut slots = app.engine.lock().await;
     if let Some(pos) = slots.iter().position(|l| l.package == package.id && l.is_chat()) {
         // The one used last goes to the end: "loaded" in GET /v1/engine.
-        let l = slots.remove(pos);
+        let mut l = slots.remove(pos);
+        l.last_used = std::time::Instant::now();
         let out = match &l.server {
             Engine::Llama(server) => (server.port(), server.key().to_string(), l.variant.clone()),
             Engine::Sd(_) => unreachable!(),
@@ -609,6 +612,7 @@ async fn ensure_engine(app: &App, package: &Package) -> Result<(u16, String, Str
         package: package.id.clone(),
         variant: variant.id.clone(),
         mem_mb: variant.accel_mem_mb,
+        last_used: std::time::Instant::now(),
         server: Engine::Llama(Box::new(server)),
     });
     Ok(out)
@@ -667,6 +671,7 @@ async fn chat(State(app): State<Shared>, Json(mut body): Json<Value>) -> Respons
         answer["seconds"] = json!(started.elapsed().as_secs_f64());
         answer["stopped_by_user"] = json!(client_gone);
         log_app.record("response", answer);
+        touch(&log_app, &package_id).await;
     });
     Response::builder()
         .status(status)
@@ -735,7 +740,8 @@ fn summarize_answer(raw: &str, streaming: bool) -> Value {
 async fn ensure_sd(app: &App, package: &Package) -> Result<(Arc<SdServer>, String), Box<Response>> {
     let mut slots = app.engine.lock().await;
     if let Some(pos) = slots.iter().position(|l| l.package == package.id && !l.is_chat()) {
-        let l = slots.remove(pos);
+        let mut l = slots.remove(pos);
+        l.last_used = std::time::Instant::now();
         let out = match &l.server {
             Engine::Sd(server) => (server.clone(), l.variant.clone()),
             Engine::Llama(_) => unreachable!(),
@@ -778,6 +784,7 @@ async fn ensure_sd(app: &App, package: &Package) -> Result<(Arc<SdServer>, Strin
         package: package.id.clone(),
         variant: variant.id.clone(),
         mem_mb: variant.accel_mem_mb,
+        last_used: std::time::Instant::now(),
         server: Engine::Sd(server.clone()),
     });
     Ok((server, variant.id.clone()))
@@ -845,7 +852,9 @@ async fn image(State(app): State<Shared>, Json(body): Json<ImageBody>) -> Respon
     };
     app.record("prompt", json!({"package": package.id, "variant": variant, "modality": "image", "prompt": body.prompt, "width": width, "height": height, "steps": steps}));
     let req = ImageRequest { prompt: body.prompt, width, height, steps, seed: body.seed.unwrap_or(-1) };
-    match make_image(&app, &server, &req).await {
+    let made = make_image(&app, &server, &req).await;
+    touch(&app, &package.id).await;
+    match made {
         Ok((b64, seconds)) => {
             let saved = library::save_image(&app, &b64);
             app.record("image_generated", json!({"package": package.id, "variant": variant, "seconds": seconds, "width": width, "height": height, "steps": steps, "image_id": saved.as_ref().map(|s| s["id"].clone())}));
@@ -854,6 +863,47 @@ async fn image(State(app): State<Shared>, Json(body): Json<ImageBody>) -> Respon
         Err(e) => {
             app.record("image_failed", json!({"package": package.id, "variant": variant, "error": e.to_string()}));
             fail(StatusCode::BAD_GATEWAY, e.to_string())
+        }
+    }
+}
+
+/// Marks a loaded model as just used.
+async fn touch(app: &App, package: &str) {
+    if let Some(l) = app.engine.lock().await.iter_mut().find(|l| l.package == package) {
+        l.last_used = std::time::Instant::now();
+    }
+}
+
+/// Takes models out of memory after `RIGBREW_IDLE_MINUTES` (10 by default; 0 keeps them) without
+/// use, so an open app does not hold gigabytes it is not using. A model making a clip stays.
+async fn idle_loop(app: Shared) {
+    let minutes: u64 = std::env::var("RIGBREW_IDLE_MINUTES").ok().and_then(|m| m.parse().ok()).unwrap_or(10);
+    if minutes == 0 {
+        return;
+    }
+    let idle = Duration::from_secs(minutes * 60);
+    loop {
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        let busy: Vec<String> = app
+            .videos
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|j| j.state == "loading" || j.state == "running")
+            .map(|j| j.package.clone())
+            .collect();
+        let mut slots = app.engine.lock().await;
+        let stale: Vec<String> =
+            slots.iter().filter(|l| l.last_used.elapsed() > idle && !busy.contains(&l.package)).map(|l| l.package.clone()).collect();
+        if stale.is_empty() {
+            continue;
+        }
+        let (gone, kept): (Vec<Loaded>, Vec<Loaded>) = std::mem::take(&mut *slots).into_iter().partition(|l| stale.contains(&l.package));
+        *slots = kept;
+        drop(slots);
+        for l in gone {
+            app.record("engine_unloaded", json!({"package": l.package, "variant": l.variant, "reason": "idle", "idle_minutes": minutes}));
+            l.server.stop().await;
         }
     }
 }
@@ -1022,6 +1072,7 @@ async fn main() {
         image_progress: Mutex::new(None),
     });
     tokio::spawn(cloud::sync_loop(app.clone()));
+    tokio::spawn(idle_loop(app.clone()));
 
     // Pick up downloads that were interrupted by a quit, a crash or a power cut.
     for (package_id, variant_id) in wanted_read(&app) {
