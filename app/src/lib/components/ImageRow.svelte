@@ -79,7 +79,7 @@
 				<span class="sep">{job.width}×{job.height}</span>
 				<span class="sep">{job.steps} steps</span>
 				{#if job.state === 'waiting'}
-					<span class="sep live" aria-live="polite"><span class="dot"></span>{job.switching ? 'switching model' : 'generating'} {elapsed(waited)}</span>
+					<span class="sep live" aria-live="polite"><span class="dot"></span>{job.step != null && job.totalSteps ? `step ${Math.min(job.step + 1, job.totalSteps)}/${job.totalSteps}` : job.switching ? 'switching model' : 'generating'} {elapsed(waited)}</span>
 				{:else if job.state === 'done' && job.seconds !== undefined}
 					<span class="sep"><b>{seconds(job.seconds)}</b></span>
 				{:else if job.state === 'stopped'}
@@ -96,7 +96,7 @@
 				{#if flags.versionNames}<span class="sep">{shape}</span>{/if}
 				{#if job.via === 'tool' && job.askedBy}<span class="sep">asked for by {job.askedBy}</span>{/if}
 				{#if job.state === 'waiting'}
-					<span class="sep live num" aria-live="polite"><span class="dot"></span>{job.switching ? 'loading the picture model' : 'drawing'} {elapsed(waited)}</span>
+					<span class="sep live num" aria-live="polite"><span class="dot"></span>{job.step != null && job.totalSteps ? `drawing, step ${Math.min(job.step + 1, job.totalSteps)} of ${job.totalSteps}` : job.switching ? 'loading the picture model' : 'drawing'} {elapsed(waited)}</span>
 				{:else if job.state === 'done' && job.seconds !== undefined}
 					<span class="sep num">{Math.round(job.seconds)} s</span>
 				{:else if job.state === 'stopped'}
@@ -122,7 +122,7 @@
 	{#if job.state === 'failed'}
 		<ErrorLine error={job.error} lead="The picture was not made." where="picture" onretry={app.imagePackage && !chat.busy ? () => chat.regenerate(job) : undefined} />
 	{:else if job.state === 'waiting'}
-		<div class="frame working">
+		<div class="frame working" style:--share={job.step != null && job.totalSteps ? job.step / job.totalSteps : 0}>
 			<p class="note">
 				{#if job.switching}{flags.techDetails ? `The model in memory is unloaded and ${job.packageName} is loaded first. Tens of seconds on an idle machine.` : `${job.packageName} is moved into memory first. That takes a few seconds; drawing takes tens of seconds.`}{:else}{flags.techDetails ? `${job.packageName} is in memory and working.` : `${job.packageName} is drawing. This takes tens of seconds.`}{/if}
 				{#if waited > 90} Still working; it takes longer while the machine is busy.{/if}
@@ -286,6 +286,14 @@
 		place-items: end start;
 		background-image: linear-gradient(to bottom, var(--line-soft) 1px, transparent 1px);
 		background-size: 100% 8px;
+	}
+
+	.frame.working::before {
+		content: '';
+		position: absolute;
+		inset: auto 0 0 0;
+		height: 3px;
+		background: linear-gradient(to right, var(--accent) calc(var(--share) * 100%), transparent 0);
 	}
 
 	.frame.working::after {

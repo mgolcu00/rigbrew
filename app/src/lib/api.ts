@@ -239,6 +239,10 @@ export interface ImageResponse {
 export const generateImage = async (body: ImageRequest, signal: AbortSignal) =>
 	(await send('POST', '/v1/images/generations', body, signal)).json() as Promise<ImageResponse>;
 
+/** Stage and steps of the picture being made, or null (also null from an older service). */
+export const imageProgress = async () =>
+	(await optional<{ progress: { stage: string; completed: number | null; total: number | null; elapsed_ms: number } | null }>('GET', '/v1/images/progress'))?.progress ?? null;
+
 /** A saved picture. It needs the token, so it is fetched and shown through an object URL. */
 export const imageFile = async (id: string) => (await send('GET', `/v1/images/files/${enc(id)}.png`)).blob();
 /** Removes a saved picture. A picture that is already gone is not an error. */

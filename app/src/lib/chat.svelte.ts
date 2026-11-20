@@ -89,6 +89,9 @@ export interface ImageJob {
 	/** Generation time, as the service measured it. */
 	seconds?: number;
 	variant?: string;
+	/** While waiting: steps done and how many, as the engine reports them. */
+	step?: number | null;
+	totalSteps?: number | null;
 	/** The picture itself, in memory only for this session; never saved with the chat. */
 	base64?: string;
 	/** The PNG the service saved (`/v1/images/files/<id>.png`): what a saved chat keeps. */
@@ -971,6 +974,16 @@ class ChatState {
 			this.#followSwap(job, signal);
 		}
 		app.track('image_requested', { package: pkg.id, via: job.via, width, height, steps: job.steps });
+		const ticker = setInterval(async () => {
+			const p = await api.imageProgress().catch(() => null);
+			if (job.state !== 'waiting' || !p) return;
+			if (p.stage === 'sampling') {
+				job.step = p.completed;
+				job.totalSteps = p.total;
+			} else if (p.stage === 'vae_decode' || p.stage === 'encoding') {
+				job.step = job.totalSteps ?? job.steps;
+			}
+		}, 1000);
 		try {
 			const answer = await api.generateImage({ model: pkg.id, prompt: job.prompt, size: `${width}x${height}`, steps: job.steps, seed: job.seed }, signal);
 			const base64 = answer.data?.[0]?.b64_json;
@@ -1007,6 +1020,8 @@ class ChatState {
 			job.waited = (Date.now() - job.startedAt) / 1000;
 			// The swap may or may not have happened: nothing is known to be loaded.
 			this.engine = null;
+		} finally {
+			clearInterval(ticker);
 		}
 		return job;
 	}

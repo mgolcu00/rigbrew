@@ -31,6 +31,7 @@
 //!   POST   /v1/chat/completions           OpenAI-compatible; "model" is a package id
 //!   POST   /v1/images/generations         OpenAI-compatible: {"model", "prompt", "size": "1024x1024", "steps", "seed"};
 //!                                         the answer also carries "image": {id, path, bytes} for the saved file
+//!   GET    /v1/images/progress            stage and steps of the picture being made, or null
 //!   POST   /v1/audio/speech               OpenAI-compatible: {"model", "input", "voice", "speed"}; answers with a WAV
 //!   GET    /v1/audio/files/{id}.wav       a saved reading; DELETE removes it
 //!   POST   /v1/videos/generations         {"model", "prompt", "size", "frames", "steps", "seed"}: a clip, made in the background
@@ -126,6 +127,8 @@ struct App {
     voice: tokio::sync::Mutex<()>,
     /// Video clips of this run, by job id.
     videos: Mutex<HashMap<String, video::VideoJob>>,
+    /// Where the picture being made is: stage and steps, for the app's card.
+    image_progress: Mutex<Option<rigbrew_core::engine::VideoProgress>>,
 }
 
 type Shared = Arc<App>;
@@ -793,7 +796,7 @@ async fn image(State(app): State<Shared>, Json(body): Json<ImageBody>) -> Respon
     };
     app.record("prompt", json!({"package": package.id, "variant": variant, "modality": "image", "prompt": body.prompt, "width": width, "height": height, "steps": steps}));
     let req = ImageRequest { prompt: body.prompt, width, height, steps, seed: body.seed.unwrap_or(-1) };
-    match server.generate(&req).await {
+    match make_image(&app, &server, &req).await {
         Ok((b64, seconds)) => {
             let saved = library::save_image(&app, &b64);
             app.record("image_generated", json!({"package": package.id, "variant": variant, "seconds": seconds, "width": width, "height": height, "steps": steps, "image_id": saved.as_ref().map(|s| s["id"].clone())}));
@@ -804,6 +807,54 @@ async fn image(State(app): State<Shared>, Json(body): Json<ImageBody>) -> Respon
             fail(StatusCode::BAD_GATEWAY, e.to_string())
         }
     }
+}
+
+/// Cancels the engine's job if the request that started it goes away (the app pressed Stop).
+struct CancelOnDrop {
+    server: Arc<SdServer>,
+    job: Option<String>,
+    app: Shared,
+}
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        *self.app.image_progress.lock().unwrap() = None;
+        if let Some(job) = self.job.take() {
+            let server = self.server.clone();
+            tokio::spawn(async move { server.cancel_job(&job).await });
+        }
+    }
+}
+
+/// One picture through the engine's job queue: progress is published for the app, and a request
+/// that is dropped half-way (Stop) stops the engine too.
+async fn make_image(app: &Shared, server: &Arc<SdServer>, req: &ImageRequest) -> Result<(String, f32), String> {
+    use rigbrew_core::engine::Job;
+    let started = std::time::Instant::now();
+    let id = server.submit_image(req).await.map_err(|e| e.to_string())?;
+    let mut guard = CancelOnDrop { server: server.clone(), job: Some(id.clone()), app: app.clone() };
+    loop {
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        match server.job(&id).await.map_err(|e| e.to_string())? {
+            Job::Running(p) => *app.image_progress.lock().unwrap() = Some(p),
+            Job::Done { b64, .. } => {
+                guard.job = None;
+                return Ok((b64, started.elapsed().as_secs_f32()));
+            }
+            Job::Failed(why) => {
+                guard.job = None;
+                return Err(why);
+            }
+            Job::Cancelled => {
+                guard.job = None;
+                return Err("the picture was stopped".into());
+            }
+        }
+    }
+}
+
+async fn image_progress(State(app): State<Shared>) -> Json<Value> {
+    Json(json!({"progress": *app.image_progress.lock().unwrap()}))
 }
 
 /// Loads the manifest from a file (`<file>.minisig` next to it) or from a URL (`<url>.minisig`).
@@ -919,6 +970,7 @@ async fn main() {
         telemetry_off: cloud::telemetry_off(),
         voice: tokio::sync::Mutex::new(()),
         videos: Mutex::new(HashMap::new()),
+        image_progress: Mutex::new(None),
     });
     tokio::spawn(cloud::sync_loop(app.clone()));
 
@@ -947,6 +999,7 @@ async fn main() {
         .route("/v1/events/pending", get(events_pending))
         .route("/v1/chat/completions", post(chat))
         .route("/v1/images/generations", post(image))
+        .route("/v1/images/progress", get(image_progress))
         .route("/v1/session", axum::routing::put(cloud::session_put).delete(cloud::session_delete))
         .route("/v1/account", get(cloud::account))
         .route("/v1/usage", get(cloud::usage))

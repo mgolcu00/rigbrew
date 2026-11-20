@@ -232,9 +232,9 @@ pub struct VideoProgress {
 }
 
 #[derive(Debug)]
-pub enum VideoJob {
+pub enum Job {
     Running(VideoProgress),
-    Done { bytes: Vec<u8>, mime: String, progress: VideoProgress },
+    Done { b64: String, mime: String, progress: VideoProgress },
     Failed(String),
     Cancelled,
 }
@@ -414,7 +414,31 @@ impl SdServer {
         }
     }
 
-    /// Starts a video job in the engine's queue and returns its id. Poll it with [`SdServer::video_job`].
+    /// Starts an image job in the engine's queue and returns its id. Poll it with [`SdServer::job`];
+    /// unlike [`SdServer::generate`] it reports its steps and can be cancelled.
+    pub async fn submit_image(&self, req: &ImageRequest) -> Result<String, EngineError> {
+        let body = json!({
+            "prompt": req.prompt,
+            "width": req.width,
+            "height": req.height,
+            "seed": req.seed,
+            "batch_count": 1,
+            "sample_params": {"sample_steps": req.steps, "guidance": {"txt_cfg": 1.0}},
+            "output_format": "png",
+        });
+        self.submit("img_gen", &body).await
+    }
+
+    async fn submit(&self, mode: &str, body: &serde_json::Value) -> Result<String, EngineError> {
+        let resp = self.client.post(format!("http://127.0.0.1:{}/sdcpp/v1/{mode}", self.port)).json(body).send().await?;
+        if !resp.status().is_success() {
+            return Err(EngineError::Api { status: resp.status().as_u16(), body: resp.text().await.unwrap_or_default() });
+        }
+        let v: serde_json::Value = resp.json().await?;
+        v["id"].as_str().map(str::to_string).ok_or(EngineError::Api { status: 202, body: "the engine returned no job id".into() })
+    }
+
+    /// Starts a video job in the engine's queue and returns its id. Poll it with [`SdServer::job`].
     pub async fn submit_video(&self, req: &VideoRequest) -> Result<String, EngineError> {
         let body = json!({
             "prompt": req.prompt,
@@ -433,16 +457,11 @@ impl SdServer {
             "vae_tiling_params": {"enabled": req.tiling},
             "output_format": "webm",
         });
-        let resp = self.client.post(format!("http://127.0.0.1:{}/sdcpp/v1/vid_gen", self.port)).json(&body).send().await?;
-        if !resp.status().is_success() {
-            return Err(EngineError::Api { status: resp.status().as_u16(), body: resp.text().await.unwrap_or_default() });
-        }
-        let v: serde_json::Value = resp.json().await?;
-        v["id"].as_str().map(str::to_string).ok_or(EngineError::Api { status: 202, body: "the engine returned no job id".into() })
+        self.submit("vid_gen", &body).await
     }
 
-    /// Where a video job is.
-    pub async fn video_job(&self, id: &str) -> Result<VideoJob, EngineError> {
+    /// Where an image or video job is. A finished one carries its result, base64-encoded.
+    pub async fn job(&self, id: &str) -> Result<Job, EngineError> {
         let resp = self.client.get(format!("http://127.0.0.1:{}/sdcpp/v1/jobs/{id}", self.port)).send().await?;
         if !resp.status().is_success() {
             return Err(EngineError::Api { status: resp.status().as_u16(), body: resp.text().await.unwrap_or_default() });
@@ -459,20 +478,23 @@ impl SdServer {
         Ok(match v["status"].as_str().unwrap_or("") {
             "completed" => {
                 let r = &v["result"];
-                let b64 = r["b64_json"].as_str().unwrap_or("");
-                use base64::Engine as _;
-                let bytes = base64::engine::general_purpose::STANDARD
-                    .decode(b64)
-                    .map_err(|e| EngineError::Api { status: 200, body: format!("the engine returned an unreadable video: {e}") })?;
-                VideoJob::Done { bytes, mime: r["mime_type"].as_str().unwrap_or("video/webm").to_string(), progress }
+                // A video job has one media file; an image job a list of images.
+                let (b64, mime) = match r["b64_json"].as_str() {
+                    Some(b) => (b, r["mime_type"].as_str().unwrap_or("video/webm")),
+                    None => (r["images"][0]["b64_json"].as_str().unwrap_or(""), "image/png"),
+                };
+                if b64.is_empty() {
+                    return Err(EngineError::Api { status: 200, body: "the engine finished without a result".into() });
+                }
+                Job::Done { b64: b64.to_string(), mime: mime.to_string(), progress }
             }
-            "failed" => VideoJob::Failed(v["error"]["message"].as_str().or(v["error"].as_str()).unwrap_or("the engine failed").to_string()),
-            "cancelled" => VideoJob::Cancelled,
-            _ => VideoJob::Running(progress),
+            "failed" => Job::Failed(v["error"]["message"].as_str().or(v["error"].as_str()).unwrap_or("the engine failed").to_string()),
+            "cancelled" => Job::Cancelled,
+            _ => Job::Running(progress),
         })
     }
 
-    /// Asks the engine to stop a video job; it stops at the next step.
+    /// Asks the engine to stop a job; it stops at the next step.
     pub async fn cancel_job(&self, id: &str) {
         self.client.post(format!("http://127.0.0.1:{}/sdcpp/v1/jobs/{id}/cancel", self.port)).send().await.ok();
     }

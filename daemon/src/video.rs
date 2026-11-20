@@ -17,7 +17,8 @@ use axum::extract::{Path, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use rigbrew_core::engine::{VideoJob as EngineJob, VideoRequest};
+use base64::Engine as _;
+use rigbrew_core::engine::{Job as EngineJob, VideoRequest};
 use rigbrew_core::manifest::Modality;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -199,14 +200,18 @@ async fn run(app: Shared, id: String, package: rigbrew_core::manifest::Package, 
             server.cancel_job(&engine_job).await;
             asked_to_stop = true;
         }
-        match server.video_job(&engine_job).await {
+        match server.job(&engine_job).await {
             Ok(EngineJob::Running(p)) => update(&app, &id, |j| {
                 j.stage = p.stage;
                 j.step = p.completed;
                 j.steps = p.total;
                 j.elapsed_ms = started.elapsed().as_millis() as u64;
             }),
-            Ok(EngineJob::Done { bytes, mime, .. }) => {
+            Ok(EngineJob::Done { b64, mime, .. }) => {
+                let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(b64) else {
+                    finish("failed", Some("the engine returned an unreadable clip".into()));
+                    return;
+                };
                 let seconds = started.elapsed().as_secs_f32();
                 let saved = save(&app, &bytes, &mime);
                 app.record(
