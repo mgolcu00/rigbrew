@@ -1,0 +1,37 @@
+name: Bug
+description: Something does not work as it should.
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, what you saw instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: "1. Open Models\n2. Install Pictures\n3. …"
+  - type: input
+    id: version
+    attributes:
+      label: Rigbrew version
+      description: Settings → Updates.
+      placeholder: 0.1.0
+    validations:
+      required: true
+  - type: textarea
+    id: machine
+    attributes:
+      label: Your machine
+      description: Rigbrew → Your Mac (class, processor, memory, graphics, system).
+      placeholder: "Class: …\nProcessor: …\nMemory: …\nGraphics: …\nSystem: macOS …"
+    validations:
+      required: true
+  - type: textarea
+    id: details
+    attributes:
+      label: Error details
+      description: In Pro view, errors have a Details line. Paste it here. Do not paste private text from your chats.

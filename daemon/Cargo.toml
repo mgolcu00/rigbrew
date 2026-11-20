@@ -1,0 +1,23 @@
+[package]
+name = "rigbrewd"
+description = "Rigbrew local service: the API the app talks to"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+rigbrew-core = { path = "../core" }
+serde.workspace = true
+serde_json.workspace = true
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time"] }
+reqwest = { version = "0.13", features = ["stream", "json"] }
+uuid = { version = "1", features = ["v4"] }
+base64 = "0.22"
+tokio-stream = "0.1"
+futures-util = "0.3"
+tower-http = { version = "0.6", features = ["cors"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

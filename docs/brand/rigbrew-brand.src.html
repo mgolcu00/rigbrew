@@ -1,0 +1,281 @@
+<title>Rigbrew Brand</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Martian+Mono:wght@300..700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&family=Instrument+Sans:wght@400;500;600&display=swap">
+<style>
+@font-face { font-family: "Departure Mono"; src: url(data:font/woff2;base64,__DEPARTURE__) format("woff2"); font-display: swap }
+@font-face { font-family: "Commit Mono"; src: url(data:font/woff2;base64,__COMMIT__) format("woff2"); font-weight: 200 700; font-display: swap }
+
+/* Layout: a final spec sheet. A sticky control bar switches mark, type system and theme for the whole sheet;
+   every section also shows light and dark side by side so nothing depends on the controls. */
+:root {
+  --board: #E6E9EC; --panel: #F7F8F9; --ink: #0D1114; --muted: #4F5962; --line: #C6CDD3;
+  --accent: #0C55A0; --accent-soft: #CDDFF0; --fit: #17694A; --fit-soft: #CFE6DB;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --board: #0C0F12; --panel: #14181C; --ink: #EEF2F5; --muted: #93A0AA; --line: #272E35;
+  --accent: #57B0F8; --accent-soft: #11283D; --fit: #5FC79A; --fit-soft: #12302A; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --board: #0C0F12; --panel: #14181C; --ink: #EEF2F5; --muted: #93A0AA; --line: #272E35;
+  --accent: #57B0F8; --accent-soft: #11283D; --fit: #5FC79A; --fit-soft: #12302A; color-scheme: dark }
+/* Fixed-theme scopes: used by the theme control and by the side-by-side light/dark specimens. */
+.light { --board: #E6E9EC; --panel: #F7F8F9; --ink: #0D1114; --muted: #4F5962; --line: #C6CDD3;
+  --accent: #0C55A0; --accent-soft: #CDDFF0; --fit: #17694A; --fit-soft: #CFE6DB; color-scheme: light }
+.dark { --board: #0C0F12; --panel: #14181C; --ink: #EEF2F5; --muted: #93A0AA; --line: #272E35;
+  --accent: #57B0F8; --accent-soft: #11283D; --fit: #5FC79A; --fit-soft: #12302A; color-scheme: dark }
+
+/* Type systems. --d display, --l labels and readouts, --t text, --n numbers and code. */
+.page, .page[data-type="blend"] { --d: "Martian Mono", ui-monospace, monospace; --l: "Departure Mono", ui-monospace, monospace;
+  --t: "Instrument Sans", -apple-system, "Segoe UI Variable", sans-serif; --n: "Commit Mono", ui-monospace, monospace;
+  --l-size: 11px; --l-track: .04em; --l-weight: 400 }
+.page[data-type="instrument"] { --l: "Martian Mono", ui-monospace, monospace; --t: "IBM Plex Sans", -apple-system, sans-serif;
+  --n: "IBM Plex Mono", ui-monospace, monospace; --l-size: 10.500px; --l-track: .08em; --l-weight: 500 }
+.page[data-type="readout"] { --d: "Departure Mono", ui-monospace, monospace }
+
+* { box-sizing: border-box }
+body { background: var(--board); color: var(--ink); font: 15px/1.55 -apple-system, "Segoe UI", sans-serif }
+.page { background: var(--board); color: var(--ink); font: 15px/1.55 var(--t); min-height: 100% }
+.wrap { max-width: 1080px; margin: 0 auto; padding-block: 28px 72px;
+  padding-left: max(20px, env(safe-area-inset-left, 0px)); padding-right: max(20px, env(safe-area-inset-right, 0px));
+  display: flex; flex-direction: column; gap: 52px }
+h1, h2, h3, p, ul { margin: 0 }
+.label { font: var(--l-weight) var(--l-size)/1.4 var(--l); letter-spacing: var(--l-track); text-transform: uppercase; color: var(--muted) }
+.note { color: var(--muted); max-width: 62ch }
+.num { font: 12.500px/1.6 var(--n); font-variant-numeric: tabular-nums; color: var(--muted) }
+.num b { color: var(--ink); font-weight: 500 }
+
+.head h1 { font: 600 clamp(26px, 5vw, 40px)/1.1 var(--d); letter-spacing: -.045em; text-wrap: balance; margin-top: 10px }
+.page[data-type="readout"] .head h1 { font-weight: 400; letter-spacing: 0; font-size: clamp(22px, 4.500vw, 33px) }
+.head .lede { font-size: 17px; max-width: 60ch; margin-top: 12px }
+
+.bar { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 5; background: var(--board); border-block: 1px solid var(--line);
+  padding-block: 10px; display: flex; flex-wrap: wrap; gap: 10px 22px }
+.ctl { display: flex; flex-wrap: wrap; gap: 6px; align-items: center }
+.ctl button { font: 500 13px var(--t); padding: 6px 11px; border-radius: 7px; cursor: pointer; border: 1px solid var(--line); background: var(--panel); color: var(--ink) }
+.ctl button[aria-pressed="true"] { background: var(--ink); color: var(--board); border-color: var(--ink) }
+.ctl button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px }
+
+section { display: grid; grid-template-columns: 170px minmax(0, 1fr); gap: 20px 36px }
+section > header { display: flex; flex-direction: column; gap: 8px }
+section > header h2 { font: 600 18px/1.25 var(--d); letter-spacing: -.035em; text-wrap: balance }
+.page[data-type="readout"] section > header h2 { font-weight: 400; letter-spacing: 0; font-size: 16.500px; line-height: 1.35 }
+.spec { display: flex; flex-direction: column; gap: 16px; min-width: 0 }
+@media (max-width: 760px) { section { grid-template-columns: 1fr } }
+
+.grid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)) }
+.plate { background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-radius: 12px; padding: 18px; min-width: 0; display: flex; flex-direction: column; gap: 12px }
+.plate.board { background: var(--board) }
+.plate h3 { font: 600 15px/1.3 var(--t) }
+.pick { font: 400 11px/1 "Departure Mono", ui-monospace, monospace; letter-spacing: .04em; text-transform: uppercase; color: var(--board); background: var(--ink); padding: 4px 6px; border-radius: 4px; vertical-align: 2px }
+
+/* marks */
+.m { --m-ink: var(--ink); --m-acc: var(--accent) }
+.tile { width: 104px; height: 104px; border-radius: 24px; display: grid; place-items: center; flex: none;
+  background: linear-gradient(180deg, #EEF0F2, #C7CCD1); --m-ink: #0D1114; --m-acc: #0C55A0;
+  box-shadow: inset 0 1px 0 #ffffffb0, inset 0 0 0 1px #00000014, 0 8px 22px -10px #00000070 }
+.tile.graphite { background: linear-gradient(180deg, #262B31, #111417); --m-ink: #EEF2F5; --m-acc: #57B0F8; box-shadow: inset 0 1px 0 #ffffff1c, 0 8px 22px -10px #00000090 }
+.tile.s { width: 48px; height: 48px; border-radius: 11px } .tile.xs { width: 24px; height: 24px; border-radius: 6px }
+.marks { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end }
+.lockup { display: flex; align-items: center; gap: 12px; font: 600 28px/1 var(--d); letter-spacing: -.05em }
+.lockup span { font-weight: 300 }
+.page[data-type="readout"] .lockup { font-weight: 400; letter-spacing: 0; font-size: 22px; text-transform: uppercase }
+.page[data-type="readout"] .lockup span { font-weight: 400 }
+.build { color: var(--line) }
+
+/* colour */
+.sw { display: grid; grid-template-columns: 44px minmax(0, 1fr); gap: 10px 12px; align-items: center }
+.sw i { width: 44px; height: 32px; border-radius: 6px; border: 1px solid var(--line) }
+.sw strong { font: 500 13.500px var(--t) }
+
+/* kit */
+.kitrow { display: flex; flex-wrap: wrap; gap: 8px; align-items: center }
+.btn { font: 500 14px var(--t); padding: 7px 13px; border-radius: 8px; border: 1px solid var(--line); background: var(--panel); color: var(--ink) }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--board) }
+.ok { font: 500 13px var(--t); color: var(--fit); background: var(--fit-soft); padding: 4px 9px; border-radius: 999px }
+.gauge { height: 6px; border-radius: 3px; background: var(--line); overflow: hidden }
+.gauge i { display: block; height: 100%; width: 27%; background: var(--accent) }
+
+/* type */
+.t-h { font: 600 26px/1.12 var(--d); letter-spacing: -.045em; text-wrap: balance }
+.page[data-type="readout"] .t-h { font-weight: 400; letter-spacing: 0; font-size: 22px; line-height: 1.25 }
+.t-p { font: 15.500px/1.5 var(--t) }
+.roles { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 6px 16px; align-items: baseline }
+
+/* app */
+.app { display: grid; grid-template-columns: 172px minmax(0, 1fr); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; background: var(--panel); color: var(--ink) }
+.side { background: var(--board); border-right: 1px solid var(--line); padding: 14px 10px; display: flex; flex-direction: column; gap: 3px }
+.side .lockup { font-size: 14px; gap: 7px; padding: 0 6px 12px }
+.page[data-type="readout"] .side .lockup { font-size: 11px }
+.nav { padding: 6px 9px; border-radius: 7px; font: 14px var(--t); color: var(--muted) }
+.nav.on { background: var(--accent-soft); color: var(--ink) }
+.side .rig { margin-top: auto; padding: 10px 6px 0; border-top: 1px solid var(--line); display: flex; flex-direction: column; gap: 6px }
+.main { padding: 16px 18px; display: flex; flex-direction: column; gap: 12px; min-width: 0; font: 14.500px/1.5 var(--t) }
+.msg { align-self: flex-end; background: var(--accent-soft); padding: 8px 12px; border-radius: 12px 12px 3px 12px; max-width: 88% }
+.tool { border: 1px solid var(--line); border-radius: 10px; padding: 10px; display: flex; gap: 11px; align-items: center; background: var(--board) }
+.tool .thumb { width: 52px; height: 52px; border-radius: 6px; flex: none; background: repeating-linear-gradient(135deg, var(--line) 0 6px, var(--panel) 6px 12px) }
+.tool div { display: flex; flex-direction: column; gap: 3px; min-width: 0 }
+@media (max-width: 520px) { .app { grid-template-columns: 1fr } .side { border-right: 0; border-bottom: 1px solid var(--line) } .side .rig { display: none } }
+</style>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+  <!-- Bay: an open frame (the machine) and a module that came in through the opening and is seated in the corner. -->
+  <symbol id="m-bay" viewBox="0 0 64 64">
+    <path d="M37 12H23A11 11 0 0 0 12 23v18a11 11 0 0 0 11 11h18a11 11 0 0 0 11-11V27" fill="none" stroke="var(--m-ink)" stroke-width="6"/>
+    <path d="M24 22h12l8 8v11a3 3 0 0 1-3 3H24a3 3 0 0 1-3-3V25a3 3 0 0 1 3-3z" fill="var(--m-acc)"/>
+  </symbol>
+  <!-- Seated: a bracket (the machine) with a module seated in it. -->
+  <symbol id="m-seated" viewBox="0 0 64 64">
+    <path d="M11 10h12v31h30v12H11z" fill="var(--m-ink)"/>
+    <path d="M32 10h13l8 8v14a3 3 0 0 1-3 3H32a3 3 0 0 1-3-3V13a3 3 0 0 1 3-3z" fill="var(--m-acc)"/>
+  </symbol>
+  <!-- Nested: the frame is what the machine can give, the block is what the model takes. -->
+  <symbol id="m-nested" viewBox="0 0 64 64">
+    <rect x="12" y="12" width="40" height="40" rx="11" fill="none" stroke="var(--m-ink)" stroke-width="6"/>
+    <rect x="21" y="25" width="19" height="18" rx="3" fill="var(--m-acc)"/>
+  </symbol>
+  <!-- Construction view of Bay on an 8-unit grid. -->
+  <symbol id="m-grid" viewBox="0 0 64 64">
+    <g stroke="var(--build)" stroke-width=".500"><path d="M4 12h56M4 22h56M4 32h56M4 44h56M4 52h56M12 4v56M21 4v56M32 4v56M44 4v56M52 4v56"/></g>
+    <path d="M37 12H23A11 11 0 0 0 12 23v18a11 11 0 0 0 11 11h18a11 11 0 0 0 11-11V27" fill="none" stroke="var(--m-ink)" stroke-width="6" opacity=".850"/>
+    <path d="M24 22h12l8 8v11a3 3 0 0 1-3 3H24a3 3 0 0 1-3-3V25a3 3 0 0 1 3-3z" fill="var(--m-acc)" opacity=".850"/>
+    <path d="M36 22l8 8" stroke="var(--m-ink)" stroke-width=".800" stroke-dasharray="1.500 1.500"/><path d="M37 12l15 15" stroke="var(--m-ink)" stroke-width=".800" stroke-dasharray="1.500 1.500"/>
+  </symbol>
+</defs></svg>
+
+<div class="page" id="page" data-type="blend">
+<div class="wrap">
+  <div class="head">
+    <p class="label">Rigbrew · marka · v4 final adayı · 20 Kasım 2026</p>
+    <h1>Bir modül, bir yuva.</h1>
+    <p class="lede">Seated ile Nested arasında kalmıştın; ikisini birleştiren üçüncü bir işaret çizdim. Mavi daha doygun, koyu tema her bölümde açık temayla yan yana. Aşağıdaki düğmeler bütün sayfayı değiştirir.</p>
+  </div>
+
+  <div class="bar">
+    <div class="ctl" role="group" aria-label="İşaret"><span class="label">İşaret</span>
+      <button type="button" id="mark-bay" data-set="mark" data-val="bay" aria-pressed="true">Bay</button>
+      <button type="button" id="mark-seated" data-set="mark" data-val="seated" aria-pressed="false">Seated</button>
+      <button type="button" id="mark-nested" data-set="mark" data-val="nested" aria-pressed="false">Nested</button></div>
+    <div class="ctl" role="group" aria-label="Yazı"><span class="label">Yazı</span>
+      <button type="button" id="type-blend" data-set="type" data-val="blend" aria-pressed="true">1 + 2 karışık</button>
+      <button type="button" id="type-instrument" data-set="type" data-val="instrument" aria-pressed="false">1 Instrument</button>
+      <button type="button" id="type-readout" data-set="type" data-val="readout" aria-pressed="false">2 Readout</button></div>
+    <div class="ctl" role="group" aria-label="Tema"><span class="label">Tema</span>
+      <button type="button" id="mode-auto" data-set="mode" data-val="auto" aria-pressed="true">Cihaz</button>
+      <button type="button" id="mode-light" data-set="mode" data-val="light" aria-pressed="false">Açık</button>
+      <button type="button" id="mode-dark" data-set="mode" data-val="dark" aria-pressed="false">Koyu</button></div>
+  </div>
+
+  <section>
+    <header><p class="label">İşaret</p><h2>Üç finalist</h2>
+      <p class="note">Bay önerim: Nested'in çerçevesi ve Seated'in kesik köşeli modülü. Çerçevenin köşesi açık, modül oradan girip yerine oturmuş.</p></header>
+    <div class="spec">
+      <div class="grid">
+        <div class="plate"><h3>Bay <span class="pick">öneri</span></h3>
+          <div class="marks"><div class="tile"><svg width="66" height="66"><use href="#m-bay"/></svg></div><div class="tile graphite"><svg width="66" height="66"><use href="#m-bay"/></svg></div><div class="tile s"><svg width="30" height="30"><use href="#m-bay"/></svg></div><div class="tile xs"><svg width="16" height="16"><use href="#m-bay"/></svg></div></div>
+          <p class="note">Açık köşe ve kesik köşe aynı 45° çizgide. Kapalı kare olmadığı için "durdur" ya da "kayıt" simgesiyle karışmıyor.</p></div>
+        <div class="plate"><h3>Seated</h3>
+          <div class="marks"><div class="tile"><svg width="66" height="66"><use href="#m-seated"/></svg></div><div class="tile graphite"><svg width="66" height="66"><use href="#m-seated"/></svg></div><div class="tile s"><svg width="30" height="30"><use href="#m-seated"/></svg></div><div class="tile xs"><svg width="16" height="16"><use href="#m-seated"/></svg></div></div>
+          <p class="note">En sert ve en teknik olan. Karoda köşeli durduğu için uygulama ikonu olarak biraz ağır.</p></div>
+        <div class="plate"><h3>Nested</h3>
+          <div class="marks"><div class="tile"><svg width="66" height="66"><use href="#m-nested"/></svg></div><div class="tile graphite"><svg width="66" height="66"><use href="#m-nested"/></svg></div><div class="tile s"><svg width="30" height="30"><use href="#m-nested"/></svg></div><div class="tile xs"><svg width="16" height="16"><use href="#m-nested"/></svg></div></div>
+          <p class="note">En sakin olan. Riski: kare içinde kare, pek çok "durdur" ve "pencere" simgesine benziyor.</p></div>
+      </div>
+      <div class="grid">
+        <div class="plate m" style="--build:var(--line)"><p class="label">Kurulum</p><svg viewBox="0 0 64 64" style="width:100%;max-width:220px;align-self:center"><use href="#m-grid"/></svg>
+          <p class="note">Çizgi kalınlığı 6, köşe yarıçapı 11, modül ile çerçeve arası 6 birim. Açıklık ve pah aynı açıda.</p></div>
+        <div class="plate light m"><p class="label">Açık zeminde</p><div class="lockup"><svg class="mk" width="40" height="40"><use href="#m-bay"/></svg><div>rig<span>brew</span></div></div>
+          <div class="marks m" style="--m-acc:var(--ink)"><svg class="mk" width="40" height="40"><use href="#m-bay"/></svg><span class="num">tek renk</span></div></div>
+        <div class="plate dark m"><p class="label">Koyu zeminde</p><div class="lockup"><svg class="mk" width="40" height="40"><use href="#m-bay"/></svg><div>rig<span>brew</span></div></div>
+          <div class="marks m" style="--m-acc:var(--ink)"><svg class="mk" width="40" height="40"><use href="#m-bay"/></svg><span class="num">tek renk</span></div></div>
+      </div>
+      <p class="note">Benzerlik taraması yapmadım; seçilen işaret için marka ve logo taraması ayrıca yapılmalı.</p>
+    </div>
+  </section>
+
+  <section>
+    <header><p class="label">Renk</p><h2>Alüminyum ve çelik mavisi</h2>
+      <p class="note">Mavi öncekinden daha doygun. Oranlar WCAG kontrastıdır; metin için 4,5 ve üstü yeterli sayılır.</p></header>
+    <div class="spec"><div class="grid">
+      <div class="plate light"><p class="label">Açık tema</p>
+        <div class="sw"><i style="background:#E6E9EC"></i><div><strong>Aluminium</strong><div class="num">#E6E9EC · zemin</div></div>
+          <i style="background:#F7F8F9"></i><div><strong>Panel</strong><div class="num">#F7F8F9 · yüzey</div></div>
+          <i style="background:#0D1114"></i><div><strong>Ink</strong><div class="num">#0D1114 · zeminde <b>15,6</b></div></div>
+          <i style="background:#4F5962"></i><div><strong>Muted</strong><div class="num">#4F5962 · zeminde <b>5,9</b></div></div>
+          <i style="background:#0C55A0"></i><div><strong>Steel blue</strong><div class="num">#0C55A0 · zeminde <b>__CL__</b></div></div>
+          <i style="background:#17694A"></i><div><strong>Fit</strong><div class="num">#17694A · yalnızca durum</div></div></div>
+        <div class="kitrow"><span class="btn primary">Install</span><span class="btn">All builds</span><span class="ok">Fits this machine</span></div><div class="gauge"><i></i></div></div>
+      <div class="plate dark"><p class="label">Koyu tema</p>
+        <div class="sw"><i style="background:#0C0F12"></i><div><strong>Graphite</strong><div class="num">#0C0F12 · zemin</div></div>
+          <i style="background:#14181C"></i><div><strong>Panel</strong><div class="num">#14181C · yüzey</div></div>
+          <i style="background:#EEF2F5"></i><div><strong>Ink</strong><div class="num">#EEF2F5 · zeminde <b>17,1</b></div></div>
+          <i style="background:#93A0AA"></i><div><strong>Muted</strong><div class="num">#93A0AA · zeminde <b>7,2</b></div></div>
+          <i style="background:#57B0F8"></i><div><strong>Steel blue</strong><div class="num">#57B0F8 · zeminde <b>__CD__</b></div></div>
+          <i style="background:#5FC79A"></i><div><strong>Fit</strong><div class="num">#5FC79A · yalnızca durum</div></div></div>
+        <div class="kitrow"><span class="btn primary">Install</span><span class="btn">All builds</span><span class="ok">Fits this machine</span></div><div class="gauge"><i></i></div></div>
+    </div></div>
+  </section>
+
+  <section>
+    <header><p class="label">Yazı</p><h2>1 ve 2'nin iyi tarafları</h2>
+      <p class="note">Önerim karışık kullanım: her yazı tipi tek bir işte. "Yazı" düğmeleriyle üç hâli de bütün sayfada görebilirsin.</p></header>
+    <div class="spec"><div class="grid">
+      <div class="plate"><p class="label">Recommended build</p><p class="t-h">Fits this machine.</p>
+        <p class="t-p">Rigbrew scans this machine and picks the build that fits it. Nothing runs anywhere else.</p>
+        <p class="num">steep-4b · q5 · 3.3 GB<br>KL <b>0.0066</b> · same token <b>96.4%</b> · <b>121.1</b> tok/s</p></div>
+      <div class="plate"><p class="label">Karışık sistemde roller</p>
+        <div class="roles">
+          <span class="num">başlık, ad</span><span style="font:600 17px var(--d);letter-spacing:-.04em">Martian Mono</span>
+          <span class="num">etiket, rozet</span><span style="font:400 11px 'Departure Mono',monospace;letter-spacing:.04em;text-transform:uppercase">Departure Mono</span>
+          <span class="num">metin, düğme</span><span style="font:500 16px 'Instrument Sans',sans-serif">Instrument Sans</span>
+          <span class="num">sayı, kod</span><span style="font:400 14px 'Commit Mono',monospace">Commit Mono 0123456789</span></div>
+        <p class="note">Departure Mono piksel ızgaralıdır; yalnızca 11 pikselde ve katlarında, büyük harfle kullanılır.</p></div>
+    </div></div>
+  </section>
+
+  <section>
+    <header><p class="label">Uygulamada</p><h2>Açık ve koyu, ilk günden</h2>
+      <p class="note">Aynı ekran iki temada. Çizimdir; çizgili kutu görselin yer tutucusu, sayılar bugünkü ölçümlerden.</p></header>
+    <div class="spec"><div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(300px,1fr))">
+      <div class="app light m">
+        <div class="side"><div class="lockup"><svg class="mk" width="20" height="20"><use href="#m-bay"/></svg><div>rig<span>brew</span></div></div>
+          <div class="nav on">Chat</div><div class="nav">Library</div><div class="nav">Rig</div><div class="nav">Privacy</div>
+          <div class="rig"><span class="label">Apple M5 Max</span><span class="num"><b>9.7</b> of 36.0 GB</span><div class="gauge"><i></i></div></div></div>
+        <div class="main"><div class="msg">Draw a ceramic cup, morning light.</div>
+          <div class="tool"><div class="thumb"></div><div><span class="label" style="color:var(--ink)">Crema 6B made this</span><span class="num">768 × 768 · 8 steps · int8</span></div></div>
+          <p>Here it is. Want it wider, or read aloud with Whistle?</p>
+          <span class="num"><b>Steep 4B</b> q5 · <b>94.3</b> tok/s · <b>41</b> tokens</span>
+          <div class="kitrow"><span class="btn primary">Install Pour 5B</span><span class="ok">Fits</span></div></div>
+      </div>
+      <div class="app dark m">
+        <div class="side"><div class="lockup"><svg class="mk" width="20" height="20"><use href="#m-bay"/></svg><div>rig<span>brew</span></div></div>
+          <div class="nav on">Chat</div><div class="nav">Library</div><div class="nav">Rig</div><div class="nav">Privacy</div>
+          <div class="rig"><span class="label">Apple M5 Max</span><span class="num"><b>9.7</b> of 36.0 GB</span><div class="gauge"><i></i></div></div></div>
+        <div class="main"><div class="msg">Draw a ceramic cup, morning light.</div>
+          <div class="tool"><div class="thumb"></div><div><span class="label" style="color:var(--ink)">Crema 6B made this</span><span class="num">768 × 768 · 8 steps · int8</span></div></div>
+          <p>Here it is. Want it wider, or read aloud with Whistle?</p>
+          <span class="num"><b>Steep 4B</b> q5 · <b>94.3</b> tok/s · <b>41</b> tokens</span>
+          <div class="kitrow"><span class="btn primary">Install Pour 5B</span><span class="ok">Fits</span></div></div>
+      </div>
+    </div></div>
+  </section>
+</div>
+</div>
+
+<script>
+(function () {
+  var page = document.getElementById('page');
+  var state = { mark: 'bay', type: 'blend', mode: 'auto' };
+  function apply() {
+    page.setAttribute('data-type', state.type);
+    page.classList.toggle('light', state.mode === 'light');
+    page.classList.toggle('dark', state.mode === 'dark');
+    document.body.style.background = state.mode === 'auto' ? '' : (state.mode === 'dark' ? '#0C0F12' : '#E6E9EC');
+    document.querySelectorAll('svg.mk use').forEach(function (u) { u.setAttribute('href', '#m-' + state.mark); });
+    document.querySelectorAll('.ctl button').forEach(function (b) {
+      b.setAttribute('aria-pressed', state[b.getAttribute('data-set')] === b.getAttribute('data-val') ? 'true' : 'false');
+    });
+  }
+  document.querySelectorAll('.ctl button').forEach(function (b) {
+    b.addEventListener('click', function () { state[b.getAttribute('data-set')] = b.getAttribute('data-val'); apply(); });
+  });
+})();
+</script>
