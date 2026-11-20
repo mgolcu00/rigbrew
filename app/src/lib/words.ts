@@ -18,7 +18,7 @@ const roles: Record<string, { role: string; plain: string }> = {
 	chat: { role: 'Chat', plain: 'Answers questions, writes and explains.' },
 	image: { role: 'Pictures', plain: 'Makes a picture from a description.' },
 	video: { role: 'Video', plain: 'Makes short video clips from a description.' },
-	voice: { role: 'Voice', plain: 'Reads text aloud.' },
+	voice: { role: 'Voice', plain: 'Reads answers aloud, in English.' },
 	listen: { role: 'Listening', plain: 'Turns speech into text.' }
 };
 

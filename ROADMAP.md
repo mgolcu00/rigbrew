@@ -8,9 +8,14 @@ Where Rigbrew is going, in order. Dates are not promised; the order is.
 - **Windows.** The same app on Windows 11: NVIDIA (CUDA), AMD and Intel (Vulkan) and CPU engines, GPU detection
   through DXGI.
 
+## Done recently
+
+- **Read aloud.** Whistle reads any answer aloud, in English, on the processor, next to the loaded model.
+- **One-command release build** with the local service inside the app (`pnpm release`).
+
 ## Next
 
-- **Voice and listening in the chat.** Read answers aloud (Whistle), talk instead of typing (Sift).
+- **Listening in the chat.** Talk instead of typing (Sift), and more voices and languages for Whistle.
 - **Video in the chat.** Pour on machines with enough memory, with honest estimates of how long a clip takes.
 - **Two models in memory** on machines that can hold them, so a picture asked for in chat does not unload the chat
   model.

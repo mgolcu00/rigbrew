@@ -31,9 +31,12 @@
 //!   POST   /v1/chat/completions           OpenAI-compatible; "model" is a package id
 //!   POST   /v1/images/generations         OpenAI-compatible: {"model", "prompt", "size": "1024x1024", "steps", "seed"};
 //!                                         the answer also carries "image": {id, path, bytes} for the saved file
+//!   POST   /v1/audio/speech               OpenAI-compatible: {"model", "input", "voice", "speed"}; answers with a WAV
+//!   GET    /v1/audio/files/{id}.wav       a saved reading; DELETE removes it
 
 mod cloud;
 mod library;
+mod speech;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -115,6 +118,8 @@ struct App {
     sync_now: tokio::sync::Notify,
     /// `DO_NOT_TRACK=1` or `RIGBREW_NO_TELEMETRY=1` at start: nothing is uploaded.
     telemetry_off: bool,
+    /// Held while the voice engine reads something aloud.
+    voice: tokio::sync::Mutex<()>,
 }
 
 type Shared = Arc<App>;
@@ -136,7 +141,7 @@ impl App {
 
     fn installed<'a>(&self, package: &'a Package) -> Vec<&'a Variant> {
         let dir = self.packages_dir();
-        package.variants.iter().filter(|v| v.files.iter().all(|f| dir.join(&f.path).is_file())).collect()
+        package.variants.iter().filter(|v| v.files.iter().all(|f| rigbrew_core::bundle::present(&dir, f))).collect()
     }
 
     fn record(&self, kind: &str, payload: Value) {
@@ -189,7 +194,7 @@ fn engine_binary_name(kind: EngineKind) -> Option<&'static str> {
     match kind {
         EngineKind::Llama => Some("llama-server"),
         EngineKind::Sdcpp => Some("sd-server"),
-        EngineKind::Sherpa => None,
+        EngineKind::Sherpa => Some(rigbrew_core::voice::PROGRAM),
     }
 }
 
@@ -410,7 +415,12 @@ async fn package_remove(State(app): State<Shared>, Path(id): Path<String>, Query
             if keep.contains(f.path.as_str()) {
                 continue;
             }
-            if std::fs::remove_file(dir.join(&f.path)).is_ok() {
+            let gone = if rigbrew_core::bundle::is_bundle(f) {
+                rigbrew_core::bundle::remove(&dir, f)
+            } else {
+                std::fs::remove_file(dir.join(&f.path)).is_ok()
+            };
+            if gone {
                 freed += f.size;
             }
         }
@@ -881,6 +891,7 @@ async fn main() {
         sync: Mutex::new(cloud::SyncState::default()),
         sync_now: tokio::sync::Notify::new(),
         telemetry_off: cloud::telemetry_off(),
+        voice: tokio::sync::Mutex::new(()),
     });
     tokio::spawn(cloud::sync_loop(app.clone()));
 
@@ -925,6 +936,8 @@ async fn main() {
         )
         .route("/v1/images/files/{name}", get(library::image_get).delete(library::image_delete))
         .route("/v1/activity/recent", get(library::recent))
+        .route("/v1/audio/speech", post(speech::speech))
+        .route("/v1/audio/files/{name}", get(speech::audio_get).delete(speech::audio_delete))
         .layer(middleware::from_fn_with_state(app.clone(), auth))
         // The app's webview is a different origin. Only the app's own origins may call the API;
         // the bearer token is still required. Preflight requests carry no token and pass here.
@@ -935,7 +948,12 @@ async fn main() {
                         .map(|o| o.parse::<axum::http::HeaderValue>().expect("static origin")),
                 )
                 .allow_methods([axum::http::Method::GET, axum::http::Method::POST, axum::http::Method::PUT, axum::http::Method::DELETE])
-                .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE]),
+                .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE])
+                .expose_headers([
+                    axum::http::HeaderName::from_static("x-rigbrew-audio"),
+                    axum::http::HeaderName::from_static("x-rigbrew-audio-seconds"),
+                    axum::http::HeaderName::from_static("x-rigbrew-seconds"),
+                ]),
         )
         .with_state(app.clone());
 

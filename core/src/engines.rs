@@ -64,26 +64,7 @@ impl std::error::Error for InstallError {}
 /// Unpacks a `.tar.gz` into `dest`, refusing anything that is not a plain file or folder inside it.
 fn unpack(archive: &Path, dest: &Path) -> Result<(), String> {
     let file = std::fs::File::open(archive).map_err(|e| e.to_string())?;
-    let mut tar = tar::Archive::new(flate2::read::GzDecoder::new(file));
-    tar.set_preserve_permissions(false);
-    tar.set_unpack_xattrs(false);
-    std::fs::create_dir_all(dest).map_err(|e| e.to_string())?;
-    for entry in tar.entries().map_err(|e| e.to_string())? {
-        let mut entry = entry.map_err(|e| e.to_string())?;
-        let kind = entry.header().entry_type();
-        if !(kind.is_file() || kind.is_dir()) {
-            return Err(format!("unexpected {kind:?} entry in the archive"));
-        }
-        let path = entry.path().map_err(|e| e.to_string())?.into_owned();
-        if path.is_absolute() || path.components().any(|c| !matches!(c, std::path::Component::Normal(_) | std::path::Component::CurDir)) {
-            return Err(format!("unsafe path {} in the archive", path.display()));
-        }
-        // unpack_in refuses to write outside `dest` as a second line of defence.
-        if !entry.unpack_in(dest).map_err(|e| e.to_string())? {
-            return Err(format!("refused to unpack {}", path.display()));
-        }
-    }
-    Ok(())
+    crate::bundle::unpack_tar(flate2::read::GzDecoder::new(file), dest)
 }
 
 /// Downloads, verifies and unpacks `build` unless it is already installed. Returns its folder.

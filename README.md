@@ -9,7 +9,7 @@
 
 <p align="center">
   <strong>Open models, fitted to your rig.</strong><br>
-  Chat and pictures today, video and voice next, all running on your own computer.
+  Chat, pictures and voice today, video next, all running on your own computer.
 </p>
 
 <p align="center">
@@ -52,8 +52,8 @@ it does not fit after a 9 GB download. Rigbrew does that work once, properly, fo
   that fits, and it says why.
 - **It shows its numbers.** Every version is compared with the original before it ships. You see how close it is
   and how fast it runs, not adjectives.
-- **It is one app.** Chat, pictures, and soon video and voice, in one conversation. Ask for a picture in the chat
-  and the chat model asks the picture model.
+- **It is one app.** Chat, pictures and voice, and soon video, in one conversation. Ask for a picture in the chat
+  and the chat model asks the picture model; press Read aloud and an answer is spoken.
 
 ## A look inside
 
@@ -83,7 +83,7 @@ ready and never switches by itself.
 | **Steep** | Chat, writing, explaining; can call the other families | Steep 4B | Runs |
 | **Crema** | Pictures from a description | Crema 6B | Runs |
 | **Pour** | Short video clips | Pour 5B | Download only, running it comes next |
-| **Whistle** | Reading text aloud | Whistle 82M | Download only, running it comes next |
+| **Whistle** | Reading answers aloud, in English | Whistle 82M | Runs |
 | **Sift** | Speech to text | — | Planned |
 
 Only models under Apache-2.0, MIT or CC-BY-4.0 are packaged. More in [docs/models.md](docs/models.md).

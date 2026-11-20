@@ -390,6 +390,7 @@ mod tests {
             sync: Mutex::new(SyncState::default()),
             sync_now: tokio::sync::Notify::new(),
             telemetry_off: false,
+            voice: tokio::sync::Mutex::new(()),
         };
         (app, dir)
     }

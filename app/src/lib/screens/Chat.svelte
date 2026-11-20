@@ -5,6 +5,7 @@
 	import { ux } from '#lib/experience.svelte.ts';
 	import { guide, type ChecklistId } from '#lib/guide.svelte.ts';
 	import { copyText, openExternal } from '#lib/api.ts';
+	import { reader } from '#lib/voice.svelte.ts';
 	import { ago, budgetOf, count, duration, elapsed, familyOf, installedVariant, minute, seconds, size as bytes, speedOf, tierOf, variantName } from '#lib/format.ts';
 	import { renderMarkdown } from '#lib/markdown.ts';
 	import { machine, mod, nameOf, plainDoes, roleOf, speedAnywhere, speedHere, speedWord, versionLabel } from '#lib/words.ts';
@@ -240,6 +241,13 @@
 		if (!link) return;
 		event.preventDefault();
 		openExternal(link.href);
+	}
+
+	async function readAloud(message: Message) {
+		const voice = app.voicePackage;
+		if (!voice) return;
+		await reader.toggle(message.id, voice.id, message.content);
+		if (reader.error) app.say(`Could not read the answer aloud. ${reader.error}`);
 	}
 
 	let copiedId = $state(0);
@@ -681,6 +689,15 @@
 										</span>
 										{#if message.at && !flags.techDetails}<time class="num">{minute(message.at)}</time>{/if}
 										{#if message.state === 'done' && message.content}
+											{#if app.voicePackage}
+												<button
+													class="mini"
+													class:on={reader.id === message.id}
+													onclick={() => readAloud(message)}
+													title={reader.id === message.id ? 'Stop reading' : `Read this answer aloud with ${app.voicePackage.name}`}
+													>{reader.id === message.id ? (reader.state === 'preparing' ? 'Preparing…' : 'Stop') : 'Read aloud'}</button
+												>
+											{/if}
 											<button class="mini" onclick={() => copyAnswer(message)} title="Copy this answer">{copiedId === message.id ? 'Copied' : 'Copy'}</button>
 										{/if}
 									</p>
@@ -1146,7 +1163,12 @@
 		transition: opacity var(--quick);
 	}
 
+	.mini + .mini {
+		margin-left: 0;
+	}
+
 	.turn:hover .mini,
+	.mini.on,
 	.mini:focus-visible {
 		opacity: 1;
 	}

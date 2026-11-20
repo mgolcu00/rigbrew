@@ -30,6 +30,11 @@ pub enum DownloadError {
         needed_mb: u64,
         free_mb: u64,
     },
+    /// A bundle downloaded and verified but could not be unpacked.
+    Unpack {
+        path: String,
+        why: String,
+    },
 }
 
 impl std::fmt::Display for DownloadError {
@@ -40,6 +45,7 @@ impl std::fmt::Display for DownloadError {
             DownloadError::Status { url, status } => write!(f, "{url} answered HTTP {status}"),
             DownloadError::Corrupt { path, why } => write!(f, "{path} failed verification ({why}); the partial file was removed"),
             DownloadError::NoSpace { needed_mb, free_mb } => write!(f, "not enough disk space: {needed_mb} MB needed, {free_mb} MB free"),
+            DownloadError::Unpack { path, why } => write!(f, "{path} could not be unpacked: {why}"),
         }
     }
 }
@@ -205,6 +211,9 @@ pub async fn pull(
     let _ = package;
     let mut missing = 0u64;
     for f in &variant.files {
+        if crate::bundle::is_bundle(f) && crate::bundle::unpacked(data_dir, f) {
+            continue;
+        }
         let on_disk = fs::metadata(data_dir.join(&f.path)).await.map(|m| m.len()).unwrap_or(0);
         let partial = fs::metadata(format!("{}.part", data_dir.join(&f.path).display())).await.map(|m| m.len()).unwrap_or(0);
         missing += f.size.saturating_sub(on_disk.max(partial));
@@ -216,7 +225,18 @@ pub async fn pull(
     }
     let mut results = Vec::new();
     for f in &variant.files {
+        if crate::bundle::is_bundle(f) && crate::bundle::unpacked(data_dir, f) {
+            results.push((f.path.clone(), Outcome::Present));
+            continue;
+        }
         let outcome = fetch_file(client, &manifest.base_url, f, data_dir, on_progress).await?;
+        if crate::bundle::is_bundle(f) {
+            let (root, file) = (data_dir.to_path_buf(), f.clone());
+            tokio::task::spawn_blocking(move || crate::bundle::unpack(&root, &file))
+                .await
+                .map_err(|e| DownloadError::Unpack { path: f.path.clone(), why: e.to_string() })?
+                .map_err(|why| DownloadError::Unpack { path: f.path.clone(), why })?;
+        }
         results.push((f.path.clone(), outcome));
     }
     Ok(results)

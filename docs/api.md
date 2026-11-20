@@ -30,6 +30,8 @@ Browsers are refused unless the request comes from the app's own origin.
 | `POST /v1/chat/completions` | OpenAI-compatible chat. `model` is a package id such as `steep-4b`. Streaming and tool calls work. |
 | `POST /v1/images/generations` | `{"model": "crema-6b", "prompt", "size": "1024x1024", "steps", "seed"}`. The answer has the PNG as base64 and `image: {id, path, bytes}` for the saved file. |
 | `GET/DELETE /v1/images/files/{id}.png` | A saved picture. |
+| `POST /v1/audio/speech` | OpenAI-compatible: `{"model": "whistle-82m", "input", "voice", "speed"}`. Answers with a WAV; Markdown in `input` is read as plain sentences. English. |
+| `GET/DELETE /v1/audio/files/{id}.wav` | A saved reading (`x-rigbrew-audio` in the answer above says which). |
 | `GET/DELETE /v1/chats`, `GET/PUT/DELETE /v1/chats/{id}` | Saved conversations. `PUT {title, data}`; `data` is the app's own JSON, 8 MB at most. |
 | `GET /v1/usage` | Totals for today, the last 7 days and all time, disk used per package, and what is waiting to be sent. |
 | `GET /v1/activity?days=365`, `GET /v1/activity/recent` | Day-by-day activity and a readable list of recent actions (the profile page). |
@@ -74,9 +76,10 @@ is always refused. A local file or another URL can be passed as the first argume
 `<file>.minisig` next to it (development builds also accept an unsigned file, with a warning).
 
 Every file a package or engine lists carries its size and sha256; downloads are checked byte for byte before they
-are used. Engine programs (llama.cpp's `llama-server`, stable-diffusion.cpp's `sd-server`) are downloaded per
-platform from the same manifest, unpacked into `engines/` (plain files only), and run as child processes bound to
-loopback.
+are used. Engine programs (llama.cpp's `llama-server`, stable-diffusion.cpp's `sd-server`, sherpa-onnx's
+`sherpa-onnx-offline-tts`) are downloaded per platform from the same manifest, unpacked into `engines/` (plain files
+only), and run as child processes; the servers bind to loopback. A package file with the role `bundle` is a folder
+packed as a tar: after it is verified it is unpacked next to itself (plain files only) and the archive is deleted.
 
 ## Environment
 

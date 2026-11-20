@@ -13,7 +13,7 @@ model for an image, and the app shows which model did what.
 | **Steep** | Chat, writing, explaining; can call the other families | Steep 4B | Yes |
 | **Crema** | Pictures from a description | Crema 6B | Yes |
 | **Pour** | Short video clips from a description | Pour 5B | Download now, running it comes later |
-| **Whistle** | Reading text aloud | Whistle 82M | Download now, running it comes later |
+| **Whistle** | Reading answers aloud, in English | Whistle 82M | Yes |
 | **Sift** | Listening: speech to text | — | Planned |
 
 Package ids are `<family>-<size>` (`steep-4b`); files are `<id>-v<version>.<part>.<precision>.<ext>`. People see

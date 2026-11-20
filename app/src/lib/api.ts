@@ -246,6 +246,28 @@ export const deleteImageFile = async (id: string) => {
 	await optional('DELETE', `/v1/images/files/${enc(id)}.png`);
 };
 
+// --- reading aloud ------------------------------------------------------------------------------
+
+export interface Reading {
+	/** The WAV, to play through an object URL (it needs the token, like pictures). */
+	audio: Blob;
+	/** Where the service saved it: `/v1/audio/files/<id>.wav`. */
+	path: string | null;
+	audioSeconds: number;
+	seconds: number;
+}
+
+/** Reads text aloud with an installed voice package. Markdown is cleaned up by the service. */
+export async function speak(model: string, input: string, signal?: AbortSignal): Promise<Reading> {
+	const response = await send('POST', '/v1/audio/speech', { model, input }, signal);
+	return {
+		audio: await response.blob(),
+		path: response.headers.get('x-rigbrew-audio'),
+		audioSeconds: Number(response.headers.get('x-rigbrew-audio-seconds') ?? 0),
+		seconds: Number(response.headers.get('x-rigbrew-seconds') ?? 0)
+	};
+}
+
 // --- saved chats -------------------------------------------------------------------------------
 
 /** One saved chat in the list, newest first. */
