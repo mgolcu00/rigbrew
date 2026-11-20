@@ -12,7 +12,7 @@ model for an image, and the app shows which model did what.
 |---|---|---|---|
 | **Steep** | Chat, writing, explaining; can call the other families | Steep 4B | Yes |
 | **Crema** | Pictures from a description | Crema 6B | Yes |
-| **Pour** | Short video clips from a description | Pour 5B | Download now, running it comes later |
+| **Pour** | Short video clips from a description, in a few minutes | Pour 5B | Yes |
 | **Whistle** | Reading answers aloud, in English | Whistle 82M | Yes |
 | **Sift** | Listening: speech to text | — | Planned |
 
