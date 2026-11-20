@@ -1,0 +1,13 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "build": {
+    "beforeBuildCommand": "sh scripts/bundle-daemon.sh && pnpm build"
+  },
+  "bundle": {
+    "externalBin": ["binaries/rigbrewd"],
+    "category": "Productivity",
+    "shortDescription": "Open models, fitted to your rig.",
+    "copyright": "Rigbrew contributors, Apache-2.0",
+    "macOS": { "minimumSystemVersion": "14.0" }
+  }
+}

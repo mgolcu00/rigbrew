@@ -96,6 +96,19 @@ pnpm check                          # svelte-check
 (cd src-tauri && cargo check && cargo test --lib)   # the tests cover the sign-in callback
 ```
 
+## Release build
+
+```sh
+pnpm release      # rigbrewd (release) inside the app; Rigbrew.app and a .dmg in src-tauri/target/release/bundle
+```
+
+`scripts/bundle-daemon.sh` builds `rigbrewd` and puts it where Tauri expects the sidecar
+(`src-tauri/binaries/rigbrewd-<target>`); `src-tauri/tauri.release.conf.json` adds it to the
+bundle, so `pnpm tauri dev` keeps working without it. The bundle is signed ad hoc: it runs on the
+machine that built it. A download for other Macs needs a Developer ID signature and notarization,
+which come with the beta. Test release builds with `DO_NOT_TRACK=1` so they are not counted as
+installs.
+
 ## Interface
 
 A tool, not a set of cards: 13px text, hairlines, one-row controls, everything on a 4px grid.
@@ -382,6 +395,6 @@ SvelteKit 3 uses in place of `$lib`.
 - After a tool call the chat model is loaded again to finish its turn, so one picture asked
   for in Chat mode costs two engine swaps. Picture mode costs one.
 - "Update" opens the download page; the in-app updater comes with the signed bundle.
-- The production bundle (`pnpm tauri build`) does not include `rigbrewd` yet.
+- The bundle is not signed with a Developer ID yet, so it only runs on the Mac that built it.
 - Windows is untested. On Windows the service is killed on quit rather than asked to stop,
   so its model engine may outlive it.
