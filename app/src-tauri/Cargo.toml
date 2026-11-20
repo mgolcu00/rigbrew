@@ -1,0 +1,32 @@
+[package]
+name = "rigbrew-app"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Rigbrew desktop app"
+
+# Not a member of the repo workspace: the app builds with its own lockfile and target dir.
+[workspace]
+
+[lib]
+name = "rigbrew_app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["macos-private-api"] }
+tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
+base64 = "0.22"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dirs = "6"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[features]
+# Official builds only: needs src/account.rs, which is not in the public source.
+account = []

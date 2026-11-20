@@ -1,0 +1,11 @@
+*.gguf
+*.onnx
+*.part
+*.safetensors
+.DS_Store
+.env
+.env.*
+.venv/
+dist/
+node_modules/
+target/

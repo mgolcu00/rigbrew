@@ -1,0 +1,39 @@
+name: Audit
+
+# Known vulnerabilities in dependencies: on every change to a lock file, and every Monday.
+on:
+  push:
+    branches: [main]
+    paths: ["**/Cargo.lock", "**/Cargo.toml", "app/package.json", "app/pnpm-lock.yaml"]
+  pull_request:
+    paths: ["**/Cargo.lock", "**/Cargo.toml", "app/package.json", "app/pnpm-lock.yaml"]
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    name: Rust crates
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      - run: cargo audit
+      - run: cargo audit
+        working-directory: app/src-tauri
+
+  app:
+    name: App packages
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - run: pnpm audit --prod
+        working-directory: app

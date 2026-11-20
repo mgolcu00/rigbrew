@@ -1,0 +1,17 @@
+/* Rigbrew brand tokens. Source of truth for the app and the site. */
+:root {
+  --rb-board: #E6E9EC; --rb-panel: #F7F8F9; --rb-ink: #0D1114; --rb-muted: #4F5962; --rb-line: #C6CDD3;
+  --rb-accent: #0C55A0; --rb-accent-soft: #CDDFF0; --rb-fit: #17694A; --rb-fit-soft: #CFE6DB;
+  --rb-warn: #8A5A00; --rb-warn-soft: #F1E3C4; --rb-fail: #A3261F; --rb-fail-soft: #F3D5D2;
+  --rb-display: "Martian Mono", ui-monospace, "SF Mono", Menlo, monospace;            /* headings, product and model names */
+  --rb-label: "Departure Mono", ui-monospace, "SF Mono", Menlo, monospace;            /* labels and badges: 11px or multiples, uppercase */
+  --rb-text: "Instrument Sans", -apple-system, "Segoe UI Variable", "Segoe UI", sans-serif;  /* body, buttons, chat */
+  --rb-data: "Commit Mono", ui-monospace, "SF Mono", Menlo, monospace;                /* numbers, ids, code */
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --rb-board: #0C0F12; --rb-panel: #14181C; --rb-ink: #EEF2F5; --rb-muted: #93A0AA; --rb-line: #272E35;
+    --rb-accent: #57B0F8; --rb-accent-soft: #11283D; --rb-fit: #5FC79A; --rb-fit-soft: #12302A;
+    --rb-warn: #E3B454; --rb-warn-soft: #33270E; --rb-fail: #F08A82; --rb-fail-soft: #3A1614;
+  }
+}

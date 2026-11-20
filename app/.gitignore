@@ -1,0 +1,12 @@
+node_modules/
+.svelte-kit/
+build/
+.env
+.env.*
+!.env.example
+src-tauri/target/
+src-tauri/gen/
+
+# The account module lives in the private repository and is linked in for official builds.
+src/account
+src-tauri/src/account.rs

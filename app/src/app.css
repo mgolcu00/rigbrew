@@ -1,0 +1,471 @@
+/* Rigbrew design tokens and base styles.
+   The brand is locked in docs/brand: aluminium neutrals, one accent (steel blue), green only
+   for "fits this machine". The --rb-* values below are a copy of docs/brand/tokens.css and
+   must stay identical to it. Everything else in the app is built from them.
+
+   The interface is a tool: 13px text, 4px grid, hairlines instead of boxes, one row heights
+   of 24 and 28px. The only shape with character is the chamfered module (the Bay mark's
+   model), and it is used only for things that are a model seated in the machine. */
+
+@import './fonts.css';
+
+:root {
+	color-scheme: light;
+
+	--rb-board: #e6e9ec;
+	--rb-panel: #f7f8f9;
+	--rb-ink: #0d1114;
+	--rb-muted: #4f5962;
+	--rb-line: #c6cdd3;
+	--rb-accent: #0c55a0;
+	--rb-accent-soft: #cddff0;
+	--rb-fit: #17694a;
+	--rb-fit-soft: #cfe6db;
+	--rb-warn: #8a5a00;
+	--rb-warn-soft: #f1e3c4;
+	--rb-fail: #a3261f;
+	--rb-fail-soft: #f3d5d2;
+	--rb-display: 'Martian Mono', ui-monospace, 'SF Mono', Menlo, monospace; /* headings, product and model names */
+	--rb-label: 'Departure Mono', ui-monospace, 'SF Mono', Menlo, monospace; /* labels and badges: 11px or multiples, uppercase */
+	--rb-text: 'Instrument Sans', -apple-system, 'Segoe UI Variable', 'Segoe UI', sans-serif; /* body, buttons, chat */
+	--rb-data: 'Commit Mono', ui-monospace, 'SF Mono', Menlo, monospace; /* numbers, ids, code */
+
+	/* Roles. Only mixes of the tokens above; no new colours. */
+	--bg: var(--rb-panel); /* the content ground */
+	--board: var(--rb-board); /* chrome: title bar, bay, wells */
+	--well: color-mix(in srgb, var(--rb-board) 55%, var(--rb-panel)); /* a quiet band inside content */
+	--ink: var(--rb-ink);
+	--muted: var(--rb-muted);
+	/* Quiet text. Mixed so it still reads at 4.5:1 on the panel in both themes (checked). */
+	--faint: color-mix(in srgb, var(--rb-muted) 86%, var(--rb-panel));
+	--line: var(--rb-line);
+	--line-soft: color-mix(in srgb, var(--rb-line) 55%, transparent);
+	--accent: var(--rb-accent);
+	--accent-soft: var(--rb-accent-soft);
+	--on-accent: var(--rb-panel);
+	--fit: var(--rb-fit);
+	--fit-soft: var(--rb-fit-soft);
+	--warn: var(--rb-warn);
+	--warn-soft: var(--rb-warn-soft);
+	--fail: var(--rb-fail);
+	--fail-soft: var(--rb-fail-soft);
+	--hover: color-mix(in srgb, var(--rb-ink) 6%, transparent);
+	--pressed: color-mix(in srgb, var(--rb-ink) 11%, transparent);
+	--shade: color-mix(in srgb, var(--rb-ink) 24%, transparent);
+
+	--r: 4px; /* controls */
+	--r-s: 2px; /* chips, cells */
+
+	/* The chamfered module: top-right corner cut, as in the mark. */
+	--chamfer: polygon(0 0, calc(100% - var(--cut, 6px)) 0, 100% var(--cut, 6px), 100% 100%, 0 100%);
+
+	--ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+	--quick: 0.12s;
+
+	--titlebar: 40px;
+	--bay: 36px;
+	--gutter: 20px;
+}
+
+/* Dark: by the system, or chosen in Settings (data-theme on <html>). */
+@media (prefers-color-scheme: dark) {
+	:root:not([data-theme='light']) {
+		color-scheme: dark;
+		--rb-board: #0c0f12;
+		--rb-panel: #14181c;
+		--rb-ink: #eef2f5;
+		--rb-muted: #93a0aa;
+		--rb-line: #272e35;
+		--rb-accent: #57b0f8;
+		--rb-accent-soft: #11283d;
+		--rb-fit: #5fc79a;
+		--rb-fit-soft: #12302a;
+		--rb-warn: #e3b454;
+		--rb-warn-soft: #33270e;
+		--rb-fail: #f08a82;
+		--rb-fail-soft: #3a1614;
+		--shade: color-mix(in srgb, #000 60%, transparent);
+		--on-accent: var(--rb-board);
+	}
+}
+
+:root[data-theme='dark'] {
+	color-scheme: dark;
+	--rb-board: #0c0f12;
+	--rb-panel: #14181c;
+	--rb-ink: #eef2f5;
+	--rb-muted: #93a0aa;
+	--rb-line: #272e35;
+	--rb-accent: #57b0f8;
+	--rb-accent-soft: #11283d;
+	--rb-fit: #5fc79a;
+	--rb-fit-soft: #12302a;
+	--rb-warn: #e3b454;
+	--rb-warn-soft: #33270e;
+	--rb-fail: #f08a82;
+	--rb-fail-soft: #3a1614;
+	--shade: color-mix(in srgb, #000 60%, transparent);
+	--on-accent: var(--rb-board);
+}
+
+*,
+*::before,
+*::after {
+	box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+	height: 100%;
+}
+
+html {
+	background: var(--bg);
+}
+
+body {
+	margin: 0;
+	overflow: hidden;
+	font: 400 13px/1.45 var(--rb-text);
+	color: var(--ink);
+	-webkit-font-smoothing: antialiased;
+	text-rendering: optimizeLegibility;
+	font-synthesis: none;
+	cursor: default;
+	/* Chrome is not text: only content marked .selectable can be selected. */
+	user-select: none;
+	-webkit-user-select: none;
+	overscroll-behavior: none;
+}
+
+h1,
+h2,
+h3,
+p,
+dl,
+dd,
+ul,
+ol,
+figure {
+	margin: 0;
+}
+
+ul,
+ol {
+	padding: 0;
+	list-style: none;
+}
+
+h1,
+h2,
+h3 {
+	font-family: var(--rb-display);
+	font-weight: 600;
+	letter-spacing: -0.045em;
+	line-height: 1.25;
+}
+
+h1 {
+	font-size: 17px;
+}
+
+h2 {
+	font-size: 13px;
+}
+
+h3 {
+	font-size: 12px;
+}
+
+p {
+	text-wrap: pretty;
+}
+
+button,
+input,
+textarea,
+select {
+	font: inherit;
+	color: inherit;
+}
+
+button {
+	cursor: default;
+	padding: 0;
+	border: 0;
+	background: none;
+	text-align: inherit;
+}
+
+a {
+	color: var(--accent);
+	text-decoration: none;
+	cursor: pointer;
+}
+
+a:hover {
+	text-decoration: underline;
+}
+
+img {
+	-webkit-user-drag: none;
+}
+
+:focus {
+	outline: none;
+}
+
+:focus-visible {
+	outline: 1.5px solid var(--accent);
+	outline-offset: 1px;
+}
+
+::selection {
+	background: color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
+.selectable {
+	user-select: text;
+	-webkit-user-select: text;
+	cursor: auto;
+}
+
+.sr {
+	position: absolute;
+	width: 1px;
+	height: 1px;
+	overflow: hidden;
+	clip-path: inset(50%);
+	white-space: nowrap;
+}
+
+/* Numbers, ids, measurements. */
+.num {
+	font-family: var(--rb-data);
+	font-variant-numeric: tabular-nums;
+	letter-spacing: -0.01em;
+}
+
+/* Labels. Departure Mono is drawn on a pixel grid: 11px, uppercase. */
+.label {
+	font: 400 11px/16px var(--rb-label);
+	letter-spacing: 0.02em;
+	text-transform: uppercase;
+	color: var(--muted);
+	white-space: nowrap;
+}
+
+.label.ink {
+	color: var(--ink);
+}
+
+.muted {
+	color: var(--muted);
+}
+
+/* A tag: a state in one or two words. No fill unless it means something. */
+.tag {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	height: 16px;
+	padding: 0 4px;
+	border-radius: var(--r-s);
+	box-shadow: inset 0 0 0 1px var(--line);
+	font: 400 11px/16px var(--rb-label);
+	letter-spacing: 0.02em;
+	text-transform: uppercase;
+	color: var(--muted);
+	white-space: nowrap;
+}
+
+.tag.fit {
+	box-shadow: none;
+	background: var(--fit-soft);
+	color: var(--fit);
+}
+
+.tag.accent {
+	box-shadow: none;
+	background: var(--accent-soft);
+	color: var(--ink);
+}
+
+.tag.warn {
+	box-shadow: none;
+	background: var(--warn-soft);
+	color: var(--warn);
+}
+
+/* A key cap, where a shortcut helps. */
+kbd,
+.kbd {
+	display: inline-block;
+	min-width: 16px;
+	height: 16px;
+	padding: 0 3px;
+	border-radius: 3px;
+	box-shadow: inset 0 0 0 1px var(--line);
+	font: 400 10.5px/16px var(--rb-data);
+	text-align: center;
+	color: var(--muted);
+	white-space: nowrap;
+}
+
+/* Buttons: one row high, quiet until they are the next step. */
+.btn {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	gap: 5px;
+	height: 24px;
+	padding: 0 8px;
+	border-radius: var(--r);
+	box-shadow: inset 0 0 0 1px var(--line);
+	background: var(--bg);
+	font-size: 12.5px;
+	font-weight: 500;
+	line-height: 1;
+	white-space: nowrap;
+	transition:
+		background-color var(--quick),
+		box-shadow var(--quick),
+		opacity var(--quick);
+}
+
+.btn:hover {
+	background: color-mix(in srgb, var(--bg) 93%, var(--ink));
+	box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--line) 60%, var(--muted));
+}
+
+.btn:active {
+	background: color-mix(in srgb, var(--bg) 88%, var(--ink));
+}
+
+.btn:disabled {
+	opacity: 0.45;
+	pointer-events: none;
+}
+
+.btn.primary {
+	background: var(--accent);
+	box-shadow: none;
+	color: var(--on-accent);
+}
+
+.btn.primary:hover {
+	background: color-mix(in srgb, var(--accent) 88%, var(--ink));
+}
+
+.btn.danger {
+	color: var(--fail);
+}
+
+.btn.large {
+	height: 30px;
+	padding: 0 12px;
+	font-size: 13px;
+}
+
+.btn.quiet {
+	background: transparent;
+	box-shadow: none;
+	color: var(--muted);
+}
+
+.btn.quiet:hover {
+	background: var(--hover);
+	color: var(--ink);
+}
+
+/* A text action inside a line. */
+.link {
+	color: var(--accent);
+	cursor: pointer;
+	border-radius: 2px;
+}
+
+.link:hover {
+	text-decoration: underline;
+}
+
+.link:disabled {
+	opacity: 0.5;
+	pointer-events: none;
+}
+
+/* One-line messages inside content. */
+.problem {
+	color: var(--fail);
+	overflow-wrap: anywhere;
+}
+
+/* Scroll areas */
+.scroll {
+	overflow-y: auto;
+	overflow-x: hidden;
+	overscroll-behavior: contain;
+	scrollbar-width: thin;
+	scrollbar-color: var(--line) transparent;
+}
+
+/* A screen: fills the space between the title bar and the bay. */
+.screen {
+	height: 100%;
+	min-height: 0;
+	display: flex;
+	flex-direction: column;
+}
+
+/* A screen's own header row: what this is, and the few controls that belong to it. */
+.screen-head {
+	flex: none;
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	min-height: 36px;
+	padding: 0 var(--gutter);
+	border-bottom: 1px solid var(--line);
+}
+
+/* A section heading with a hairline that runs to the edge. */
+.rule {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	height: 24px;
+}
+
+.rule::after {
+	content: '';
+	flex: 1;
+	height: 1px;
+	background: var(--line);
+}
+
+@keyframes blink {
+	50% {
+		opacity: 0.25;
+	}
+}
+
+@keyframes appear {
+	from {
+		opacity: 0;
+		transform: translateY(3px);
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	*,
+	*::before,
+	*::after {
+		animation-duration: 0.01ms !important;
+		animation-delay: 0s !important;
+		animation-iteration-count: 1 !important;
+		transition-duration: 0.01ms !important;
+		transition-delay: 0s !important;
+		scroll-behavior: auto !important;
+	}
+}

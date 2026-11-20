@@ -1,0 +1,29 @@
+name: Model request
+description: A model you would like Rigbrew to package.
+labels: [model]
+body:
+  - type: textarea
+    id: use
+    attributes:
+      label: What you want to do with it
+    validations:
+      required: true
+  - type: input
+    id: model
+    attributes:
+      label: Model and link
+    validations:
+      required: true
+  - type: dropdown
+    id: licence
+    attributes:
+      label: Licence
+      description: Only these licences can be packaged.
+      options: [Apache-2.0, MIT, CC-BY-4.0, Other or not sure]
+    validations:
+      required: true
+  - type: input
+    id: machine
+    attributes:
+      label: Your machine
+      placeholder: "e.g. 16 GB Mac, or a PC with an 8 GB graphics card"

@@ -1,0 +1,18 @@
+Rigbrew
+Copyright 2026 Mert Golcu
+
+This product runs, as separate programs, software developed by third parties:
+
+- llama.cpp (MIT), https://github.com/ggml-org/llama.cpp
+- stable-diffusion.cpp (MIT), https://github.com/leejet/stable-diffusion.cpp
+- sherpa-onnx (Apache-2.0), https://github.com/k2-fsa/sherpa-onnx
+
+Fonts shipped with the app, under the SIL Open Font License 1.1:
+
+- Martian Mono, Evil Martians
+- Departure Mono, Helena Zhang
+- Instrument Sans, Instrument
+- Commit Mono, Eigil Nikolajsen
+
+Model packages distributed by Rigbrew are derivatives of third-party open-weight models. Each package carries its own
+LICENSE and NOTICE naming the source model, its authors and the changes made.
