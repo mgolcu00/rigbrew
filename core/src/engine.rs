@@ -201,6 +201,44 @@ impl LlamaServer {
     }
 }
 
+/// One video request (`sd-server`'s `vid_gen`).
+#[derive(Debug, Clone)]
+pub struct VideoRequest {
+    pub prompt: String,
+    pub negative: String,
+    pub width: u32,
+    pub height: u32,
+    /// 4k+1 frames.
+    pub frames: u32,
+    pub fps: u32,
+    pub steps: u32,
+    /// Negative means random.
+    pub seed: i64,
+    pub cfg: f32,
+    pub flow_shift: f32,
+    /// Decode in spatial tiles: less memory.
+    pub tiling: bool,
+}
+
+/// Progress as the engine reports it: a stage (`conditioning`, `sampling`, `vae_decode`, ...)
+/// and, where it counts, steps done of a total.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct VideoProgress {
+    pub stage: String,
+    pub pass: u32,
+    pub completed: Option<u64>,
+    pub total: Option<u64>,
+    pub elapsed_ms: u64,
+}
+
+#[derive(Debug)]
+pub enum VideoJob {
+    Running(VideoProgress),
+    Done { bytes: Vec<u8>, mime: String, progress: VideoProgress },
+    Failed(String),
+    Cancelled,
+}
+
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ChatStats {
     pub prompt_tokens: u64,
@@ -261,7 +299,14 @@ pub struct SdConfig {
     pub dit: PathBuf,
     /// Text encoder.
     pub text_encoder: PathBuf,
-    pub vae: PathBuf,
+    /// How `sd-server` is told about the text encoder: `--llm` for Crema, `--t5xxl` for Pour.
+    pub text_encoder_flag: &'static str,
+    /// The full decoder. A video package decodes with `tae` instead.
+    pub vae: Option<PathBuf>,
+    /// A tiny decoder (TAEHV): seconds instead of many minutes for a video clip.
+    pub tae: Option<PathBuf>,
+    /// More startup flags (`--vae-tiling`, ...).
+    pub extra_args: Vec<String>,
     pub log: PathBuf,
 }
 
@@ -298,15 +343,22 @@ impl SdServer {
         }
         let log = std::fs::File::create(&cfg.log).map_err(EngineError::Spawn)?;
         let log_err = log.try_clone().map_err(EngineError::Spawn)?;
-        let mut child = Command::new(&cfg.binary)
+        let mut command = Command::new(&cfg.binary);
+        command
             .args(["--listen-ip", "127.0.0.1", "--listen-port", &port.to_string()])
             .arg("--diffusion-model")
             .arg(&cfg.dit)
-            .arg("--llm")
-            .arg(&cfg.text_encoder)
-            .arg("--vae")
-            .arg(&cfg.vae)
+            .arg(cfg.text_encoder_flag)
+            .arg(&cfg.text_encoder);
+        if let Some(vae) = &cfg.vae {
+            command.arg("--vae").arg(vae);
+        }
+        if let Some(tae) = &cfg.tae {
+            command.arg("--tae").arg(tae);
+        }
+        let mut child = command
             .args(["--cfg-scale", "1.0"])
+            .args(&cfg.extra_args)
             .stdin(Stdio::null())
             .stdout(Stdio::from(log))
             .stderr(Stdio::from(log_err))
@@ -360,6 +412,69 @@ impl SdServer {
             Some(b64) => Ok((b64.to_string(), started.elapsed().as_secs_f32())),
             None => Err(EngineError::Api { status: 200, body: "the engine returned no image".into() }),
         }
+    }
+
+    /// Starts a video job in the engine's queue and returns its id. Poll it with [`SdServer::video_job`].
+    pub async fn submit_video(&self, req: &VideoRequest) -> Result<String, EngineError> {
+        let body = json!({
+            "prompt": req.prompt,
+            "negative_prompt": req.negative,
+            "width": req.width,
+            "height": req.height,
+            "seed": req.seed,
+            "video_frames": req.frames,
+            "fps": req.fps,
+            "sample_params": {
+                "sample_method": "euler",
+                "sample_steps": req.steps,
+                "flow_shift": req.flow_shift,
+                "guidance": {"txt_cfg": req.cfg},
+            },
+            "vae_tiling_params": {"enabled": req.tiling},
+            "output_format": "webm",
+        });
+        let resp = self.client.post(format!("http://127.0.0.1:{}/sdcpp/v1/vid_gen", self.port)).json(&body).send().await?;
+        if !resp.status().is_success() {
+            return Err(EngineError::Api { status: resp.status().as_u16(), body: resp.text().await.unwrap_or_default() });
+        }
+        let v: serde_json::Value = resp.json().await?;
+        v["id"].as_str().map(str::to_string).ok_or(EngineError::Api { status: 202, body: "the engine returned no job id".into() })
+    }
+
+    /// Where a video job is.
+    pub async fn video_job(&self, id: &str) -> Result<VideoJob, EngineError> {
+        let resp = self.client.get(format!("http://127.0.0.1:{}/sdcpp/v1/jobs/{id}", self.port)).send().await?;
+        if !resp.status().is_success() {
+            return Err(EngineError::Api { status: resp.status().as_u16(), body: resp.text().await.unwrap_or_default() });
+        }
+        let v: serde_json::Value = resp.json().await?;
+        let p = &v["progress"];
+        let progress = VideoProgress {
+            stage: p["stage"].as_str().unwrap_or("").to_string(),
+            pass: p["pass"].as_u64().unwrap_or(0) as u32,
+            completed: p["completed"].as_u64(),
+            total: p["total"].as_u64(),
+            elapsed_ms: p["elapsed_ms"].as_u64().unwrap_or(0),
+        };
+        Ok(match v["status"].as_str().unwrap_or("") {
+            "completed" => {
+                let r = &v["result"];
+                let b64 = r["b64_json"].as_str().unwrap_or("");
+                use base64::Engine as _;
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(b64)
+                    .map_err(|e| EngineError::Api { status: 200, body: format!("the engine returned an unreadable video: {e}") })?;
+                VideoJob::Done { bytes, mime: r["mime_type"].as_str().unwrap_or("video/webm").to_string(), progress }
+            }
+            "failed" => VideoJob::Failed(v["error"]["message"].as_str().or(v["error"].as_str()).unwrap_or("the engine failed").to_string()),
+            "cancelled" => VideoJob::Cancelled,
+            _ => VideoJob::Running(progress),
+        })
+    }
+
+    /// Asks the engine to stop a video job; it stops at the next step.
+    pub async fn cancel_job(&self, id: &str) {
+        self.client.post(format!("http://127.0.0.1:{}/sdcpp/v1/jobs/{id}/cancel", self.port)).send().await.ok();
     }
 
     pub async fn stop(mut self) {

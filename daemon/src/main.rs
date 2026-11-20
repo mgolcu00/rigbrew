@@ -33,10 +33,14 @@
 //!                                         the answer also carries "image": {id, path, bytes} for the saved file
 //!   POST   /v1/audio/speech               OpenAI-compatible: {"model", "input", "voice", "speed"}; answers with a WAV
 //!   GET    /v1/audio/files/{id}.wav       a saved reading; DELETE removes it
+//!   POST   /v1/videos/generations         {"model", "prompt", "size", "frames", "steps", "seed"}: a clip, made in the background
+//!   GET    /v1/videos/jobs[/{id}]         progress of clips; DELETE /v1/videos/jobs/{id} stops one
+//!   GET    /v1/videos/files/{id}.webm     a saved clip; DELETE removes it
 
 mod cloud;
 mod library;
 mod speech;
+mod video;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -120,6 +124,8 @@ struct App {
     telemetry_off: bool,
     /// Held while the voice engine reads something aloud.
     voice: tokio::sync::Mutex<()>,
+    /// Video clips of this run, by job id.
+    videos: Mutex<HashMap<String, video::VideoJob>>,
 }
 
 type Shared = Arc<App>;
@@ -528,6 +534,9 @@ async fn ensure_engine(app: &App, package: &Package) -> Result<(u16, String, Str
             return Ok((server.port(), server.key().to_string(), variant.clone()));
         }
     }
+    if let Some(resp) = video::refuse_busy(app, &package.id) {
+        return Err(Box::new(resp));
+    }
     // One model in memory at a time: unload whatever is there.
     if let Some(old) = slot.take() {
         old.server.stop().await;
@@ -684,6 +693,9 @@ async fn ensure_sd(app: &App, package: &Package) -> Result<(Arc<SdServer>, Strin
             return Ok((server.clone(), variant.clone()));
         }
     }
+    if let Some(resp) = video::refuse_busy(app, &package.id) {
+        return Err(Box::new(resp));
+    }
     if let Some(old) = slot.take() {
         old.server.stop().await;
     }
@@ -692,11 +704,25 @@ async fn ensure_sd(app: &App, package: &Package) -> Result<(Arc<SdServer>, Strin
     };
     let dir = app.packages_dir();
     let file = |role: &str| variant.files.iter().find(|f| f.role == role).map(|f| dir.join(&f.path));
-    let (Some(dit), Some(text_encoder), Some(vae)) = (file("dit"), file("te"), file("vae")) else {
-        return Err(Box::new(fail(StatusCode::INTERNAL_SERVER_ERROR, "image package is missing a part (dit, te or vae)")));
+    let (vae, tae) = (file("vae"), file("tae"));
+    let (Some(dit), Some(text_encoder), true) = (file("dit"), file("te"), vae.is_some() || tae.is_some()) else {
+        return Err(Box::new(fail(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("{} is missing a part (dit, te, and vae or tae)", package.name),
+        )));
     };
     let binary = engine_program(app, EngineKind::Sdcpp).await.map_err(|e| Box::new(fail(StatusCode::SERVICE_UNAVAILABLE, e)))?;
-    let cfg = SdConfig { binary, dit, text_encoder, vae, log: app.root.join("logs").join("sd-server.log") };
+    let video = package.modality == Modality::Video;
+    let cfg = SdConfig {
+        binary,
+        dit,
+        text_encoder,
+        text_encoder_flag: if video { "--t5xxl" } else { "--llm" },
+        vae,
+        tae,
+        extra_args: vec![],
+        log: app.root.join("logs").join("sd-server.log"),
+    };
     let server =
         SdServer::start(&cfg, Duration::from_secs(600)).await.map_err(|e| Box::new(fail(StatusCode::BAD_GATEWAY, e.to_string())))?;
     app.record("engine_started", json!({"package": package.id, "variant": variant.id, "load_seconds": server.load_seconds}));
@@ -892,6 +918,7 @@ async fn main() {
         sync_now: tokio::sync::Notify::new(),
         telemetry_off: cloud::telemetry_off(),
         voice: tokio::sync::Mutex::new(()),
+        videos: Mutex::new(HashMap::new()),
     });
     tokio::spawn(cloud::sync_loop(app.clone()));
 
@@ -938,6 +965,10 @@ async fn main() {
         .route("/v1/activity/recent", get(library::recent))
         .route("/v1/audio/speech", post(speech::speech))
         .route("/v1/audio/files/{name}", get(speech::audio_get).delete(speech::audio_delete))
+        .route("/v1/videos/generations", post(video::generate))
+        .route("/v1/videos/jobs", get(video::jobs))
+        .route("/v1/videos/jobs/{id}", get(video::job).delete(video::cancel))
+        .route("/v1/videos/files/{name}", get(video::file_get).delete(video::file_delete))
         .layer(middleware::from_fn_with_state(app.clone(), auth))
         // The app's webview is a different origin. Only the app's own origins may call the API;
         // the bearer token is still required. Preflight requests carry no token and pass here.
