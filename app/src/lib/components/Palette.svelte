@@ -168,6 +168,8 @@
 				});
 			} else if (build && pkg.modality === 'image') {
 				out.push({ id: `use-${pkg.id}`, group: 'Models', title: `Make a picture with ${nameOf(pkg, flags)}`, detail: facts(build), icon: 'image', run: () => (chat.setMode('image', 'click'), toChat()) });
+			} else if (build && pkg.modality === 'video') {
+				out.push({ id: `use-${pkg.id}`, group: 'Models', title: `Make a clip with ${nameOf(pkg, flags)}`, detail: facts(build), icon: 'video', run: () => (chat.setMode('video', 'click'), toChat()) });
 			} else if (!build && rec.verdict === 'run' && !app.installs[pkg.id]) {
 				out.push({
 					id: `install-${pkg.id}`,

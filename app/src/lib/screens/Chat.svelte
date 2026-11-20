@@ -322,6 +322,7 @@
 			const rec = imageCatalogue.recommendation;
 			out.push({ id: 'picture', title: 'Make a picture', does: `Needs ${nameOf(imageCatalogue, flags)}, a ${bytes(rec.disk_mb)} download. Install it in Models.`, icon: 'image', run: () => app.showModel(imageCatalogue.id) });
 		}
+		if (app.videoPackage) out.push({ id: 'clip', title: 'Make a short video', does: `Describe what moves. ${nameOf(app.videoPackage, flags)} makes a clip in a few minutes.`, icon: 'video', run: () => begin('video', '') });
 		if (current) {
 			out.push({ id: 'write', title: 'Help me write…', does: 'An email, a message, a short text. Say who it is for.', icon: 'compose', run: () => begin('chat', 'Help me write ') });
 			out.push({ id: 'explain', title: 'Explain something simply', does: 'Any topic, in plain words, as short as you like.', icon: 'bolt', run: () => begin('chat', 'Explain simply: ') });

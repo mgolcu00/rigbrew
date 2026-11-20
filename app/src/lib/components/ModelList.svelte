@@ -49,7 +49,7 @@
 			chat.setMode('chat', 'click');
 		} else {
 			chat.newChat();
-			chat.setMode('image', 'click');
+			chat.setMode(pkg.modality === 'video' ? 'video' : pkg.modality === 'image' ? 'image' : 'chat', 'click');
 		}
 		app.go('chat');
 	}
@@ -146,7 +146,7 @@
 			</div>
 			<div class="act main">
 				{#if installed}
-					{#if family.runs}<button class="btn" onclick={() => use(pkg)}><Icon name={pkg.modality === 'image' ? 'image' : 'chat'} size={14} /> {pkg.modality === 'image' ? 'Make a picture' : 'Open a chat'}</button>{/if}
+					{#if family.runs}<button class="btn" onclick={() => use(pkg)}><Icon name={pkg.modality === 'image' ? 'image' : pkg.modality === 'video' ? 'video' : 'chat'} size={14} /> {pkg.modality === 'image' ? 'Make a picture' : pkg.modality === 'video' ? 'Make a clip' : 'Open a chat'}</button>{/if}
 					{#if !app.installs[pkg.id]}<RemoveControl {pkg} variant={flags.otherVersions ? installedVariant(pkg)?.id : undefined} />{/if}
 				{:else if rec.verdict === 'run'}
 					<InstallControl {pkg} primary={family.runs && (pkg.modality === 'chat' || app.chatPackages.length > 0)} quiet />
