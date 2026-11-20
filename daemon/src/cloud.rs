@@ -382,7 +382,7 @@ mod tests {
             jobs: Mutex::new(HashMap::new()),
             tasks: Mutex::new(HashMap::new()),
             wanted_lock: Mutex::new(()),
-            engine: tokio::sync::Mutex::new(None),
+            engine: tokio::sync::Mutex::new(Vec::new()),
             http: reqwest::Client::new(),
             net: reqwest::Client::new(),
             server,

@@ -40,6 +40,12 @@
 	}
 
 	const loaded = $derived(seat(chat.engine?.package, chat.engine?.variant));
+	/** The other model in memory, when a chat model and a picture model fit together. */
+	const others = $derived(
+		loaded ? chat.resident.filter((r) => r.package !== loaded.pkg.id).map((r) => seat(r.package, r.variant)).filter((x): x is Seat => x !== null) : []
+	);
+	const othersRatio = $derived(others.reduce((sum, o) => sum + o.ratio, 0));
+	const othersMb = $derived(others.reduce((sum, o) => sum + o.build.accel_mem_mb, 0));
 	/** A model on its way into memory: nothing is seated yet, or another one is leaving. */
 	const incoming = $derived(chat.work && chat.work.kind !== 'generating' ? seat(chat.work.package) : null);
 	const ghost = $derived(app.preview && !(loaded && loaded.pkg.id === app.preview.package && loaded.build.id === app.preview.variant) ? seat(app.preview.package, app.preview.variant) : null);
@@ -185,8 +191,20 @@
 							{#if inside}<span class="text"><span class="name">{called(loaded)}</span><span class="num">{version(loaded) ? `${version(loaded)} · ` : ''}{size(loaded.build.accel_mem_mb)}</span></span>{/if}
 							{#if generating}<span class="cursor"></span>{/if}
 						</button>
+						{#each others as o (o.pkg.id)}
+							<div
+								class="module other"
+								style:left="{loaded.ratio * 100}%"
+								style:width="{o.ratio * 100}%"
+								title="{called(o)} is in memory too, {size(o.build.accel_mem_mb)}: it is ready without a swap"
+								role="img"
+								aria-label="{called(o)} is in memory too, {size(o.build.accel_mem_mb)}"
+							>
+								{#if fits(o, called(o).length)}<span class="text"><span class="name">{called(o)}</span></span>{/if}
+							</div>
+						{/each}
 						{#if !inside && !ghost}
-							<button class="beside" style:left="{loaded.ratio * 100}%" onclick={() => (open = !open)} tabindex="-1" aria-hidden="true">
+							<button class="beside" style:left="{(loaded.ratio + othersRatio) * 100}%" onclick={() => (open = !open)} tabindex="-1" aria-hidden="true">
 								<span class="name">{called(loaded)}</span><span class="num">{version(loaded) ? `${version(loaded)} · ` : ''}{size(loaded.build.accel_mem_mb)}</span>
 							</button>
 						{/if}
@@ -211,7 +229,7 @@
 					{/if}
 				</Track>
 			</div>
-			<span class="num free" title="Room left for models">{loaded ? gb(Math.max(0, budget.mb - loaded.build.accel_mem_mb)) : gb(budget.mb)} GB free</span>
+			<span class="num free" title="Room left for models">{loaded ? gb(Math.max(0, budget.mb - loaded.build.accel_mem_mb - othersMb)) : gb(budget.mb)} GB free</span>
 			{#if flags.hints}<Hint topic="one-model" />{/if}
 		</div>
 	{:else}
@@ -525,6 +543,12 @@
 	}
 
 	/* Where a build would sit: an outline, nothing loaded. */
+	/* A second model in memory: the same module, quieter, right after the one in use. */
+	.module.other {
+		opacity: 0.55;
+		pointer-events: auto;
+	}
+
 	.module.ghost {
 		z-index: 1;
 		clip-path: none;

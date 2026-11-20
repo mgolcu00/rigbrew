@@ -391,8 +391,8 @@ SvelteKit 3 uses in place of `$lib`.
 
 - Chat, picture, voice and video models run. Voice reads answers aloud in English; a video clip
   takes a few minutes and blocks other models until it is done or stopped.
-- After a tool call the chat model is loaded again to finish its turn, so one picture asked
-  for in Chat mode costs two engine swaps. Picture mode costs one.
+- On machines where a chat model and a picture model do not fit together, one picture asked for in
+  Chat mode costs two engine swaps. Where they fit, both stay in memory and there is no swap.
 - "Update" opens the download page; the in-app updater comes with the signed bundle.
 - The bundle is not signed with a Developer ID yet, so it only runs on the Mac that built it.
 - Windows is untested. On Windows the service is killed on quit rather than asked to stop,

@@ -278,11 +278,40 @@ class ChatState {
 
 	#abort: AbortController | null = null;
 
-	/** Asks the service what is loaded. Called when the app opens. */
+	/** Every model the service has in memory, the one used last at the end. */
+	resident = $state<{ package: string; variant: string }[]>([]);
+
+	/** Whether `id` is in memory now, so using it needs no load or swap. */
+	inMemory(id: string) {
+		return this.engine?.package === id || this.resident.some((r) => r.package === id);
+	}
+
+	/** Whether `pkg` can be loaded next to the model of the other kind that is in memory (chat beside picture). */
+	#fitsBeside(pkg: Package) {
+		const budget = app.system?.accel_budget_mb ?? 0;
+		const need = installedVariant(pkg)?.accel_mem_mb ?? Number.POSITIVE_INFINITY;
+		const chatKind = pkg.modality === 'chat';
+		let used = 0;
+		for (const r of this.resident) {
+			const other = app.packages.find((p) => p.id === r.package);
+			if (!other || (other.modality === 'chat') === chatKind) continue;
+			used += other.variants.find((v) => v.id === r.variant)?.accel_mem_mb ?? 0;
+		}
+		return used + need <= budget;
+	}
+
+	/** Whether using `pkg` takes another model out of memory first. */
+	#swaps(pkg: Package) {
+		return this.engine !== null && !this.inMemory(pkg.id) && !this.#fitsBeside(pkg);
+	}
+
+	/** Asks the service what is loaded. Called when the app opens and after each turn. */
 	async syncEngine() {
 		try {
-			const loaded = await api.engine();
-			if (!this.busy) this.engine = loaded && { package: loaded.package, variant: loaded.variant };
+			const all = await api.engines();
+			this.resident = all.map((e) => ({ package: e.package, variant: e.variant }));
+			const last = all[all.length - 1];
+			if (!this.busy) this.engine = last ? { package: last.package, variant: last.variant } : null;
 		} catch {
 			// An older service without this endpoint: the readout fills in after the first answer.
 		}
@@ -293,6 +322,7 @@ class ChatState {
 		if (this.busy) return;
 		await api.unloadEngine();
 		this.engine = null;
+		this.resident = [];
 	}
 
 	/**
@@ -613,6 +643,7 @@ class ChatState {
 			this.rate = 0;
 			// Every completed turn is saved, stopped and failed ones too.
 			this.saveSoon(conversation);
+			this.syncEngine();
 		}
 	}
 
@@ -683,14 +714,14 @@ class ChatState {
 				role: 'assistant',
 				content: '',
 				state: 'waiting',
-				switching: this.engine !== null && this.engine.package !== pkg.id,
+				switching: this.#swaps(pkg),
 				startedAt: Date.now(),
 				at: Date.now(),
 				modelName: pkg.name,
 				variant: installedVariant(pkg)?.id
 			});
 			const reply = conversation.messages[conversation.messages.length - 1];
-			this.work = { kind: reply.switching ? 'switching' : this.engine ? 'generating' : 'loading', package: pkg.id, since: Date.now() };
+			this.work = { kind: reply.switching ? 'switching' : this.inMemory(pkg.id) ? 'generating' : 'loading', package: pkg.id, since: Date.now() };
 			// The other engine is on its way out; until an answer arrives nothing is known to be loaded.
 			if (reply.switching) {
 				this.engine = null;
@@ -961,13 +992,13 @@ class ChatState {
 				via: ask.via,
 				askedBy: ask.askedBy,
 				state: 'waiting',
-				switching: this.engine?.package !== pkg.id,
+				switching: this.#swaps(pkg),
 				startedAt: Date.now(),
 				callId: ask.callId ?? `call_image_${id}`
 			}
 		});
 		const job = conversation.messages[conversation.messages.length - 1].image!;
-		this.work = { kind: !job.switching ? 'generating' : this.engine ? 'switching' : 'loading', package: pkg.id, since: Date.now() };
+		this.work = { kind: job.switching ? 'switching' : this.inMemory(pkg.id) ? 'generating' : 'loading', package: pkg.id, since: Date.now() };
 		if (job.switching) {
 			if (this.engine) this.#switchTip(pkg);
 			this.engine = null;

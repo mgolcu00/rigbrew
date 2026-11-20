@@ -88,7 +88,40 @@ impl Engine {
 struct Loaded {
     package: String,
     variant: String,
+    /// Memory the variant needs on the GPU, from the manifest.
+    mem_mb: u64,
     server: Engine,
+}
+
+impl Loaded {
+    fn is_chat(&self) -> bool {
+        matches!(self.server, Engine::Llama(_))
+    }
+}
+
+/// Stops the loaded engines `which` picks. A picture or video engine busy with a clip is refused.
+async fn evict(app: &App, slots: &mut Vec<Loaded>, wanted: &str, which: impl Fn(&Loaded) -> bool) -> Result<(), Box<Response>> {
+    if slots.iter().any(|l| which(l) && !l.is_chat()) {
+        if let Some(resp) = video::refuse_busy(app, wanted) {
+            return Err(Box::new(resp));
+        }
+    }
+    let (gone, kept): (Vec<Loaded>, Vec<Loaded>) = std::mem::take(slots).into_iter().partition(|l| which(l));
+    *slots = kept;
+    for l in gone {
+        l.server.stop().await;
+    }
+    Ok(())
+}
+
+/// Makes room for `need_mb` more: a chat model and a picture model stay in memory together when
+/// both fit the budget, which saves two swaps for every picture asked for in a chat.
+async fn make_room(app: &App, slots: &mut Vec<Loaded>, wanted: &str, need_mb: u64) -> Result<(), Box<Response>> {
+    let used: u64 = slots.iter().map(|l| l.mem_mb).sum();
+    if used + need_mb > app.profile.accel_budget_mb {
+        evict(app, slots, wanted, |_| true).await?;
+    }
+    Ok(())
 }
 
 #[derive(Clone, Default, serde::Serialize)]
@@ -113,7 +146,9 @@ struct App {
     jobs: Mutex<HashMap<String, Job>>,
     tasks: Mutex<HashMap<String, tokio::task::AbortHandle>>,
     wanted_lock: Mutex<()>,
-    engine: tokio::sync::Mutex<Option<Loaded>>,
+    /// Models in memory: at most one chat engine and one picture or video engine, both only when
+    /// they fit the memory budget together. The one used last is at the end.
+    engine: tokio::sync::Mutex<Vec<Loaded>>,
     http: reqwest::Client,
     /// Client for the server on the internet (the other one never leaves loopback).
     net: reqwest::Client,
@@ -401,11 +436,9 @@ async fn package_remove(State(app): State<Shared>, Path(id): Path<String>, Query
         return fail(StatusCode::NOT_FOUND, format!("no package {id}"));
     };
     {
-        let mut slot = app.engine.lock().await;
-        if slot.as_ref().is_some_and(|l| l.package == id) {
-            if let Some(loaded) = slot.take() {
-                loaded.server.stop().await;
-            }
+        let mut slots = app.engine.lock().await;
+        if let Err(resp) = evict(&app, &mut slots, &id, |l| l.package == id).await {
+            return *resp;
         }
     }
     let dir = app.packages_dir();
@@ -440,21 +473,25 @@ async fn package_remove(State(app): State<Shared>, Path(id): Path<String>, Query
 }
 
 async fn engine_get(State(app): State<Shared>) -> Json<Value> {
-    let slot = app.engine.lock().await;
-    Json(json!({"loaded": slot.as_ref().map(|l| json!({
-        "package": l.package, "variant": l.variant,
-        "engine": match l.server { Engine::Llama(_) => "llama", Engine::Sd(_) => "sdcpp" },
-    }))}))
+    let slots = app.engine.lock().await;
+    let show = |l: &Loaded| {
+        json!({"package": l.package, "variant": l.variant, "mem_mb": l.mem_mb,
+               "engine": match l.server { Engine::Llama(_) => "llama", Engine::Sd(_) => "sdcpp" }})
+    };
+    // "loaded" is the one used last; "all" lists every model in memory.
+    Json(json!({"loaded": slots.last().map(show), "all": slots.iter().map(show).collect::<Vec<_>>()}))
 }
 
-async fn engine_unload(State(app): State<Shared>) -> Json<Value> {
-    let old = app.engine.lock().await.take();
-    let was = old.as_ref().map(|l| l.package.clone());
-    if let Some(loaded) = old {
-        loaded.server.stop().await;
-        app.record("engine_unloaded", json!({"package": was}));
+async fn engine_unload(State(app): State<Shared>) -> Response {
+    let mut slots = app.engine.lock().await;
+    let was: Vec<String> = slots.iter().map(|l| l.package.clone()).collect();
+    if let Err(resp) = evict(&app, &mut slots, "", |_| true).await {
+        return *resp;
     }
-    Json(json!({"unloaded": was}))
+    for package in &was {
+        app.record("engine_unloaded", json!({"package": package}));
+    }
+    Json(json!({"unloaded": was.first(), "all": was})).into_response()
 }
 
 async fn consent_get(State(app): State<Shared>) -> Json<Value> {
@@ -531,22 +568,23 @@ fn preferred_installed<'a>(app: &App, package: &'a Package) -> Option<&'a Varian
 
 /// Makes sure the engine for `package` is running and returns its (port, key).
 async fn ensure_engine(app: &App, package: &Package) -> Result<(u16, String, String), Box<Response>> {
-    let mut slot = app.engine.lock().await;
-    if let Some(Loaded { package: id, variant, server: Engine::Llama(server) }) = slot.as_ref() {
-        if *id == package.id {
-            return Ok((server.port(), server.key().to_string(), variant.clone()));
-        }
-    }
-    if let Some(resp) = video::refuse_busy(app, &package.id) {
-        return Err(Box::new(resp));
-    }
-    // One model in memory at a time: unload whatever is there.
-    if let Some(old) = slot.take() {
-        old.server.stop().await;
+    let mut slots = app.engine.lock().await;
+    if let Some(pos) = slots.iter().position(|l| l.package == package.id && l.is_chat()) {
+        // The one used last goes to the end: "loaded" in GET /v1/engine.
+        let l = slots.remove(pos);
+        let out = match &l.server {
+            Engine::Llama(server) => (server.port(), server.key().to_string(), l.variant.clone()),
+            Engine::Sd(_) => unreachable!(),
+        };
+        slots.push(l);
+        return Ok(out);
     }
     let Some(variant) = preferred_installed(app, package) else {
         return Err(Box::new(fail(StatusCode::CONFLICT, format!("{} is not installed", package.name))));
     };
+    // Another chat model goes; a picture model stays if both fit.
+    evict(app, &mut slots, &package.id, Loaded::is_chat).await?;
+    make_room(app, &mut slots, &package.id, variant.accel_mem_mb).await?;
     let dir = app.packages_dir();
     let file = |role: &str| variant.files.iter().find(|f| f.role == role).map(|f| dir.join(&f.path));
     let Some(model) = file("model") else {
@@ -567,7 +605,12 @@ async fn ensure_engine(app: &App, package: &Package) -> Result<(u16, String, Str
         LlamaServer::start(&cfg, Duration::from_secs(300)).await.map_err(|e| Box::new(fail(StatusCode::BAD_GATEWAY, e.to_string())))?;
     app.record("engine_started", json!({"package": package.id, "variant": variant.id, "load_seconds": server.load_seconds}));
     let out = (server.port(), server.key().to_string(), variant.id.clone());
-    *slot = Some(Loaded { package: package.id.clone(), variant: variant.id.clone(), server: Engine::Llama(Box::new(server)) });
+    slots.push(Loaded {
+        package: package.id.clone(),
+        variant: variant.id.clone(),
+        mem_mb: variant.accel_mem_mb,
+        server: Engine::Llama(Box::new(server)),
+    });
     Ok(out)
 }
 
@@ -690,21 +733,22 @@ fn summarize_answer(raw: &str, streaming: bool) -> Value {
 
 /// Makes sure `sd-server` is running for `package` and returns a handle to it.
 async fn ensure_sd(app: &App, package: &Package) -> Result<(Arc<SdServer>, String), Box<Response>> {
-    let mut slot = app.engine.lock().await;
-    if let Some(Loaded { package: id, variant, server: Engine::Sd(server) }) = slot.as_ref() {
-        if *id == package.id {
-            return Ok((server.clone(), variant.clone()));
-        }
-    }
-    if let Some(resp) = video::refuse_busy(app, &package.id) {
-        return Err(Box::new(resp));
-    }
-    if let Some(old) = slot.take() {
-        old.server.stop().await;
+    let mut slots = app.engine.lock().await;
+    if let Some(pos) = slots.iter().position(|l| l.package == package.id && !l.is_chat()) {
+        let l = slots.remove(pos);
+        let out = match &l.server {
+            Engine::Sd(server) => (server.clone(), l.variant.clone()),
+            Engine::Llama(_) => unreachable!(),
+        };
+        slots.push(l);
+        return Ok(out);
     }
     let Some(variant) = preferred_installed(app, package) else {
         return Err(Box::new(fail(StatusCode::CONFLICT, format!("{} is not installed", package.name))));
     };
+    // Another picture or video model goes; the chat model stays if both fit.
+    evict(app, &mut slots, &package.id, |l| !l.is_chat()).await?;
+    make_room(app, &mut slots, &package.id, variant.accel_mem_mb).await?;
     let dir = app.packages_dir();
     let file = |role: &str| variant.files.iter().find(|f| f.role == role).map(|f| dir.join(&f.path));
     let (vae, tae) = (file("vae"), file("tae"));
@@ -730,7 +774,12 @@ async fn ensure_sd(app: &App, package: &Package) -> Result<(Arc<SdServer>, Strin
         SdServer::start(&cfg, Duration::from_secs(600)).await.map_err(|e| Box::new(fail(StatusCode::BAD_GATEWAY, e.to_string())))?;
     app.record("engine_started", json!({"package": package.id, "variant": variant.id, "load_seconds": server.load_seconds}));
     let server = Arc::new(server);
-    *slot = Some(Loaded { package: package.id.clone(), variant: variant.id.clone(), server: Engine::Sd(server.clone()) });
+    slots.push(Loaded {
+        package: package.id.clone(),
+        variant: variant.id.clone(),
+        mem_mb: variant.accel_mem_mb,
+        server: Engine::Sd(server.clone()),
+    });
     Ok((server, variant.id.clone()))
 }
 
@@ -960,7 +1009,7 @@ async fn main() {
         jobs: Mutex::new(HashMap::new()),
         tasks: Mutex::new(HashMap::new()),
         wanted_lock: Mutex::new(()),
-        engine: tokio::sync::Mutex::new(None),
+        engine: tokio::sync::Mutex::new(Vec::new()),
         http: reqwest::Client::builder().no_proxy().build().expect("http client"),
         net: reqwest::Client::builder().user_agent(concat!("rigbrewd/", env!("CARGO_PKG_VERSION"))).build().expect("http client"),
         server: std::env::var("RIGBREW_SERVER").unwrap_or_else(|_| "https://api.rigbrew.dev".into()).trim_end_matches('/').to_string(),
@@ -1065,7 +1114,7 @@ async fn main() {
                 _ = terminated() => {}
                 _ = parent_gone() => {}
             }
-            if let Some(loaded) = shutdown_app.engine.lock().await.take() {
+            for loaded in std::mem::take(&mut *shutdown_app.engine.lock().await) {
                 loaded.server.stop().await;
             }
         })

@@ -26,7 +26,7 @@ Browsers are refused unless the request comes from the app's own origin.
 | `POST /v1/packages/{id}/pull` | Start a download, optionally `{"variant": "q5"}`. Returns a job id. The engine the model needs comes with it. |
 | `DELETE /v1/packages/{id}` | Remove installed files (`?variant=q5` for one version). Files another installed version still uses are kept. |
 | `GET /v1/jobs`, `GET /v1/jobs/{id}`, `DELETE /v1/jobs/{id}` | Download progress, and cancel. A cancelled or interrupted download resumes where it stopped. |
-| `GET /v1/engine`, `DELETE /v1/engine` | Which model is in memory; unload it. |
+| `GET /v1/engine`, `DELETE /v1/engine` | Which models are in memory (`loaded`: the one used last; `all`); unload them. A chat model and a picture or video model stay in memory together when both fit the budget. |
 | `POST /v1/chat/completions` | OpenAI-compatible chat. `model` is a package id such as `steep-4b`. Streaming and tool calls work. |
 | `POST /v1/images/generations` | `{"model": "crema-6b", "prompt", "size": "1024x1024", "steps", "seed"}`. The answer has the PNG as base64 and `image: {id, path, bytes}` for the saved file. |
 | `GET /v1/images/progress` | Stage and steps of the picture being made (`{"progress": {stage, completed, total, elapsed_ms}}`), or null. Closing the request to `/v1/images/generations` stops the engine too. |
@@ -52,8 +52,8 @@ curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   http://127.0.0.1:$PORT/v1/chat/completions
 ```
 
-The first request for a model loads it into memory, which takes a few seconds. One model is in memory at a time:
-asking another model unloads the current one.
+The first request for a model loads it into memory, which takes a few seconds. A chat model and a picture or video
+model share memory when both fit the budget; otherwise asking for the other one unloads the first.
 
 ## What leaves the machine
 

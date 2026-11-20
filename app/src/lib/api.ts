@@ -215,6 +215,9 @@ export interface LoadedEngine {
  */
 export const engine = async (signal?: AbortSignal) =>
 	((await send('GET', '/v1/engine', undefined, signal)).json() as Promise<{ loaded: LoadedEngine | null }>).then((r) => r.loaded);
+/** Every model in memory (a chat model and a picture or video model fit together on big machines). */
+export const engines = async () =>
+	((await send('GET', '/v1/engine')).json() as Promise<{ loaded: LoadedEngine | null; all?: LoadedEngine[] }>).then((r) => r.all ?? (r.loaded ? [r.loaded] : []));
 
 /** Unloads the model and frees its memory. Returns the package that was loaded, if any. */
 export const unloadEngine = async () => (await json<{ unloaded: string | null }>('DELETE', '/v1/engine')).unloaded;
