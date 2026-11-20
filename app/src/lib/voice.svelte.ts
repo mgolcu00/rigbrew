@@ -8,6 +8,17 @@ type State = 'idle' | 'preparing' | 'playing';
 
 const KEEP = 8;
 
+/**
+ * Whether a text looks like English, the only language the voice reads well today. Letters
+ * outside basic Latin (ç, ğ, ı, ö, ş, ü, é, ß, Cyrillic, CJK...) beyond a trace mean another language.
+ */
+export function looksEnglish(text: string): boolean {
+	const letters = [...text].filter((c) => /\p{L}/u.test(c));
+	if (letters.length === 0) return true;
+	const other = letters.filter((c) => !/[a-zA-Z]/.test(c)).length;
+	return other / letters.length < 0.02;
+}
+
 class Reader {
 	/** The answer being prepared or played, by message id. */
 	id = $state<number | null>(null);

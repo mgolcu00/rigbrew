@@ -5,7 +5,7 @@
 	import { ux } from '#lib/experience.svelte.ts';
 	import { guide, type ChecklistId } from '#lib/guide.svelte.ts';
 	import { copyText, openExternal } from '#lib/api.ts';
-	import { reader } from '#lib/voice.svelte.ts';
+	import { looksEnglish, reader } from '#lib/voice.svelte.ts';
 	import { ago, budgetOf, count, duration, elapsed, familyOf, installedVariant, minute, seconds, size as bytes, speedOf, tierOf, variantName } from '#lib/format.ts';
 	import { renderMarkdown } from '#lib/markdown.ts';
 	import { machine, mod, nameOf, plainDoes, roleOf, speedAnywhere, speedHere, speedWord, versionLabel } from '#lib/words.ts';
@@ -700,8 +700,12 @@
 													class="mini"
 													class:on={reader.id === message.id}
 													onclick={() => readAloud(message)}
-													title={reader.id === message.id ? 'Stop reading' : `Read this answer aloud with ${app.voicePackage.name}`}
-													>{reader.id === message.id ? (reader.state === 'preparing' ? 'Preparing…' : 'Stop') : 'Read aloud'}</button
+													title={reader.id === message.id
+														? 'Stop reading'
+														: looksEnglish(message.content)
+															? `Read this answer aloud with ${app.voicePackage.name}`
+															: `${app.voicePackage.name} reads English; this answer is in another language and will sound wrong`}
+													>{reader.id === message.id ? (reader.state === 'preparing' ? 'Preparing…' : 'Stop') : looksEnglish(message.content) ? 'Read aloud' : 'Read aloud (English)'}</button
 												>
 											{/if}
 											<button class="mini" onclick={() => copyAnswer(message)} title="Copy this answer">{copiedId === message.id ? 'Copied' : 'Copy'}</button>
