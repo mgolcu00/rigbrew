@@ -272,6 +272,8 @@ mod tests {
         assert!(matches!(LlamaServer::start(&cfg, Duration::from_secs(1)).await, Err(EngineError::Missing(_))));
     }
 
+    // Uses /usr/bin/false as an engine that exits at once.
+    #[cfg(unix)]
     #[tokio::test]
     async fn an_engine_that_exits_while_loading_is_reported_with_its_log() {
         // `false` exits immediately with code 1, like an engine that cannot read its model.
