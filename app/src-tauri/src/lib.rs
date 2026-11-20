@@ -188,6 +188,29 @@ async fn save_image(app: tauri::AppHandle, name: String, data: String) -> Result
     .map_err(|e| e.to_string())?
 }
 
+/// Asks where to save a clip and writes it there. Returns the chosen path, or `None` when the
+/// dialog was cancelled.
+#[tauri::command]
+async fn save_video(app: tauri::AppHandle, name: String, data: String) -> Result<Option<String>, String> {
+    use base64::Engine as _;
+    use tauri_plugin_dialog::DialogExt;
+
+    let bytes =
+        base64::engine::general_purpose::STANDARD.decode(data.as_bytes()).map_err(|e| format!("the clip data is not valid: {e}"))?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let Some(target) =
+            app.dialog().file().set_title("Save video").set_file_name(&name).add_filter("WebM video", &["webm"]).blocking_save_file()
+        else {
+            return Ok(None);
+        };
+        let path = target.into_path().map_err(|e| e.to_string())?;
+        std::fs::write(&path, bytes).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+        Ok(Some(path.display().to_string()))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Asks where to save a text file (the account export) and writes it there.
 /// Returns the chosen path, or `None` when the dialog was cancelled.
 #[tauri::command]
@@ -221,13 +244,14 @@ pub fn run() {
     let builder = builder.manage(account::SignIn::default()).invoke_handler(tauri::generate_handler![
         daemon_info,
         save_image,
+        save_video,
         save_text,
         account::signin_listen,
         account::signin_wait,
         account::signin_cancel
     ]);
     #[cfg(not(feature = "account"))]
-    let builder = builder.invoke_handler(tauri::generate_handler![daemon_info, save_image, save_text]);
+    let builder = builder.invoke_handler(tauri::generate_handler![daemon_info, save_image, save_video, save_text]);
     builder
         .setup(|app| {
             // Start the service while the window is still loading.

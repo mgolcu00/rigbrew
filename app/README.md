@@ -389,8 +389,8 @@ SvelteKit 3 uses in place of `$lib`.
 
 ## Not here yet
 
-- Chat, picture and voice models run (voice reads answers aloud, in English). Video packages can be
-  downloaded but not used yet.
+- Chat, picture, voice and video models run. Voice reads answers aloud in English; a video clip
+  takes a few minutes and blocks other models until it is done or stopped.
 - The service does not report how far a picture is, and a picture request cannot be cancelled:
   Stop only stops waiting.
 - After a tool call the chat model is loaded again to finish its turn, so one picture asked

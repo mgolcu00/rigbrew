@@ -10,7 +10,7 @@ import { mod } from './words';
 
 export type ChecklistId = 'ask' | 'picture' | 'models' | 'profile' | 'search';
 
-export type TipId = 'switch' | 'install' | 'nofit' | 'picture' | 'toolpicture' | 'queued' | 'offline' | 'service';
+export type TipId = 'switch' | 'install' | 'nofit' | 'picture' | 'video' | 'toolpicture' | 'queued' | 'offline' | 'service';
 
 export interface Tip {
 	id: TipId;

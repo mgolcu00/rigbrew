@@ -128,6 +128,8 @@ class AppState {
 
 	/** The installed image package, if any: what Image mode and the chat's image tool use. */
 	imagePackage = $derived(this.packages.find((p) => p.modality === 'image' && p.installed.length > 0) ?? null);
+	/** The installed video package, if any. */
+	videoPackage = $derived(this.packages.find((p) => p.modality === 'video' && p.installed.length > 0) ?? null);
 	/** The installed voice package that reads answers aloud, if any. */
 	voicePackage = $derived(this.packages.find((p) => p.modality === 'voice' && p.installed.length > 0) ?? null);
 	/** An image package this machine can run but has not installed: what the chat offers. */

@@ -17,7 +17,7 @@ export const mod = isMac ? '⌘' : 'Ctrl+';
 const roles: Record<string, { role: string; plain: string }> = {
 	chat: { role: 'Chat', plain: 'Answers questions, writes and explains.' },
 	image: { role: 'Pictures', plain: 'Makes a picture from a description.' },
-	video: { role: 'Video', plain: 'Makes short video clips from a description.' },
+	video: { role: 'Video', plain: 'Makes a short clip from a description, in a few minutes.' },
 	voice: { role: 'Voice', plain: 'Reads answers aloud, in English.' },
 	listen: { role: 'Listening', plain: 'Turns speech into text.' }
 };

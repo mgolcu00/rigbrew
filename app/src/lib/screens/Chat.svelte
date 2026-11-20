@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { tick } from 'svelte';
 	import { app } from '#lib/state.svelte.ts';
-	import { chat, sizes, type Message, type Mode, type SizeName } from '#lib/chat.svelte.ts';
+	import { chat, sizes, videoLengths, videoSizes, type Message, type Mode, type SizeName } from '#lib/chat.svelte.ts';
 	import { ux } from '#lib/experience.svelte.ts';
 	import { guide, type ChecklistId } from '#lib/guide.svelte.ts';
 	import { copyText, openExternal } from '#lib/api.ts';
@@ -15,6 +15,7 @@
 	import Hint from '#lib/components/Hint.svelte';
 	import Icon, { type IconName } from '#lib/components/Icon.svelte';
 	import ImageRow from '#lib/components/ImageRow.svelte';
+	import VideoRow from '#lib/components/VideoRow.svelte';
 	import InstallControl from '#lib/components/InstallControl.svelte';
 
 	// The chat is a transcript: a left-aligned column of turns, each under one small line that
@@ -56,7 +57,7 @@
 	});
 
 	$effect(() => {
-		if (!chat.busy) return;
+		if (!chat.busy && chat.videosRunning === 0) return;
 		now = Date.now();
 		const timer = setInterval(() => (now = Date.now()), 500);
 		return () => clearInterval(timer);
@@ -426,6 +427,9 @@
 			const name = (imagePkg ?? imageCatalogue)?.name ?? 'the picture model';
 			return flags.plainNames ? 'Describe the picture you want' : `Describe a picture for ${name}`;
 		}
+		if (chat.mode === 'video') {
+			return flags.plainNames ? 'Describe the clip you want: what moves, and how' : `Describe a clip for ${app.videoPackage?.name ?? 'the video model'}`;
+		}
 		if (flags.slashHints) return `Message ${current?.name ?? ''}, or / for commands`;
 		if (flags.plainNames) return 'Ask anything';
 		return `Message ${current?.name ?? ''}`;
@@ -644,6 +648,8 @@
 								</li>
 							{:else if message.role === 'image' && message.image}
 								<li class="turn"><ImageRow job={message.image} {now} onload={stick} /></li>
+							{:else if message.role === 'video' && message.video}
+								<li class="turn"><VideoRow job={message.video} {now} /></li>
 							{:else if message.role === 'offer' && message.offer}
 								<li class="turn offer">
 									{#if imagePkg}
@@ -767,16 +773,33 @@
 						disabled={!usable || opening}
 						spellcheck="false"
 						{placeholder}
-						aria-label={chat.mode === 'image' ? 'Picture description' : 'Message'}
+						aria-label={chat.mode === 'image' ? 'Picture description' : chat.mode === 'video' ? 'Clip description' : 'Message'}
 					></textarea>
 					<div class="tools">
 						{#if hasImageFamily && models.length > 0}
 							<div class="chips" role="radiogroup" aria-label="What to make" data-tour="mode">
 								<button type="button" role="radio" aria-checked={chat.mode === 'chat'} onclick={() => chat.setMode('chat', 'click')} disabled={chat.busy} title="Chat: answers in words">Chat</button>
 								<button type="button" role="radio" aria-checked={chat.mode === 'image'} onclick={() => chat.setMode('image', 'click')} disabled={chat.busy} title="Picture: makes an image from your description{flags.keyHints ? ` (${mod}⇧I, or type /image)` : ''}">Picture</button>
+								{#if app.videoPackage}
+									<button type="button" role="radio" aria-checked={chat.mode === 'video'} onclick={() => chat.setMode('video', 'click')} disabled={chat.busy} title="Video: makes a short clip from your description, in a few minutes">Video</button>
+								{/if}
 							</div>
 						{/if}
-						{#if chat.mode === 'image'}
+						{#if chat.mode === 'video'}
+							<div class="chips" role="radiogroup" aria-label="Clip shape">
+								{#each Object.entries(videoSizes) as [name, shape] (name)}
+									<button type="button" role="radio" aria-checked={chat.videoSize === name} onclick={() => (chat.videoSize = name as SizeName)} disabled={chat.busy} title="{shape.label}{flags.techDetails ? `, ${shape.width} × ${shape.height}` : ''}" aria-label={shape.label}>
+										<span class="shape" style:aspect-ratio="{shape.width} / {shape.height}"></span>
+									</button>
+								{/each}
+							</div>
+							<div class="chips" role="radiogroup" aria-label="Clip length">
+								{#each videoLengths as l (l.frames)}
+									<button type="button" role="radio" class="num" aria-checked={chat.videoFrames === l.frames} onclick={() => (chat.videoFrames = l.frames)} disabled={chat.busy} title="{l.label}{flags.techDetails ? `, ${l.frames} frames` : ''}">{l.label}</button>
+								{/each}
+							</div>
+							<span class="to">{#if flags.techDetails}<span class="num">→ {app.videoPackage?.name} · {videoSizes[chat.videoSize].width}×{videoSizes[chat.videoSize].height} · {chat.videoFrames} frames</span>{:else}A few minutes{/if}</span>
+						{:else if chat.mode === 'image'}
 							<div class="chips" role="radiogroup" aria-label="Picture shape">
 								{#each Object.entries(sizes) as [name, shape] (name)}
 									<button type="button" role="radio" aria-checked={chat.size === name} onclick={() => (chat.size = name as SizeName)} disabled={chat.busy} title="{shape.label}{flags.techDetails ? `, ${shape.width} × ${shape.height}` : ''}" aria-label={shape.label}>
@@ -800,7 +823,7 @@
 						{#if chat.busy}
 							<button type="button" class="go stop" onclick={() => chat.stop()} title="Stop{flags.keyHints ? ' (Esc)' : ''}">Stop{#if flags.keyHints}&nbsp;<kbd>esc</kbd>{/if}</button>
 						{:else}
-							<button type="submit" class="go" disabled={!draft.trim() || menu.length > 0 || opening} title="Send (Enter). Shift+Enter starts a new line.">{chat.mode === 'image' ? 'Make' : 'Send'}{#if flags.keyHints}&nbsp;<kbd>↵</kbd>{/if}</button>
+							<button type="submit" class="go" disabled={!draft.trim() || menu.length > 0 || opening} title="Send (Enter). Shift+Enter starts a new line.">{chat.mode === 'chat' ? 'Send' : 'Make'}{#if flags.keyHints}&nbsp;<kbd>↵</kbd>{/if}</button>
 						{/if}
 					</div>
 				</div>

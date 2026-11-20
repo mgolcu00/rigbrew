@@ -6,8 +6,8 @@ import { app } from './state.svelte';
 import type { Package } from './types';
 import { nameOf } from './words';
 
-/** Where the next message goes: to the chat model, or straight to the image model. */
-export type Mode = 'chat' | 'image';
+/** Where the next message goes: to the chat model, or straight to the image or video model. */
+export type Mode = 'chat' | 'image' | 'video';
 
 export type SizeName = 'square' | 'portrait' | 'landscape';
 
@@ -19,6 +19,47 @@ export const sizes: Record<SizeName, { label: string; width: number; height: num
 };
 
 export const IMAGE_STEPS = 8;
+
+/** Clip shapes. The video model wants multiples of 32. */
+export const videoSizes: Record<SizeName, { label: string; width: number; height: number }> = {
+	landscape: { label: 'Landscape', width: 832, height: 480 },
+	portrait: { label: 'Portrait', width: 480, height: 832 },
+	square: { label: 'Square', width: 640, height: 640 }
+};
+
+/** Clip lengths: 4k+1 frames at 24 frames a second. Longer clips take disproportionately longer. */
+export const videoLengths = [
+	{ frames: 33, label: '1.4 s' },
+	{ frames: 49, label: '2 s' },
+	{ frames: 73, label: '3 s' }
+] as const;
+
+export const VIDEO_STEPS = 20;
+
+export interface VideoJob {
+	prompt: string;
+	width: number;
+	height: number;
+	frames: number;
+	steps: number;
+	seed: number;
+	package: string;
+	packageName: string;
+	state: 'waiting' | 'done' | 'failed' | 'stopped';
+	/** What the engine is doing: loading, conditioning, sampling, vae_decode, encoding. */
+	stage: string;
+	step: number | null;
+	totalSteps: number | null;
+	startedAt: number;
+	waited?: number;
+	seconds?: number;
+	variant?: string;
+	/** The service's job id while the clip is being made. */
+	jobId?: string;
+	/** The saved clip: `<id>.webm` under `/v1/videos/files/`. */
+	file?: string;
+	error?: string;
+}
 
 export interface ToolCall {
 	id: string;
@@ -59,8 +100,8 @@ export interface ImageJob {
 
 export interface Message {
 	id: number;
-	/** image: a picture card. offer: "install an image model" in place of a picture. */
-	role: 'user' | 'assistant' | 'image' | 'offer';
+	/** image: a picture card. video: a clip card. offer: "install an image model" in place of a picture. */
+	role: 'user' | 'assistant' | 'image' | 'video' | 'offer';
 	content: string;
 	/** User only: which mode it was sent in. */
 	mode?: Mode;
@@ -81,6 +122,7 @@ export interface Message {
 	variant?: string;
 	toolCalls?: ToolCall[];
 	image?: ImageJob;
+	video?: VideoJob;
 	/** Offer only: what was asked for, so it can be made once the install is done. */
 	offer?: { prompt: string; size: SizeName; callId?: string };
 }
@@ -176,6 +218,20 @@ export async function pictureBase64(job: ImageJob): Promise<string> {
 
 let nextId = 1;
 const randomSeed = () => Math.floor(Math.random() * 2 ** 31);
+const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+const clipUrls = new Map<string, Promise<string>>();
+
+/** A saved clip as an object URL, fetched once per session. */
+export function clipUrl(file: string): Promise<string> {
+	let url = clipUrls.get(file);
+	if (!url) {
+		url = api.videoFile(file).then((blob) => URL.createObjectURL(blob));
+		url.catch(() => clipUrls.delete(file));
+		clipUrls.set(file, url);
+	}
+	return url;
+}
 const newChatId = () => `c${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
 const titleOf = (text: string) => text.replace(/\s+/g, ' ').trim().slice(0, 64);
 
@@ -198,6 +254,8 @@ class ChatState {
 	announce = $state('');
 	model = $state('');
 	mode = $state<Mode>('chat');
+	videoSize = $state<SizeName>('landscape');
+	videoFrames = $state<number>(49);
 	size = $state<SizeName>('square');
 	busy = $state(false);
 	/** Bumped to ask the composer to take focus. */
@@ -322,6 +380,8 @@ class ChatState {
 			conversation.messages = messages;
 			conversation.startedAt = data?.startedAt ?? conversation.startedAt;
 			conversation.loaded = true;
+			// A clip may still be on its way: the service makes it whether or not the app is watching.
+			for (const m of conversation.messages) if (m.video?.state === 'waiting') this.#follow(conversation, m.video);
 		} catch (e) {
 			conversation.problem = e instanceof Error ? e.message : String(e);
 		}
@@ -461,6 +521,12 @@ class ChatState {
 		const conversation = this.#conversation(prompt);
 		if (!conversation) return;
 		conversation.messages.push({ id: nextId++, role: 'user', content: prompt, mode, at: Date.now() });
+
+		if (mode === 'video') {
+			if (!app.videoPackage) return;
+			await this.#video(conversation, prompt);
+			return;
+		}
 
 		if (mode === 'image') {
 			if (!app.imagePackage) {
@@ -762,6 +828,113 @@ class ChatState {
 	}
 
 	/** Adds a picture card to the conversation and fills it when the image model answers. */
+	/** Starts one clip. The service makes it in the background; `#follow` keeps the card current. */
+	async #video(conversation: Conversation, prompt: string) {
+		const pkg = app.videoPackage!;
+		const { width, height } = videoSizes[this.videoSize];
+		conversation.messages.push({
+			id: nextId++,
+			role: 'video',
+			content: '',
+			video: {
+				prompt,
+				width,
+				height,
+				frames: this.videoFrames,
+				steps: VIDEO_STEPS,
+				seed: randomSeed(),
+				package: pkg.id,
+				packageName: pkg.name,
+				state: 'waiting',
+				stage: 'loading',
+				step: null,
+				totalSteps: null,
+				startedAt: Date.now()
+			}
+		});
+		const job = conversation.messages[conversation.messages.length - 1].video!;
+		if (this.engine && this.engine.package !== pkg.id) this.#switchTip(pkg);
+		this.engine = null;
+		app.track('video_requested', { package: pkg.id, width, height, frames: job.frames, steps: job.steps });
+		try {
+			job.jobId = await api.startVideo({ model: pkg.id, prompt, size: `${width}x${height}`, frames: job.frames, steps: job.steps, seed: job.seed });
+		} catch (e) {
+			job.state = 'failed';
+			job.error = e instanceof Error ? e.message : String(e);
+			job.waited = (Date.now() - job.startedAt) / 1000;
+			this.failure = job.error;
+			return;
+		}
+		// Saved now, so a reload or another chat does not lose the card; it is picked up again.
+		this.saveSoon(conversation, 0);
+		this.#follow(conversation, job);
+	}
+
+	#following = new Set<string>();
+	/** How many clips are being followed: keeps the clocks on the cards ticking. */
+	videosRunning = $state(0);
+
+	/** Follows a clip until it is done, stopped or failed. Survives switching chats and reloads. */
+	async #follow(conversation: Conversation, job: VideoJob) {
+		const id = job.jobId;
+		if (!id || this.#following.has(id)) return;
+		this.#following.add(id);
+		this.videosRunning = this.#following.size;
+		const pkg = app.packages.find((p) => p.id === job.package);
+		try {
+			for (;;) {
+				let s: api.VideoJobState;
+				try {
+					s = await api.videoJob(id);
+				} catch (e) {
+					if (e instanceof api.ApiError && e.status === 404) {
+						// The service was restarted (Rigbrew quit) and forgot the job.
+						job.state = 'failed';
+						job.error = 'Rigbrew was closed while this clip was being made.';
+						break;
+					}
+					await pause(3000);
+					continue;
+				}
+				job.stage = s.stage;
+				job.step = s.step;
+				job.totalSteps = s.steps;
+				if (s.variant) job.variant = s.variant;
+				if (s.state === 'loading' || s.state === 'running') {
+					if (!this.busy) this.work = { kind: s.state === 'loading' ? 'loading' : 'generating', package: job.package, since: this.work?.since ?? Date.now() };
+					await pause(1500);
+					continue;
+				}
+				if (s.state === 'done') {
+					job.file = s.video?.path.split('/').pop();
+					job.seconds = s.elapsed_ms / 1000;
+					job.state = 'done';
+					this.engine = { package: job.package, variant: s.variant };
+					this.announce = `Video ready: ${job.prompt}`;
+					guide.show({ id: 'video', text: 'This clip is saved with the chat. Save keeps a copy where you choose.', help: 'pictures' });
+				} else if (s.state === 'cancelled') {
+					job.state = 'stopped';
+				} else {
+					job.state = 'failed';
+					job.error = s.error ?? 'The video was not made.';
+				}
+				break;
+			}
+		} finally {
+			this.#following.delete(id);
+			this.videosRunning = this.#following.size;
+			if (job.state !== 'done') job.waited = (Date.now() - job.startedAt) / 1000;
+			if (!this.busy && this.work?.package === job.package) this.work = null;
+			app.track(job.state === 'done' ? 'video_made' : `video_${job.state}`, { package: pkg?.id ?? job.package, seconds: Math.round((Date.now() - job.startedAt) / 1000), frames: job.frames });
+			this.saveSoon(conversation);
+		}
+	}
+
+	/** Stops a clip that is being made; the engine stops at its next step. */
+	async stopVideo(job: VideoJob) {
+		if (job.jobId) await api.stopVideo(job.jobId);
+	}
+
 	async #image(
 		conversation: Conversation,
 		ask: { prompt: string; size: SizeName; via: ImageJob['via']; callId?: string; askedBy?: string },

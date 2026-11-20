@@ -268,6 +268,51 @@ export async function speak(model: string, input: string, signal?: AbortSignal):
 	};
 }
 
+// --- video ---------------------------------------------------------------------------------------
+
+export interface VideoJobState {
+	package: string;
+	variant: string;
+	state: 'loading' | 'running' | 'done' | 'failed' | 'cancelled';
+	/** The engine's stage: conditioning, sampling, vae_decode, encoding, ... */
+	stage: string;
+	step: number | null;
+	steps: number | null;
+	elapsed_ms: number;
+	width: number;
+	height: number;
+	frames: number;
+	video: { id: string; path: string; bytes: number; mime: string } | null;
+	error: string | null;
+}
+
+/** Starts a clip in the background; follow it with `videoJob`. */
+export const startVideo = async (body: { model: string; prompt: string; size: string; frames: number; steps: number; seed: number }) =>
+	(await json<{ job: string }>('POST', '/v1/videos/generations', body)).job;
+export const videoJob = (id: string) => json<VideoJobState>('GET', `/v1/videos/jobs/${enc(id)}`);
+/** Asks the service to stop a clip; it stops at the engine's next step. */
+export const stopVideo = async (id: string) => {
+	await optional('DELETE', `/v1/videos/jobs/${enc(id)}`);
+};
+/** A saved clip (`<id>.webm`), fetched with the token and shown through an object URL. */
+export const videoFile = async (name: string) => (await send('GET', `/v1/videos/files/${enc(name)}`)).blob();
+
+/** Saves a clip where the person chooses (app) or as a download (browser preview). */
+export async function saveVideo(name: string, clip: Blob): Promise<'saved' | 'downloaded' | 'cancelled'> {
+	if (isTauri) {
+		const bytes = new Uint8Array(await clip.arrayBuffer());
+		let binary = '';
+		for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+		const { invoke } = await import('@tauri-apps/api/core');
+		const path = await invoke<string | null>('save_video', { name, data: btoa(binary) });
+		return path ? 'saved' : 'cancelled';
+	}
+	const url = URL.createObjectURL(clip);
+	download(name, url);
+	setTimeout(() => URL.revokeObjectURL(url), 10_000);
+	return 'downloaded';
+}
+
 // --- saved chats -------------------------------------------------------------------------------
 
 /** One saved chat in the list, newest first. */

@@ -32,6 +32,22 @@ const rules: { id: string; test: RegExp; text: string; short: string; fix: Fix; 
 		act: 'Try again'
 	},
 	{
+		id: 'video-busy',
+		test: /a video is (already )?being made/i,
+		text: 'A video clip is still being made, and only one model fits in memory at a time. Wait for the clip to finish, or press Stop on its card, then try again.',
+		short: 'A clip is being made',
+		fix: 'none',
+		act: ''
+	},
+	{
+		id: 'video-closed',
+		test: /rigbrew was closed while this clip/i,
+		text: 'Rigbrew was closed while this clip was being made, so it was not finished. Make it again to get it.',
+		short: 'Interrupted',
+		fix: 'none',
+		act: ''
+	},
+	{
 		id: 'engine',
 		test: /engine not installed|could not start the engine/i,
 		text: `The program that runs this model is missing on this ${machine}. Installing Rigbrew again puts it back.`,

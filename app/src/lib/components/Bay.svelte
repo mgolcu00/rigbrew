@@ -224,6 +224,8 @@
 				<span class="dot"></span><span class="num">{chat.work.kind} {elapsed(waited)}</span>
 			{:else if generating && working?.modality === 'image'}
 				<span class="dot"></span><span class="num">image {elapsed(waited)}</span>
+			{:else if generating && working?.modality === 'video'}
+				<span class="dot"></span><span class="num">video {elapsed(waited)}</span>
 			{:else if generating}
 				<span class="dot"></span><span class="num">{chat.rate > 0 ? chat.rate.toFixed(1) : '…'} tok/s</span>
 			{:else if chat.failure}
@@ -243,6 +245,8 @@
 				<span class="dot"></span><span>{chat.work.kind === 'switching' ? 'Switching' : 'Loading'} {elapsed(waited)}</span>
 			{:else if generating && working?.modality === 'image'}
 				<span class="dot"></span><span>Making a picture {elapsed(waited)}</span>
+			{:else if generating && working?.modality === 'video'}
+				<span class="dot"></span><span>Making a clip {elapsed(waited)}</span>
 			{:else if generating}
 				<span class="dot"></span><span>Writing{flags.speedWords && chat.rate > 0 ? ` · ${speedWord(chat.rate)}` : '…'}</span>
 			{:else if chat.failure}
