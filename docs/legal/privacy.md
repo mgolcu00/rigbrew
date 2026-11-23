@@ -1,6 +1,6 @@
 # Privacy Policy
 
-Draft of 2026-11-20 (revision 2: two layers). Not reviewed by a lawyer.
+Draft of 2026-11-23 (revision 3: the waiting list on rigbrew.dev). Not reviewed by a lawyer.
 
 ## Who is responsible
 
@@ -46,6 +46,17 @@ packages Rigbrew itself downloaded.
 Page views without cookies: page, referrer, screen size, language, time zone, country, device class, and a visitor
 hash that changes every day and cannot be turned back into an IP address. Clicks on download and sponsor links.
 
+## Waiting list
+
+If you join the waiting list on rigbrew.dev we keep the e-mail address you give, and, only if you answer them, which
+computer you use, how much memory it has and the chip or graphics card you type in. With it: the date, the site or
+campaign you came from (a host name such as `t.co`, never a full address), your country as our network provider
+derives it, and whether you signed up on a computer or a phone. Not your IP address.
+
+We use it to send you an e-mail when a download is out (macOS first, then Windows) and to decide which hardware to
+build and measure for first. Nothing else: no newsletter, no advertising, not shared with anyone. Every e-mail lets
+you leave the list, and the form on rigbrew.dev takes an address off it at once.
+
 ## Where it goes
 
 - **Our server**, hosted by Hetzner Online GmbH in Germany.
@@ -60,7 +71,9 @@ We do not sell this data and do not use it for advertising.
 ## How long
 
 Event data, including prompts and responses: up to 24 months, then deleted or made anonymous. Account data: until
-you delete your account. Server logs: 30 days.
+you delete your account. The waiting list: until you leave it, and no longer than 12 months after the last
+announcement it is kept for. Server logs: 30 days. Daily copies of the server's database, kept on the server for
+recovery: 14 days.
 
 ## Your choices
 
