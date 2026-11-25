@@ -410,7 +410,10 @@ async fn pull(State(app): State<Shared>, Path(id): Path<String>, body: Option<Js
     // Some packages are only for signed-in accounts (the manifest or the server's app config says which).
     if cloud::account_required(&app, &package) && !cloud::signed_in(&app) {
         app.record("package_pull_refused", json!({"package": package.id, "reason": "account"}));
-        return fail(StatusCode::FORBIDDEN, format!("{} can only be downloaded with a Rigbrew account. Sign in, then install it.", package.name));
+        return fail(
+            StatusCode::FORBIDDEN,
+            format!("{} can only be downloaded with a Rigbrew account. Sign in, then install it.", package.name),
+        );
     }
     let agreed = body.as_ref().is_some_and(|b| b.0.accept_terms);
     if package.terms.is_some() && !agreed {

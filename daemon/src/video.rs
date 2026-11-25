@@ -114,7 +114,11 @@ pub async fn generate(State(app): State<Shared>, Json(body): Json<VideoBody>) ->
         return fail(StatusCode::BAD_REQUEST, format!("frames must be {frame_step}k+1 between 5 and {max_frames}"));
     }
     // A package with a fixed schedule (a distilled model) takes its own step count, whatever was asked.
-    let steps = if d["fixed_steps"].as_bool().unwrap_or(false) { num("steps", 20) } else { body.steps.unwrap_or_else(|| num("steps", 20)).clamp(1, 50) };
+    let steps = if d["fixed_steps"].as_bool().unwrap_or(false) {
+        num("steps", 20)
+    } else {
+        body.steps.unwrap_or_else(|| num("steps", 20)).clamp(1, 50)
+    };
     if app.videos.lock().unwrap().values().any(VideoJob::active) {
         return fail(StatusCode::CONFLICT, "A video is already being made. Wait for it or stop it first.");
     }
