@@ -20,7 +20,7 @@ export interface Tip {
 }
 
 /** Things counted to tick the checklist and to judge readiness. Names are stable keys. */
-export type Counter = 'screen.models' | 'screen.profile' | 'screen.device' | 'palette' | 'slash' | 'asked' | 'pictures' | 'help';
+export type Counter = 'screen.models' | 'screen.profile' | 'screen.device' | 'screen.code' | 'palette' | 'slash' | 'asked' | 'pictures' | 'help';
 
 const WEEK = 7 * 24 * 60 * 60 * 1000;
 

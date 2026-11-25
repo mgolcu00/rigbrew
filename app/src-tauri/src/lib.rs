@@ -6,6 +6,7 @@
 //! HTTP on 127.0.0.1, except two things that need the system:
 //!
 //! - saving a file the person asked to keep (`save_image`, `save_text`): a save dialog and a write;
+//! - choosing the folder a Code task works in (`pick_folder`): the system's folder dialog;
 //! - signing in through the system browser: `account.rs`, only present in official builds (feature `account`).
 
 #[cfg(feature = "account")]

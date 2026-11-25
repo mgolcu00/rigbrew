@@ -1,8 +1,10 @@
 <script lang="ts">
+	import { onMount } from 'svelte';
 	import { getAccount } from '#account';
 	import { app, type Screen } from '#lib/state.svelte.ts';
 	import { agents } from '#lib/agents.svelte.ts';
 	import { chat } from '#lib/chat.svelte.ts';
+	import { code } from '#lib/code.svelte.ts';
 	import { guide } from '#lib/guide.svelte.ts';
 	import { mod } from '#lib/words.ts';
 	import AgentsSheet from './AgentsSheet.svelte';
@@ -11,12 +13,16 @@
 
 	// The one piece of chrome: a new chat, the few places, the chats, and who is using it.
 	// Everything else is the conversation. It is also where the window is dragged from.
-	const places: { screen: Screen; name: string; icon: 'chat' | 'download' | 'video' }[] = [
+	const places: { screen: Screen; name: string; icon: 'chat' | 'download' | 'video' | 'code' }[] = [
+		{ screen: 'code', name: 'Code', icon: 'code' },
 		{ screen: 'studio', name: 'Studio', icon: 'video' },
 		{ screen: 'models', name: 'Models', icon: 'download' }
 	];
 	const account = $derived(getAccount());
 	const signedIn = $derived(Boolean(account.user && !account.user.anonymous));
+
+	// A task may be working already when the window opens (it runs in the service): follow it.
+	onMount(() => void code.wake());
 
 	function newChat() {
 		chat.newChat();
@@ -39,7 +45,14 @@
 		<button class="row strong" onclick={newChat} title="New chat ({mod}N)"><Icon name="compose" size={16} /><span>New chat</span></button>
 		<button class="row" onclick={() => (app.palette = true)} title="Search chats, models and actions ({mod}K)"><Icon name="search" size={16} /><span>Search</span></button>
 		{#each places as p (p.screen)}
-			<button class="row" class:current={app.screen === p.screen} aria-current={app.screen === p.screen ? 'page' : undefined} onclick={() => app.go(p.screen)}><Icon name={p.icon} size={16} /><span>{p.name}</span></button>
+			<button class="row" class:current={app.screen === p.screen} aria-current={app.screen === p.screen ? 'page' : undefined} onclick={() => app.go(p.screen)}>
+				<Icon name={p.icon} size={16} /><span>{p.name}</span>
+				{#if p.screen === 'code' && code.waiting > 0}
+					<span class="badge" title="A task waits for your answer">{code.waiting}</span>
+				{:else if p.screen === 'code' && code.working}
+					<span class="busy" title="A task is working"></span>
+				{/if}
+			</button>
 		{/each}
 		<button class="row" class:current={agents.sheet !== null} onclick={() => agents.open('sidebar')} title="Agents: saved ways to use the chat model"><Icon name="person" size={16} /><span>Agents</span></button>
 	</nav>
@@ -147,6 +160,30 @@
 
 	.row.strong {
 		font-weight: 600;
+	}
+
+	/* Code: a task waits for an answer, or is working in the background. */
+	.row .badge {
+		margin-left: auto;
+		min-width: 18px;
+		height: 18px;
+		padding: 0 5px;
+		border-radius: 9px;
+		background: var(--accent);
+		color: var(--on-accent);
+		font: 600 11px/18px var(--rb-text);
+		text-align: center;
+		overflow: visible;
+	}
+
+	.row .busy {
+		margin-left: auto;
+		flex: none;
+		width: 6px;
+		height: 6px;
+		border-radius: 50%;
+		background: var(--accent);
+		animation: blink 1.2s steps(2, jump-none) infinite;
 	}
 
 	.chats {
