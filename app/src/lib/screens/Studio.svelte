@@ -257,7 +257,20 @@
 				auto_export: Boolean(project.auto_export),
 				sound: project.sound ?? '',
 				sound_volume: project.sound_volume ?? 0.5,
-				shots: project.shots.map(({ id, prompt, frames, trim_start, trim_end, continues }) => ({ id, prompt, frames, trim_start: trim_start ?? 0, trim_end: trim_end ?? 0, continues: Boolean(continues) }))
+				sound_once: Boolean(project.sound_once),
+				fade_in: Boolean(project.fade_in),
+				fade_out: Boolean(project.fade_out),
+				shots: project.shots.map((s) => ({
+					id: s.id,
+					prompt: s.prompt,
+					frames: s.frames,
+					trim_start: s.trim_start ?? 0,
+					trim_end: s.trim_end ?? 0,
+					continues: Boolean(s.continues),
+					join: s.join ?? 'cut',
+					volume: s.volume ?? 1,
+					mute: Boolean(s.mute)
+				}))
 			});
 			// Keep what is being typed; take the states.
 			if (view && !timer) view = saved;
@@ -334,6 +347,26 @@
 			view = await api.studioStop(project.id);
 		} catch (e) {
 			problem = say(e);
+		}
+	}
+
+	// The voice reads a text, and the reading becomes the film's sound file.
+	let narration = $state('');
+	let narrating = $state(false);
+	async function narrate() {
+		if (!project || !narration.trim() || narrating) return;
+		narrating = true;
+		problem = '';
+		try {
+			await saveNow();
+			view = await api.studioNarration(project.id, narration.trim());
+			soundOf = '';
+			app.track('studio_narration_made', { chars: narration.trim().length });
+			narration = '';
+		} catch (e) {
+			problem = say(e);
+		} finally {
+			narrating = false;
 		}
 	}
 
@@ -496,6 +529,9 @@
 					{clipOf}
 					sound={soundUrl}
 					soundVolume={project.sound_volume ?? 0.5}
+					soundRepeats={!project.sound_once}
+					fadeIn={Boolean(project.fade_in)}
+					fadeOut={Boolean(project.fade_out)}
 					caption={(part) => `Shot ${part.index + 1}: ${project.shots[part.index]?.prompt ?? ''}`}
 					onposition={(at) => (position = at)}
 					onclose={() => (showPlayer = false)}
@@ -538,9 +574,6 @@
 								</select>
 								<span class="state {shot.state}">{stateWords[shot.state]}{shot.state === 'done' && shot.seconds ? `, took ${clock(shot.seconds)}` : ''}</span>
 								{#if shot.error}<span class="problem selectable">{shot.error}</span>{/if}
-								{#if i > 0 && view?.can_continue}
-									<label class="trim" title="This shot starts from the last picture of the shot before it, so the two join without a cut. It takes longer to make."><input type="checkbox" bind:checked={shot.continues} onchange={saveSoon} /> Continue the shot before</label>
-								{/if}
 								{#if shot.state === 'done' || shot.state === 'changed'}
 									<label class="trim" title="Seconds cut from the start and from the end of this shot in the exported film">Cut <input type="number" min="0" max="9" step="0.1" bind:value={shot.trim_start} oninput={saveSoon} aria-label="Seconds cut from the start of shot {i + 1}" /> <input type="number" min="0" max="9" step="0.1" bind:value={shot.trim_end} oninput={saveSoon} aria-label="Seconds cut from the end of shot {i + 1}" /> s</label>
 								{/if}
@@ -549,6 +582,27 @@
 								<button class="tool" onclick={() => move(i, i + 1)} disabled={i === project.shots.length - 1} title="Move down" aria-label="Move shot {i + 1} down">↓</button>
 								{#if shot.id && shot.prompt.trim() && video}<button class="tool" onclick={() => make([shot.id])} disabled={shot.state === 'making' || shot.state === 'queued'} title={shot.state === 'done' ? 'Make this shot again' : 'Make this shot'}>{shot.state === 'done' ? 'Again' : 'Make'}</button>{/if}
 								<button class="tool" onclick={() => removeShot(i)} title="Remove this shot" aria-label="Remove shot {i + 1}"><Icon name="trash" size={13} /></button>
+							</p>
+							<p class="row film">
+								{#if i > 0 && view?.can_continue}
+									<label class="trim" title="This shot starts from the last picture of the shot before it, so the two join without a cut. It takes longer to make."><input type="checkbox" bind:checked={shot.continues} onchange={saveSoon} /> Continue the shot before</label>
+								{/if}
+								{#if i > 0 && !shot.continues}
+									<label class="trim" title="How the film goes from the shot before into this one. A dissolve lays the two over each other for half a second. A fade through black takes the same half second.">
+										Starts with
+										<select value={shot.join ?? 'cut'} onchange={(e) => ((shot.join = e.currentTarget.value as StudioShot['join']), saveSoon())} aria-label="How the film goes into shot {i + 1}">
+											<option value="cut">a cut</option>
+											<option value="dissolve">a dissolve</option>
+											<option value="black">a fade through black</option>
+										</select>
+									</label>
+								{/if}
+								<label class="trim" title="How loud this shot's own sound is in the film">
+									Sound
+									<input type="range" min="0" max="1.5" step="0.05" value={shot.volume ?? 1} oninput={(e) => ((shot.volume = Number(e.currentTarget.value)), saveSoon())} disabled={shot.mute} aria-label="Volume of shot {i + 1}" />
+									<span class="pct">{shot.mute ? 'off' : `${Math.round((shot.volume ?? 1) * 100)}%`}</span>
+								</label>
+								<label class="trim"><input type="checkbox" bind:checked={shot.mute} onchange={saveSoon} /> Mute</label>
 							</p>
 						</div>
 						<div class="clip">
@@ -581,7 +635,24 @@
 						<span class="pct">{Math.round((project.sound_volume ?? 0.5) * 100)}%</span>
 					</label>
 				</p>
-				<p class="note">It starts with the film, repeats when it is shorter, and ends with the film. You hear it in Play film and in the exported file.</p>
+				<p class="row">
+					<label class="trim" title="Music repeats until the film ends. A narration is said once."><input type="checkbox" checked={!project.sound_once} onchange={(e) => ((project.sound_once = !e.currentTarget.checked), saveSoon())} /> Repeat it until the film ends</label>
+					<span class="note">It starts with the film and ends with it. You hear it in Play film and in the exported file.</span>
+				</p>
+				{#if app.voicePackage}
+					<h2 class="sub">Narration</h2>
+					<textarea bind:value={narration} rows="3" placeholder="Write what is to be said over the film, in English. The voice reads it and the reading becomes the sound under the film." aria-label="Text of the narration" disabled={narrating}></textarea>
+					<p class="row">
+						<button class="btn" onclick={narrate} disabled={!narration.trim() || narrating}>{narrating ? 'Reading…' : 'Read it aloud'}</button>
+						<span class="note">{app.voicePackage.name} reads it on this machine. The reading is saved as narration.wav in the film's folder and takes the place of the sound file above.</span>
+					</p>
+				{/if}
+				<h2 class="sub">Start and end</h2>
+				<p class="row">
+					<label class="trim"><input type="checkbox" bind:checked={project.fade_in} onchange={saveSoon} /> Fade in at the start</label>
+					<label class="trim"><input type="checkbox" bind:checked={project.fade_out} onchange={saveSoon} /> Fade out at the end</label>
+					<span class="note">Half a second each, pictures and sound.</span>
+				</p>
 			</div>
 			{#if video?.credit}<p class="note credit">{video.credit}</p>{/if}
 		{/if}
@@ -1051,6 +1122,14 @@
 		padding: 12px;
 		border: 1px solid var(--line-soft);
 		border-radius: 14px;
+	}
+
+	.film {
+		gap: 8px 16px;
+	}
+
+	.trim select {
+		height: 26px;
 	}
 
 	.trim input[type='range'] {

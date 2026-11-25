@@ -4,8 +4,9 @@
 //!   POST   /v1/studio/projects                    {"folder"?, "name"}: start a film in a folder (created if missing;
 //!                                                 without one, a new folder named after the film under Movies/Rigbrew)
 //!   GET    /v1/studio/projects/{id}               the film: its shots and what is being made
-//!   PUT    /v1/studio/projects/{id}               {"name", "size", "auto_export", "sound", "sound_volume",
-//!                                                 "shots": [{"id"?, "prompt", "frames"}]}
+//!   PUT    /v1/studio/projects/{id}               {"name", "size", "auto_export", "sound", "sound_volume", "sound_once",
+//!                                                 "fade_in", "fade_out", "shots": [{"id"?, "prompt", "frames",
+//!                                                 "continues", "trim_start", "trim_end", "join", "volume", "mute"}]}
 //!   DELETE /v1/studio/projects/{id}               forget the film (its folder stays)
 //!   POST   /v1/studio/projects/{id}/render        {"shots": [id]?, "model"?}: make the listed shots, or every shot not made yet
 //!   DELETE /v1/studio/projects/{id}/render        stop: the shot being made is stopped, the rest leave the queue
@@ -14,6 +15,8 @@
 //!                                               sound file under them ({"music"?, "music_volume"?} for another)
 //!   GET    /v1/studio/projects/{id}/export      where the export is: {"state", "file", "error"}
 //!   GET    /v1/studio/projects/{id}/sound       the film's sound file, to play under it in the app
+//!   POST   /v1/studio/projects/{id}/narration   {"text"}: the voice package reads it; the WAV is saved in the
+//!                                               film's folder and becomes the film's sound file
 //!   GET    /v1/studio/projects/{id}/clips/{shot}.webm
 //!   GET    /v1/studio/projects/{id}/clips/{shot}.jpg   one small picture of the shot, for the timeline
 //!
@@ -41,14 +44,17 @@ use crate::cloud::now_ms;
 use crate::{fail, video, App, Shared};
 
 mod board;
+mod export;
 
 const FILE: &str = "rigbrew-film.json";
 const MAX_SHOTS: usize = 200;
 const MAX_PROMPT: usize = 1200;
+/// The longest text the voice reads for one narration.
+const MAX_NARRATION: usize = 6000;
 /// The most shots one storyboard has: five minutes of five-second shots.
 const MAX_STORYBOARD: usize = 60;
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Shot {
     pub id: String,
     pub prompt: String,
@@ -72,6 +78,36 @@ pub struct Shot {
     /// Start this shot from the last picture of the shot before it, so the two join without a cut.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub continues: bool,
+    /// How the film goes from the shot before into this one: "" (a cut), "dissolve" or "black".
+    /// Not looked at when the shot continues the one before.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub join: String,
+    /// How loud the shot's own sound is in the film: 1.0 as made, up to 1.5.
+    #[serde(default = "one", skip_serializing_if = "is_one")]
+    pub volume: f32,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub mute: bool,
+}
+
+impl Default for Shot {
+    /// A shot that is not made, at its own volume.
+    fn default() -> Shot {
+        Shot {
+            id: String::new(),
+            prompt: String::new(),
+            frames: 121,
+            state: empty(),
+            error: None,
+            seconds: None,
+            made_frames: None,
+            trim_start: 0.0,
+            trim_end: 0.0,
+            continues: false,
+            join: String::new(),
+            volume: 1.0,
+            mute: false,
+        }
+    }
 }
 
 impl Shot {
@@ -87,6 +123,14 @@ fn is_zero(v: &f32) -> bool {
 
 fn half() -> f32 {
     0.5
+}
+
+fn one() -> f32 {
+    1.0
+}
+
+fn is_one(v: &f32) -> bool {
+    *v == 1.0
 }
 
 fn empty() -> String {
@@ -110,6 +154,14 @@ pub struct Project {
     /// 0 to 1: how loud the sound file is next to the shots' own sound.
     #[serde(default = "half")]
     pub sound_volume: f32,
+    /// The sound file plays once (a narration); otherwise it repeats until the film ends.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sound_once: bool,
+    /// The film comes up from black at its start, and goes down to black at its end.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fade_in: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fade_out: bool,
     pub updated_ms: i64,
 }
 
@@ -280,6 +332,9 @@ async fn create(State(app): State<Shared>, Json(body): Json<NewProject>) -> Resp
         auto_export: false,
         sound: String::new(),
         sound_volume: half(),
+        sound_once: false,
+        fade_in: false,
+        fade_out: false,
         updated_ms: 0,
     });
     project.id = id.clone();
@@ -305,7 +360,7 @@ async fn read(State(app): State<Shared>, Path(id): Path<String>) -> Response {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 struct ShotIn {
     #[serde(default)]
     id: Option<String>,
@@ -318,6 +373,12 @@ struct ShotIn {
     trim_end: f32,
     #[serde(default)]
     continues: bool,
+    #[serde(default)]
+    join: String,
+    #[serde(default)]
+    volume: Option<f32>,
+    #[serde(default)]
+    mute: bool,
 }
 
 #[derive(Deserialize)]
@@ -334,6 +395,12 @@ struct Save {
     sound: Option<String>,
     #[serde(default)]
     sound_volume: Option<f32>,
+    #[serde(default)]
+    sound_once: Option<bool>,
+    #[serde(default)]
+    fade_in: Option<bool>,
+    #[serde(default)]
+    fade_out: Option<bool>,
 }
 
 /// The new list of shots: a shot that keeps its id and its description keeps its clip; one whose
@@ -365,6 +432,13 @@ fn merge_shots(old: &[Shot], new: Vec<ShotIn>, size_changed: bool) -> Result<Vec
             }
             None => Shot { id, prompt, frames, state: empty(), continues, ..Shot::default() },
         };
+        // How a shot joins the film and how loud it is change nothing about its clip.
+        shot.join = match s.join.as_str() {
+            "dissolve" | "black" => s.join,
+            _ => String::new(),
+        };
+        shot.volume = s.volume.filter(|v| v.is_finite()).unwrap_or(1.0).clamp(0.0, 1.5);
+        shot.mute = s.mute;
         // Trims leave at least half a second of the shot.
         let length = shot.length();
         shot.trim_start = s.trim_start.clamp(0.0, (length - 0.5).max(0.0));
@@ -412,6 +486,9 @@ async fn save(State(app): State<Shared>, Path(id): Path<String>, Json(body): Jso
     if let Some(volume) = body.sound_volume.filter(|v| v.is_finite()) {
         p.sound_volume = volume.clamp(0.0, 1.0);
     }
+    p.sound_once = body.sound_once.unwrap_or(p.sound_once);
+    p.fade_in = body.fade_in.unwrap_or(p.fade_in);
+    p.fade_out = body.fade_out.unwrap_or(p.fade_out);
     if let Err(e) = store(&mut p) {
         return fail(StatusCode::INTERNAL_SERVER_ERROR, format!("the film could not be saved: {e}"));
     }
@@ -757,6 +834,14 @@ async fn sound(State(app): State<Shared>, Path(id): Path<String>) -> Response {
     }
 }
 
+/// The port this service listens on, for the requests it makes to its own chat and voice routes.
+fn own_port(app: &App) -> Option<u64> {
+    std::fs::read_to_string(app.root.join("daemon.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        .and_then(|v| v["port"].as_u64())
+}
+
 #[derive(Deserialize)]
 struct Idea {
     idea: String,
@@ -773,11 +858,7 @@ async fn storyboard(State(app): State<Shared>, Path(_id): Path<String>, Json(bod
     let Some(chat) = app.manifest.packages.iter().find(|p| p.modality == Modality::Chat && !app.installed(p).is_empty()) else {
         return fail(StatusCode::CONFLICT, "No chat model is installed. Add Chat under Models first.");
     };
-    let Some(port) = std::fs::read_to_string(app.root.join("daemon.json"))
-        .ok()
-        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
-        .and_then(|v| v["port"].as_u64())
-    else {
+    let Some(port) = own_port(&app) else {
         return fail(StatusCode::INTERNAL_SERVER_ERROR, "the service does not know its own address");
     };
     // A long film is written in parts, each part told what came before it.
@@ -874,26 +955,53 @@ fn file_stem(name: &str) -> String {
     }
 }
 
-/// The concat list ffmpeg reads: every made shot in order, with its trims.
-fn concat_list(p: &Project) -> (String, usize) {
+/// The made shots of a film whose clip is in its folder, in order: what an export holds.
+fn exported(p: &Project) -> Vec<&Shot> {
+    p.shots.iter().filter(|s| (s.state == "done" || s.state == "changed") && clip_path(p, &s.id).is_file()).collect()
+}
+
+/// The concat list ffmpeg reads for a film of plain cuts: every shot with its trims.
+fn concat_list(p: &Project, shots: &[&Shot]) -> String {
     let mut list = String::from("ffconcat version 1.0\n");
-    let mut count = 0;
-    for s in p.shots.iter().filter(|s| s.state == "done" || s.state == "changed") {
-        let path = clip_path(p, &s.id);
-        if !path.is_file() {
-            continue;
-        }
+    for s in shots {
         let length = s.length();
-        list.push_str(&format!("file '{}'\n", path.to_string_lossy().replace('\'', "'\\''")));
+        list.push_str(&format!("file '{}'\n", clip_path(p, &s.id).to_string_lossy().replace('\'', "'\\''")));
         if s.trim_start > 0.0 {
             list.push_str(&format!("inpoint {:.3}\n", s.trim_start));
         }
         if s.trim_end > 0.0 {
             list.push_str(&format!("outpoint {:.3}\n", (length - s.trim_end).max(s.trim_start + 0.1)));
         }
-        count += 1;
     }
-    (list, count)
+    list
+}
+
+/// The shots as the pieces of the film: what is kept of each clip, how it joins, how loud it is.
+fn pieces(shots: &[&Shot], sounds: &[bool]) -> Vec<export::Piece> {
+    shots
+        .iter()
+        .enumerate()
+        .map(|(i, s)| {
+            let whole = s.length();
+            let start = s.trim_start.clamp(0.0, (whole - 0.1).max(0.0));
+            let kept = (whole - start - s.trim_end.max(0.0)).max(0.1);
+            export::Piece {
+                start,
+                frames: ((kept * 24.0).round() as u32).max(1),
+                // A shot that continues the one before it joins it with nothing in between.
+                join: if i == 0 || s.continues { export::Join::Cut } else { export::Join::named(&s.join) },
+                volume: if s.mute { 0.0 } else { s.volume.clamp(0.0, 1.5) },
+                has_sound: sounds.get(i).copied().unwrap_or(true),
+            }
+        })
+        .collect()
+}
+
+/// Whether a clip has sound in it, as ffmpeg lists its streams.
+async fn has_sound(ffmpeg: &FsPath, clip: &FsPath) -> bool {
+    let listed =
+        tokio::process::Command::new(ffmpeg).args(["-hide_banner", "-i"]).arg(clip).stdin(std::process::Stdio::null()).output().await;
+    listed.map(|o| String::from_utf8_lossy(&o.stderr).contains("Audio:")).unwrap_or(true)
 }
 
 async fn export(State(app): State<Shared>, Path(id): Path<String>, body: Option<Json<Export>>) -> Response {
@@ -907,16 +1015,17 @@ async fn export(State(app): State<Shared>, Path(id): Path<String>, body: Option<
 }
 
 /// Starts joining the made shots of a film into its MP4; answers with how many shots go in.
-async fn begin_export(app: &Shared, p: Project, body: Export) -> Result<usize, (StatusCode, String)> {
+async fn begin_export(app: &Shared, mut p: Project, body: Export) -> Result<usize, (StatusCode, String)> {
     let id = p.id.clone();
-    let (list, count) = concat_list(&p);
-    if count == 0 {
+    if exported(&p).is_empty() {
         return Err((StatusCode::CONFLICT, "No shot is made yet. Make the shots first.".into()));
     }
     // The film's own sound file, unless the request names another.
     let music = match body.music.as_deref().or(Some(p.sound.as_str())).map(str::trim).filter(|m| !m.is_empty()) {
         Some(m) if FsPath::new(m).is_absolute() && FsPath::new(m).is_file() => Some(m.to_string()),
-        Some(_) => return Err((StatusCode::BAD_REQUEST, "the sound file was not found: give its full path".into())),
+        Some(_) => {
+            return Err((StatusCode::BAD_REQUEST, "The sound file of this film was not found. Choose it again, or take it out.".into()))
+        }
         None => None,
     };
     if EXPORTS.lock().unwrap().iter().any(|(i, v)| *i == id && v["state"] == "working") {
@@ -925,30 +1034,79 @@ async fn begin_export(app: &Shared, p: Project, body: Export) -> Result<usize, (
     let ffmpeg = crate::engine_tool(app, crate::EngineKind::Ffmpeg, "ffmpeg")
         .await
         .map_err(|e| (StatusCode::SERVICE_UNAVAILABLE, format!("The tool that joins the shots could not be set up: {e}")))?;
+    set_export(&id, json!({"state": "working", "shots": exported(&p).len()}));
+    // A clip from before lengths were kept is measured now: joins are counted in frames.
+    let unmeasured: Vec<String> = exported(&p).iter().filter(|s| s.made_frames.is_none()).map(|s| s.id.clone()).collect();
+    for shot in unmeasured {
+        let frames = look_at(app, &clip_path(&p, &shot), &poster_path(&p, &shot)).await;
+        set_shot(app, &id, &shot, |s| s.made_frames = frames);
+        if let Some(s) = p.shots.iter_mut().find(|s| s.id == shot) {
+            s.made_frames = frames;
+        }
+    }
+    let shots = exported(&p);
+    let count = shots.len();
+    let clips: Vec<PathBuf> = shots.iter().map(|s| clip_path(&p, &s.id)).collect();
+    let mut sounds = Vec::with_capacity(count);
+    for clip in &clips {
+        sounds.push(has_sound(&ffmpeg, clip).await);
+    }
+    let pieces = pieces(&shots, &sounds);
+    // A film of plain cuts is read as one list; anything more is a filter graph over every clip.
+    let simple = export::plain(&pieces);
+    let film = if simple { export::as_it_is(export::film_frames(&pieces)) } else { export::joined(&pieces) };
+    let volume = body.music_volume.unwrap_or(p.sound_volume).clamp(0.0, 1.0);
+    let finish = export::Finish {
+        fade_in: p.fade_in,
+        fade_out: p.fade_out,
+        scale: 1,
+        music: music.as_ref().map(|_| (if simple { 1 } else { count }, volume)),
+    };
+    let graph = export::finished(film, &finish);
     let folder = PathBuf::from(&p.folder);
     let out = folder.join(format!("{}.mp4", file_stem(&p.name)));
     let list_path = folder.join(".rigbrew-export.txt");
-    std::fs::write(&list_path, list)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("the film's folder cannot be written to: {e}")))?;
-    set_export(&id, json!({"state": "working", "shots": count}));
-    let volume = body.music_volume.unwrap_or(p.sound_volume).clamp(0.0, 1.0);
+    let graph_path = folder.join(".rigbrew-export-graph.txt");
+    let written = if simple { std::fs::write(&list_path, concat_list(&p, &shots)) } else { Ok(()) }.and_then(|()| {
+        if graph.filter.is_empty() {
+            Ok(())
+        } else {
+            std::fs::write(&graph_path, &graph.filter)
+        }
+    });
+    if let Err(e) = written {
+        set_export(&id, json!({"state": "failed", "error": format!("the film's folder cannot be written to: {e}")}));
+        return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("the film's folder cannot be written to: {e}")));
+    }
+    let joins = (
+        pieces.iter().skip(1).filter(|x| x.join == export::Join::Dissolve).count(),
+        pieces.iter().skip(1).filter(|x| x.join == export::Join::Black).count(),
+    );
+    let once = p.sound_once;
     let app2 = app.clone();
     tokio::spawn(async move {
         let started = std::time::Instant::now();
         let tmp = out.with_extension("part.mp4");
         let mut cmd = tokio::process::Command::new(&ffmpeg);
-        cmd.args(["-hide_banner", "-loglevel", "error", "-y", "-f", "concat", "-safe", "0", "-i"]).arg(&list_path);
+        cmd.args(["-hide_banner", "-loglevel", "error", "-y"]);
+        if simple {
+            cmd.args(["-f", "concat", "-safe", "0", "-i"]).arg(&list_path);
+        } else {
+            for clip in &clips {
+                cmd.arg("-i").arg(clip);
+            }
+        }
         if let Some(m) = &music {
-            // The music runs under the whole film and ends with it.
-            cmd.args(["-stream_loop", "-1", "-i"]).arg(m);
-            cmd.args([
-                "-filter_complex",
-                &format!("[1:a]volume={volume:.2}[m];[0:a][m]amix=inputs=2:duration=first:dropout_transition=0[a]"),
-                "-map",
-                "0:v",
-                "-map",
-                "[a]",
-            ]);
+            // Music repeats under the whole film; a narration is said once. Either ends with the film.
+            if !once {
+                cmd.args(["-stream_loop", "-1"]);
+            }
+            cmd.arg("-i").arg(m);
+        }
+        if !graph.filter.is_empty() {
+            // The graph of a long film is longer than a command line may be: it is read from a file.
+            cmd.arg("-/filter_complex").arg(&graph_path);
+            cmd.args(["-map", &graph.video, "-map", &graph.audio]);
         }
         // Apple's own encoders: H.264 in hardware and AAC. Plays everywhere.
         cmd.args([
@@ -958,6 +1116,8 @@ async fn begin_export(app: &Shared, p: Project, body: Export) -> Result<usize, (
             "8M",
             "-pix_fmt",
             "yuv420p",
+            "-r",
+            "24",
             "-c:a",
             "aac",
             "-b:a",
@@ -981,23 +1141,87 @@ async fn begin_export(app: &Shared, p: Project, body: Export) -> Result<usize, (
             Err(e) => Err(e.to_string()),
         };
         std::fs::remove_file(&list_path).ok();
+        std::fs::remove_file(&graph_path).ok();
         match result {
             Ok(()) => {
                 let bytes = std::fs::metadata(&out).map(|m| m.len()).unwrap_or(0);
                 app2.record(
                     "studio_exported",
-                    json!({"shots": count, "seconds": started.elapsed().as_secs_f32(), "bytes": bytes, "music": music.is_some()}),
+                    json!({"shots": count, "seconds": started.elapsed().as_secs_f32(), "bytes": bytes, "music": music.is_some(),
+                           "film_seconds": graph.frames as f32 / 24.0, "dissolves": joins.0, "through_black": joins.1, "plain": simple}),
                 );
-                set_export(&id, json!({"state": "done", "file": out.to_string_lossy(), "bytes": bytes, "shots": count}));
+                set_export(
+                    &id,
+                    json!({"state": "done", "file": out.to_string_lossy(), "bytes": bytes, "shots": count, "seconds": graph.frames as f32 / 24.0}),
+                );
             }
             Err(e) => {
                 std::fs::remove_file(&tmp).ok();
-                app2.record("studio_export_failed", json!({"shots": count}));
+                app2.record("studio_export_failed", json!({"shots": count, "plain": simple}));
                 set_export(&id, json!({"state": "failed", "error": e}));
             }
         }
     });
     Ok(count)
+}
+
+#[derive(Deserialize)]
+struct Narration {
+    text: String,
+}
+
+/// The voice package reads a text; the reading is saved in the film's folder and becomes its sound file.
+async fn narration(State(app): State<Shared>, Path(id): Path<String>, Json(body): Json<Narration>) -> Response {
+    let Some(mut p) = load(&app, &id) else {
+        return fail(StatusCode::NOT_FOUND, "no such film, or its folder is gone");
+    };
+    let text: String = body.text.trim().chars().take(MAX_NARRATION).collect();
+    if text.is_empty() {
+        return fail(StatusCode::BAD_REQUEST, "write what is to be said in \"text\"");
+    }
+    let Some(voice) = app.manifest.packages.iter().find(|pk| pk.modality == Modality::Voice && !app.installed(pk).is_empty()) else {
+        return fail(StatusCode::CONFLICT, "No voice is installed. Add a voice under Models first.");
+    };
+    let Some(port) = own_port(&app) else {
+        return fail(StatusCode::INTERNAL_SERVER_ERROR, "the service does not know its own address");
+    };
+    let answer = app
+        .http
+        .post(format!("http://127.0.0.1:{port}/v1/audio/speech"))
+        .bearer_auth(&app.token)
+        .json(&json!({"model": voice.id, "input": text}))
+        .timeout(Duration::from_secs(900))
+        .send()
+        .await;
+    let wav = match answer {
+        Ok(r) if r.status().is_success() => match r.bytes().await {
+            Ok(bytes) => bytes,
+            Err(e) => return fail(StatusCode::BAD_GATEWAY, e.to_string()),
+        },
+        Ok(r) => {
+            let v: Value = r.json().await.unwrap_or(Value::Null);
+            return fail(
+                StatusCode::BAD_GATEWAY,
+                v["error"]["message"].as_str().unwrap_or("the voice could not read the text").to_string(),
+            );
+        }
+        Err(e) => return fail(StatusCode::BAD_GATEWAY, e.to_string()),
+    };
+    let file = FsPath::new(&p.folder).join("narration.wav");
+    if let Err(e) = std::fs::write(&file, &wav) {
+        return fail(StatusCode::INTERNAL_SERVER_ERROR, format!("the narration could not be saved in the film's folder: {e}"));
+    }
+    // The film was open while the voice read: take it as it is now.
+    if let Some(now) = load(&app, &id) {
+        p = now;
+    }
+    p.sound = file.to_string_lossy().to_string();
+    p.sound_once = true;
+    if let Err(e) = store(&mut p) {
+        return fail(StatusCode::INTERNAL_SERVER_ERROR, format!("the film could not be saved: {e}"));
+    }
+    app.record("studio_narration_made", json!({"package": voice.id, "chars": text.chars().count(), "bytes": wav.len()}));
+    Json(view(&app, p)).into_response()
 }
 
 async fn export_state(Path(id): Path<String>) -> Json<Value> {
@@ -1012,6 +1236,7 @@ pub fn router() -> Router<Shared> {
         .route("/v1/studio/projects/{id}/storyboard", post(storyboard))
         .route("/v1/studio/projects/{id}/export", get(export_state).post(export))
         .route("/v1/studio/projects/{id}/sound", get(sound))
+        .route("/v1/studio/projects/{id}/narration", post(narration))
         .route("/v1/studio/projects/{id}/clips/{name}", get(clip))
 }
 
@@ -1042,6 +1267,7 @@ mod tests {
                 trim_start: 0.0,
                 trim_end: 0.0,
                 continues: false,
+                ..ShotIn::default()
             },
             ShotIn {
                 id: Some("a1".into()),
@@ -1050,8 +1276,17 @@ mod tests {
                 trim_start: 0.0,
                 trim_end: 0.0,
                 continues: false,
+                ..ShotIn::default()
             },
-            ShotIn { id: None, prompt: "a new one".into(), frames: None, trim_start: 0.0, trim_end: 0.0, continues: false },
+            ShotIn {
+                id: None,
+                prompt: "a new one".into(),
+                frames: None,
+                trim_start: 0.0,
+                trim_end: 0.0,
+                continues: false,
+                ..ShotIn::default()
+            },
         ];
         let out = merge_shots(&old, new, false).unwrap();
         assert_eq!(out.iter().map(|s| s.state.as_str()).collect::<Vec<_>>(), ["done", "changed", "empty"]);
@@ -1067,6 +1302,7 @@ mod tests {
                 trim_start: 0.0,
                 trim_end: 0.0,
                 continues: false,
+                ..ShotIn::default()
             }],
             true,
         )
@@ -1078,15 +1314,39 @@ mod tests {
     fn shots_are_bounded_and_ids_cannot_repeat_or_leave_the_folder() {
         assert!(merge_shots(
             &[],
-            vec![ShotIn { id: None, prompt: "x".into(), frames: Some(999), trim_start: 0.0, trim_end: 0.0, continues: false }],
+            vec![ShotIn {
+                id: None,
+                prompt: "x".into(),
+                frames: Some(999),
+                trim_start: 0.0,
+                trim_end: 0.0,
+                continues: false,
+                ..ShotIn::default()
+            }],
             false
         )
         .is_err());
         let twice = merge_shots(
             &[],
             vec![
-                ShotIn { id: Some("a1".into()), prompt: "one".into(), frames: None, trim_start: 0.0, trim_end: 0.0, continues: false },
-                ShotIn { id: Some("a1".into()), prompt: "two".into(), frames: None, trim_start: 0.0, trim_end: 0.0, continues: false },
+                ShotIn {
+                    id: Some("a1".into()),
+                    prompt: "one".into(),
+                    frames: None,
+                    trim_start: 0.0,
+                    trim_end: 0.0,
+                    continues: false,
+                    ..ShotIn::default()
+                },
+                ShotIn {
+                    id: Some("a1".into()),
+                    prompt: "two".into(),
+                    frames: None,
+                    trim_start: 0.0,
+                    trim_end: 0.0,
+                    continues: false,
+                    ..ShotIn::default()
+                },
             ],
             false,
         )
@@ -1115,10 +1375,14 @@ mod tests {
             auto_export: false,
             sound: String::new(),
             sound_volume: 0.5,
+            sound_once: false,
+            fade_in: false,
+            fade_out: false,
             updated_ms: 0,
         };
-        let (list, count) = concat_list(&p);
-        assert_eq!(count, 2);
+        let made = exported(&p);
+        assert_eq!(made.len(), 2);
+        let list = concat_list(&p, &made);
         let lines: Vec<&str> = list.lines().collect();
         assert!(lines[0].starts_with("ffconcat") && lines[1].ends_with("a1.webm'") && lines[2].ends_with("c3.webm'"));
         assert_eq!(&lines[3..], ["inpoint 0.500", "outpoint 4.042"]);
@@ -1127,7 +1391,15 @@ mod tests {
         // Trims always leave part of the shot.
         let kept = merge_shots(
             &[],
-            vec![ShotIn { id: None, prompt: "x".into(), frames: Some(49), trim_start: 9.0, trim_end: 9.0, continues: false }],
+            vec![ShotIn {
+                id: None,
+                prompt: "x".into(),
+                frames: Some(49),
+                trim_start: 9.0,
+                trim_end: 9.0,
+                continues: false,
+                ..ShotIn::default()
+            }],
             false,
         )
         .unwrap();
@@ -1143,7 +1415,15 @@ mod tests {
     }
 
     fn asked(id: &str, prompt: &str, continues: bool) -> ShotIn {
-        ShotIn { id: Some(id.into()), prompt: prompt.into(), frames: Some(121), trim_start: 0.0, trim_end: 0.0, continues }
+        ShotIn {
+            id: Some(id.into()),
+            prompt: prompt.into(),
+            frames: Some(121),
+            trim_start: 0.0,
+            trim_end: 0.0,
+            continues,
+            ..ShotIn::default()
+        }
     }
 
     #[test]
@@ -1183,6 +1463,44 @@ mod tests {
         assert_eq!(frames_read("frame=121 fps=30"), Some(121));
         assert_eq!(frames_read("clip.webm: Invalid data found when processing input"), None);
         assert_eq!(frames_read(""), None);
+    }
+
+    #[test]
+    fn the_pieces_of_a_film_follow_its_shots() {
+        let mut a = shot("a1", "fox", "done");
+        a.made_frames = Some(56);
+        a.join = "dissolve".into();
+        let mut b = a.clone();
+        b.trim_start = 0.5;
+        b.trim_end = 0.75;
+        b.volume = 1.4;
+        let mut c = a.clone();
+        c.continues = true;
+        c.mute = true;
+        let mut d = a.clone();
+        d.join = "black".into();
+        let made = pieces(&[&a, &b, &c, &d], &[true, true, true, false]);
+        // The first shot has no join; a shot that continues the one before it is always a cut.
+        assert_eq!(
+            made.iter().map(|x| x.join).collect::<Vec<_>>(),
+            [export::Join::Cut, export::Join::Dissolve, export::Join::Cut, export::Join::Black]
+        );
+        assert_eq!(made.iter().map(|x| x.frames).collect::<Vec<_>>(), [56, 26, 56, 56]);
+        assert_eq!(made[1].start, 0.5);
+        assert_eq!(made.iter().map(|x| x.volume).collect::<Vec<_>>(), [1.0, 1.4, 0.0, 1.0]);
+        assert!(!made[3].has_sound && !export::plain(&made));
+        // Joins and volume are kept by a save and leave the clip as it is.
+        let kept = merge_shots(
+            &[a.clone(), b.clone()],
+            vec![
+                ShotIn { join: "black".into(), volume: Some(9.0), mute: true, ..asked("a1", "fox", false) },
+                ShotIn { join: "wipe".into(), ..asked("b2", "fox", false) },
+            ],
+            false,
+        )
+        .unwrap();
+        assert_eq!((kept[0].state.as_str(), kept[0].join.as_str(), kept[0].volume, kept[0].mute), ("done", "black", 1.5, true));
+        assert_eq!((kept[1].join.as_str(), kept[1].volume), ("", 1.0));
     }
 
     #[test]

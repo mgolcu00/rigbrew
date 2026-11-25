@@ -141,6 +141,7 @@
 				} else {
 					playing = false;
 					time = total;
+					el.style.opacity = String(light(p, p.to, total));
 					music?.pause();
 				}
 			}

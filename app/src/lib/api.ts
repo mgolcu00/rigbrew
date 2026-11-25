@@ -524,6 +524,11 @@ export interface StudioProject {
 	/** Full path of a sound file that plays under the whole film, and how loud it is (0 to 1). */
 	sound?: string;
 	sound_volume?: number;
+	/** The sound file plays once (a narration) and does not repeat. */
+	sound_once?: boolean;
+	/** The film comes up from black at its start, and goes down to black at its end. */
+	fade_in?: boolean;
+	fade_out?: boolean;
 	updated_ms: number;
 }
 
@@ -553,8 +558,20 @@ export const studioList = () => json<{ projects: StudioListing[]; home?: string 
 /** Opens the film in `folder`, or starts one there. Without a folder the service makes one named after the film. */
 export const studioOpen = (folder: string, name = '') => json<StudioView>('POST', '/v1/studio/projects', { folder, name });
 export const studioRead = (id: string) => json<StudioView>('GET', `/v1/studio/projects/${enc(id)}`);
-export const studioSave = (id: string, body: { name?: string; size?: string; auto_export?: boolean; sound?: string; sound_volume?: number; shots?: { id?: string; prompt: string; frames: number; trim_start?: number; trim_end?: number; continues?: boolean }[] }) =>
-	json<StudioView>('PUT', `/v1/studio/projects/${enc(id)}`, body);
+export interface StudioSave {
+	name?: string;
+	size?: string;
+	auto_export?: boolean;
+	sound?: string;
+	sound_volume?: number;
+	sound_once?: boolean;
+	fade_in?: boolean;
+	fade_out?: boolean;
+	shots?: { id?: string; prompt: string; frames: number; trim_start?: number; trim_end?: number; continues?: boolean; join?: string; volume?: number; mute?: boolean }[];
+}
+export const studioSave = (id: string, body: StudioSave) => json<StudioView>('PUT', `/v1/studio/projects/${enc(id)}`, body);
+/** The voice reads a text; the reading is saved in the film's folder and becomes the film's sound file. */
+export const studioNarration = (id: string, text: string) => json<StudioView>('POST', `/v1/studio/projects/${enc(id)}/narration`, { text });
 export const studioForget = (id: string) => json<unknown>('DELETE', `/v1/studio/projects/${enc(id)}`);
 export const studioRender = (id: string, shots?: string[]) => json<StudioView>('POST', `/v1/studio/projects/${enc(id)}/render`, shots ? { shots } : {});
 export const studioStop = (id: string) => json<StudioView>('DELETE', `/v1/studio/projects/${enc(id)}/render`);
