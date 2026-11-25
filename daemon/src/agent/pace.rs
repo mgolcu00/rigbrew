@@ -6,8 +6,9 @@
 //! - **The web.** A search the task already made (the same words in any order, case or
 //!   punctuation) is answered from memory, and so is a page it already opened. One request from
 //!   the person gets `SEARCH_BUDGET` searches and `FETCH_BUDGET` pages; after that the tool
-//!   answers that enough was searched. A few searches in a row carry a line that says to read a
-//!   page or answer.
+//!   answers that enough was searched, and it is no longer offered to the model at all. A few
+//!   searches in a row carry a line that says to read a page or answer. Two searches in a row
+//!   that the engine did not answer switch the search off for the request.
 //! - **Runs of look-ups.** Reading, listing and searching again and again with nothing changed,
 //!   run or answered in between.
 //! - **The ladder.** The same call with the same result a third time, a long run of look-ups, or
@@ -29,6 +30,8 @@ pub const SEARCH_BUDGET: usize = 6;
 pub const FETCH_BUDGET: usize = 12;
 /// Web searches in a row, with no other kind of step, before the result says to read a page.
 const WEB_RUN: usize = 3;
+/// Searches in a row that the engine did not answer before the search is switched off.
+const SEARCH_FAILS: usize = 2;
 /// Look-ups in a row, with nothing changed or run, that count as a sign of being stuck.
 const LOOKUP_RUN: usize = 12;
 /// How often the same call may give the same result before it is a sign of being stuck.
@@ -143,6 +146,9 @@ pub struct Pace {
     same_calls: usize,
     failing: String,
     fail_run: usize,
+    /// Searches in a row that came back as an error, and whether that switched the search off.
+    search_fails: usize,
+    search_off: bool,
     /// How often each look-up gave the same result since something last changed.
     looked: HashMap<String, u8>,
     /// How often each change or command gave the same result in the current request.
@@ -194,6 +200,33 @@ impl Pace {
         self.searches
     }
 
+    /// Whether a tool is closed for the rest of the request: it is then not offered to the
+    /// model at all, which holds better than any answer it could be given.
+    pub fn closed(&self, tool: &str) -> bool {
+        match tool {
+            "web_search" => self.search_off || self.searches >= SEARCH_BUDGET,
+            "fetch_url" => self.fetches >= FETCH_BUDGET,
+            _ => false,
+        }
+    }
+
+    /// What the model is told, at the end of the system message, about a tool that is closed.
+    pub fn note(&self, web: bool) -> String {
+        let mut out = String::new();
+        if !web {
+            return out;
+        }
+        if self.search_off {
+            out.push_str("\n\nweb_search gives no results right now and is switched off for this request. Open a page you know with fetch_url (an official site or its documentation), or answer and say what you could not check.");
+        } else if self.searches >= SEARCH_BUDGET {
+            out.push_str(&format!("\n\nweb_search is used up for this request ({SEARCH_BUDGET} searches). Work with what you found: open one of the pages with fetch_url, or answer."));
+        }
+        if self.fetches >= FETCH_BUDGET {
+            out.push_str("\n\nfetch_url is used up for this request. Work with what you have read and answer.");
+        }
+        out
+    }
+
     fn recall(&self, key: &str) -> Option<&str> {
         self.remembered.iter().find(|r| r.key == key).map(|r| r.result.as_str())
     }
@@ -241,6 +274,9 @@ impl Pace {
                 "You already opened this page. It was not fetched again; this is what it said."
             };
             return Some(Held { text: format!("{said}\n\n{result}"), refused: false });
+        }
+        if tool == "web_search" && self.search_off {
+            return Some(Held { text: super::web::NO_ANSWER.into(), refused: true });
         }
         let (used, budget, enough) = if tool == "web_search" {
             (
@@ -301,6 +337,11 @@ open one of the pages found with fetch_url, or answer.",
         let fresh = *seen == 1;
         if *seen >= SAME_OUTCOME {
             sign = Some(Sign::Same);
+        }
+        // A search the engine did not answer, twice in a row: no point in a third.
+        if kind == Kind::Search && held.is_none() {
+            self.search_fails = if status == "failed" { self.search_fails + 1 } else { 0 };
+            self.search_off |= self.search_fails >= SEARCH_FAILS;
         }
         if failed {
             if self.failing == tool {
@@ -453,6 +494,44 @@ mod tests {
         assert_eq!(pace.searches(), 0);
         assert!(pace.before("web_search", &json!({"query": "one more thing"})).is_none());
         assert!(pace.before("fetch_url", &json!({"url": "https://example.com/more"})).is_none());
+    }
+
+    #[test]
+    fn a_tool_that_is_used_up_is_closed_and_the_model_is_told_once() {
+        let mut pace = Pace::default();
+        assert!(!pace.closed("web_search") && !pace.closed("fetch_url") && pace.note(true).is_empty());
+        for i in 0..SEARCH_BUDGET {
+            search(&mut pace, &format!("subject{i}"));
+        }
+        assert!(pace.closed("web_search") && !pace.closed("fetch_url") && !pace.closed("read_file"));
+        assert!(pace.note(true).contains("web_search is used up for this request (6 searches)"), "{}", pace.note(true));
+        assert!(pace.note(false).is_empty(), "nothing to say in a task without the web");
+        pace.next_request();
+        assert!(!pace.closed("web_search") && pace.note(true).is_empty());
+    }
+
+    #[test]
+    fn two_searches_the_engine_did_not_answer_switch_the_search_off_for_the_request() {
+        let mut pace = Pace::default();
+        let fail = |pace: &mut Pace, query: &str| step(pace, "web_search", json!({"query": query}), super::super::web::NO_ANSWER, "failed");
+        fail(&mut pace, "first words");
+        assert!(!pace.closed("web_search"));
+        // One that works in between starts the count again.
+        search(&mut pace, "works");
+        fail(&mut pace, "second words");
+        assert!(!pace.closed("web_search"));
+        fail(&mut pace, "third words");
+        assert!(pace.closed("web_search"));
+        assert_eq!(pace.searches(), 4);
+        assert!(pace.note(true).contains("switched off for this request") && pace.note(true).contains("fetch_url"));
+        // Asked for all the same, it is not sent.
+        let held = pace.before("web_search", &json!({"query": "fourth words"})).unwrap();
+        assert!(held.refused && held.text.contains("fetch_url"));
+        assert_eq!(pace.searches(), 4);
+        // Pages can still be opened, and the next message of the person tries the search again.
+        assert!(pace.before("fetch_url", &json!({"url": "https://example.com/"})).is_none());
+        pace.next_request();
+        assert!(!pace.closed("web_search") && pace.before("web_search", &json!({"query": "fourth words"})).is_none());
     }
 
     #[test]

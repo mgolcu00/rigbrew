@@ -887,13 +887,20 @@ async fn work(app: &Shared, id: &str) -> Ended {
         agents.change(id, |t| recall::compact(&mut t.messages, &mut t.memory, budget));
         let Some(task) = agents.get(id) else { return failed("The task is gone.".into()) };
         let skills = skills::load(&app.root, Some(folder.root()));
-        let system =
-            format!("{}{}{}", system_prompt(&folder, task.mode, task.web, &skills), mcp::prompt(app, &task.mcp), extra::context(&task));
+        let system = format!(
+            "{}{}{}{}",
+            system_prompt(&folder, task.mode, task.web, &skills),
+            mcp::prompt(app, &task.mcp),
+            extra::context(&task),
+            task.pace.note(task.web)
+        );
         let mut messages = vec![json!({"role": "system", "content": system})];
         messages.extend(fit(&recall::conversation(&task.memory, &task.messages), budget));
         let mut tools = tool_defs(task.mode, task.web, !skills.is_empty());
         tools.extend(skills::extra_tools(&skills));
         tools.extend(mcp::tool_defs(app, &task.mcp));
+        // A tool that is used up for this request is not offered again until the next one.
+        tools.retain(|t| !t["function"]["name"].as_str().is_some_and(|name| task.pace.closed(name)));
         let body = json!({
             "model": package.id,
             "messages": messages,

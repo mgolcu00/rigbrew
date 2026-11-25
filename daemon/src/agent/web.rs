@@ -343,9 +343,27 @@ pub async fn search(query: &str) -> Result<String, String> {
     let mut url = Url::parse(SEARCH).expect("static address");
     url.query_pairs_mut().append_pair("q", &query.chars().take(300).collect::<String>());
     let page = tokio::time::timeout(TIMEOUT, get(url)).await.map_err(|_| "The search took too long to answer.".to_string())??;
-    let hits = parse_results(&String::from_utf8_lossy(&page.body));
+    results_text(&String::from_utf8_lossy(&page.body))
+}
+
+/// What the model is told when the search page came back without results and without saying
+/// that there are none: the engine turns automated searches away at times. Searching again
+/// then only makes it worse, so this is an error, and after two of them in a row the search is
+/// switched off for the request (see `pace`).
+pub const NO_ANSWER: &str = "The search engine gave no results this time; it sometimes turns automated searches away. Searching again will not help now. \
+Open a page you know with fetch_url, such as the official site or its documentation, or answer from what you know and say that it is not checked.";
+
+/// A results page as the model reads it: a short numbered list, or why there is none.
+pub fn results_text(html: &str) -> Result<String, String> {
+    let hits = parse_results(html);
     if hits.is_empty() {
-        return Ok("The search gave no results that could be read. Try other words.".into());
+        // A page that says "No results" is an answer; any other page without results is not.
+        let lower = html.to_lowercase();
+        return if lower.contains("no-results") || lower.contains("no results") {
+            Ok("The search found nothing for these words. Use fewer or other words, once.".into())
+        } else {
+            Err(NO_ANSWER.into())
+        };
     }
     let lines: Vec<String> =
         hits.iter().enumerate().map(|(i, h)| format!("{}. {}\n   {}\n   {}", i + 1, h.title, h.url, h.snippet)).collect();
@@ -481,7 +499,22 @@ mod tests {
         assert!(hits[4].snippet.starts_with("Text 4 word") && hits[4].snippet.ends_with('…'));
         assert!(hits.iter().all(|h| h.snippet.chars().count() <= 160 && h.title.chars().count() <= 100));
         // Five results as the model reads them fit in a small part of its context.
-        let shown: usize = hits.iter().map(|h| h.title.len() + h.url.len() + h.snippet.len() + 12).sum();
-        assert!(shown < 1600, "{shown}");
+        let shown = results_text(&html).unwrap();
+        assert!(shown.starts_with("1. Result 0 word") && shown.contains("\n5. Result 4") && !shown.contains("\n6. "), "{shown}");
+        assert!(shown.chars().count() < 1600, "{}", shown.chars().count());
+    }
+
+    #[test]
+    fn a_page_without_results_is_an_answer_only_when_it_says_so() {
+        let none = r#"<div class="no-results">No results found for <b>qqzzxx</b>.</div>"#;
+        assert!(results_text(none).unwrap().starts_with("The search found nothing"));
+        // A page that asks to prove you are a person, an empty page, an error page: not an answer.
+        for turned_away in [
+            "<html><body><form id=\"challenge-form\">Select all squares</form></body></html>",
+            "",
+            "<html><body>Service unavailable</body></html>",
+        ] {
+            assert_eq!(results_text(turned_away).unwrap_err(), NO_ANSWER);
+        }
     }
 }

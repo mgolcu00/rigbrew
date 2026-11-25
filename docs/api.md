@@ -172,8 +172,12 @@ whatever the model does (`daemon/src/agent/pace.rs`):
   punctuation aside) is not sent: the result from before comes back with a line that says so. The same goes for a
   page that `fetch_url` already opened.
 - **A budget for each request.** One message of the person gets 6 web searches and 12 pages. After that the tool
-  answers that enough was searched and that the model has to work with what it has. The next message of the person
-  starts the count again.
+  is no longer offered to the model, the system message says so, and a call made all the same is answered with
+  "enough has been searched" and not sent. The next message of the person starts the count again.
+- **A search engine that does not answer.** A results page with no results that does not say "no results" (the
+  engine turns automated searches away at times) is an error, not an empty answer. After two of them in a row the
+  search is switched off for the request, and the model is told to open a page it knows or to answer and say what
+  it could not check.
 - **Results are small.** A search gives five results: title, address and one line of at most 160 characters. A
   page is cut to its readable text and its first 4000 characters, about an eighth of the model's context.
 - **A nudge in the result.** The third web search in a row with no other kind of step carries a line that says to
