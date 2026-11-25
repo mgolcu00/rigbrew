@@ -8,6 +8,9 @@
 //!   GET    /v1/packages                   catalogue with a recommendation and what is installed
 //!   POST   /v1/packages/{id}/pull         start a download: {"variant": "q5"} (optional); 403 when the package needs an account and nobody is signed in
 //!   DELETE /v1/packages/{id}              remove installed files: ?variant=q5 for one variant, all otherwise
+//!   POST   /v1/community/lookup           {"url"}: what a link to a model on Hugging Face or GitHub holds (GGUF files, sizes, licence)
+//!   POST   /v1/community                  {"repo", "file"}: add a community chat model and start its download; answers {"job", "id"}
+//!   DELETE /v1/community/{id}             remove a community model and its files
 //!   GET    /v1/jobs                       all download jobs of this run
 //!   GET    /v1/jobs/{id}                  download progress
 //!   DELETE /v1/jobs/{id}                  cancel a running download (the partial file is kept for resume)
@@ -41,6 +44,7 @@
 //!   ...    /v1/studio/...                 films made of shots in a folder (see `studio.rs`)
 
 mod cloud;
+mod community;
 mod library;
 mod speech;
 mod studio;
@@ -144,6 +148,8 @@ struct Job {
 struct App {
     profile: HardwareProfile,
     manifest: Manifest,
+    /// Chat models the person added by link (`community.json`). Not in the manifest, not tested by Rigbrew.
+    community: Mutex<rigbrew_core::community::Store>,
     root: PathBuf,
     token: String,
     events: Mutex<EventStore>,
@@ -190,8 +196,34 @@ impl App {
         self.root.join("packages")
     }
 
+    /// A package by id: one from the signed manifest, or a community model the person added.
+    fn package(&self, id: &str) -> Option<Package> {
+        self.manifest.package(id).cloned().or_else(|| self.community.lock().unwrap().get(id).map(|c| c.package.clone()))
+    }
+
+    /// Every package: the manifest's, then the community models.
+    fn all_packages(&self) -> Vec<Package> {
+        let community = self.community.lock().unwrap();
+        let added = community.list().iter().map(|c| &c.package).filter(|p| self.manifest.package(&p.id).is_none());
+        self.manifest.packages.iter().chain(added).cloned().collect()
+    }
+
+    /// The folder a package's files are in and the address they are downloaded from.
+    fn place(&self, package: &Package) -> (PathBuf, String) {
+        if self.manifest.package(&package.id).is_none() {
+            if let Some(c) = self.community.lock().unwrap().get(&package.id) {
+                return (rigbrew_core::community::files_dir(&self.root, c), c.base_url.clone());
+            }
+        }
+        (self.packages_dir(), self.manifest.base_url.clone())
+    }
+
+    fn files_dir(&self, package: &Package) -> PathBuf {
+        self.place(package).0
+    }
+
     fn installed<'a>(&self, package: &'a Package) -> Vec<&'a Variant> {
-        let dir = self.packages_dir();
+        let dir = self.files_dir(package);
         package.variants.iter().filter(|v| v.files.iter().all(|f| rigbrew_core::bundle::present(&dir, f))).collect()
     }
 
@@ -225,11 +257,11 @@ async fn system(State(app): State<Shared>) -> Json<Value> {
 
 async fn packages(State(app): State<Shared>) -> Json<Value> {
     let list: Vec<Value> = app
-        .manifest
-        .packages
+        .all_packages()
         .iter()
         .map(|p| {
             json!({
+                "community": app.manifest.package(&p.id).is_none(),
                 "id": p.id, "name": p.name, "modality": p.modality, "source": p.source,
                 "variants": p.variants.iter().map(|v| json!({"id": v.id, "quality": v.quality, "disk_mb": v.disk_mb(), "accel_mem_mb": v.accel_mem_mb, "metrics": v.metrics})).collect::<Vec<_>>(),
                 "recommendation": recommend(&app.profile, p).verdict,
@@ -363,11 +395,11 @@ fn start_pull(app: &Shared, package: Package, variant: Variant) -> String {
             }
         };
         let free_mb = hardware::scan_with_data_dir(&app.root).storage.free_mb;
-        let mut result =
-            download::pull(&download::client(), &app.manifest, &package, &variant, &app.packages_dir(), free_mb, &mut on_progress)
-                .await
-                .map(|_| ())
-                .map_err(|e| e.to_string());
+        let (dir, base_url) = app.place(&package);
+        let mut result = download::pull_from(&download::client(), &base_url, &variant, &dir, free_mb, &mut on_progress)
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string());
         if let (Ok(()), Some(build)) = (&result, &engine) {
             result = install_engine(&app, build, &mut on_progress).await;
         }
@@ -406,7 +438,7 @@ struct PullBody {
 }
 
 async fn pull(State(app): State<Shared>, Path(id): Path<String>, body: Option<Json<PullBody>>) -> Response {
-    let Some(package) = app.manifest.package(&id).cloned() else {
+    let Some(package) = app.package(&id) else {
         return fail(StatusCode::NOT_FOUND, format!("no package {id}"));
     };
     // Some packages are only for signed-in accounts (the manifest or the server's app config says which).
@@ -467,16 +499,17 @@ struct RemoveQuery {
 }
 
 async fn package_remove(State(app): State<Shared>, Path(id): Path<String>, Query(q): Query<RemoveQuery>) -> Response {
-    let Some(package) = app.manifest.package(&id) else {
+    let Some(package) = app.package(&id) else {
         return fail(StatusCode::NOT_FOUND, format!("no package {id}"));
     };
+    let package = &package;
     {
         let mut slots = app.engine.lock().await;
         if let Err(resp) = evict(&app, &mut slots, &id, |l| l.package == id).await {
             return *resp;
         }
     }
-    let dir = app.packages_dir();
+    let dir = app.files_dir(package);
     let installed: Vec<&Variant> = app.installed(package);
     let remove: Vec<&Variant> = installed.iter().copied().filter(|v| q.variant.as_ref().is_none_or(|w| *w == v.id)).collect();
     if remove.is_empty() {
@@ -621,7 +654,7 @@ async fn ensure_engine(app: &App, package: &Package) -> Result<(u16, String, Str
     // Another chat model goes; a picture model stays if both fit.
     evict(app, &mut slots, &package.id, Loaded::is_chat).await?;
     make_room(app, &mut slots, &package.id, variant.accel_mem_mb).await?;
-    let dir = app.packages_dir();
+    let dir = app.files_dir(package);
     let file = |role: &str| variant.files.iter().find(|f| f.role == role).map(|f| dir.join(&f.path));
     let Some(model) = file("model") else {
         return Err(Box::new(fail(StatusCode::INTERNAL_SERVER_ERROR, "package has no model file")));
@@ -655,9 +688,10 @@ async fn chat(State(app): State<Shared>, Json(mut body): Json<Value>) -> Respons
     let Some(model) = body["model"].as_str().map(str::to_string) else {
         return fail(StatusCode::BAD_REQUEST, "\"model\" is required");
     };
-    let Some(package) = app.manifest.package(&model).filter(|p| p.modality == Modality::Chat) else {
+    let Some(package) = app.package(&model).filter(|p| p.modality == Modality::Chat) else {
         return fail(StatusCode::NOT_FOUND, format!("no chat package {model}"));
     };
+    let package = &package;
     let (port, key, variant) = match ensure_engine(&app, package).await {
         Ok(v) => v,
         Err(resp) => return *resp,
@@ -1095,6 +1129,7 @@ async fn main() {
     let app: Shared = Arc::new(App {
         profile,
         manifest,
+        community: Mutex::new(rigbrew_core::community::Store::load(&root)),
         root: root.clone(),
         token: token.clone(),
         events: Mutex::new(events),
@@ -1120,8 +1155,7 @@ async fn main() {
 
     // Pick up downloads that were interrupted by a quit, a crash or a power cut.
     for (package_id, variant_id) in wanted_read(&app) {
-        let found =
-            app.manifest.package(&package_id).and_then(|p| p.variants.iter().find(|v| v.id == variant_id).map(|v| (p.clone(), v.clone())));
+        let found = app.package(&package_id).and_then(|p| p.variants.iter().find(|v| v.id == variant_id).cloned().map(|v| (p, v)));
         match found {
             Some((package, variant)) => {
                 start_pull(&app, package, variant);
@@ -1135,6 +1169,9 @@ async fn main() {
         .route("/v1/packages", get(packages))
         .route("/v1/packages/{id}/pull", post(pull))
         .route("/v1/packages/{id}", axum::routing::delete(package_remove))
+        .route("/v1/community/lookup", post(community::lookup))
+        .route("/v1/community", post(community::add))
+        .route("/v1/community/{id}", axum::routing::delete(community::remove))
         .route("/v1/jobs", get(jobs))
         .route("/v1/jobs/{id}", get(job).delete(job_cancel))
         .route("/v1/engine", get(engine_get).delete(engine_unload))

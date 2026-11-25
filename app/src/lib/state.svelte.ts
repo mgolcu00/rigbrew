@@ -125,6 +125,10 @@ class AppState {
 	online = $state(typeof navigator === 'undefined' ? true : navigator.onLine);
 
 	chatPackages = $derived(this.packages.filter((p) => p.modality === 'chat' && p.installed.length > 0));
+	/** Rigbrew's own tested models: what the Models lists show. */
+	catalogue = $derived(this.packages.filter((p) => !p.community));
+	/** Models the person added by link. Listed apart, under Community. */
+	communityPackages = $derived(this.packages.filter((p) => p.community));
 
 	/** The installed image package, if any: what Image mode and the chat's image tool use. */
 	imagePackage = $derived(this.packages.find((p) => p.modality === 'image' && p.installed.length > 0) ?? null);
@@ -677,6 +681,24 @@ class AppState {
 			}
 			await pause(400);
 		}
+	}
+
+	/** Adds a community model (one file of a repo that was looked up) and follows its download. Returns its package id. */
+	async addCommunity(repo: string, file: string, bytes: number): Promise<string> {
+		const added = await api.communityAdd(repo, file);
+		this.installs[added.id] = { state: 'running', variant: 'gguf', done: 0, total: bytes, error: '', job: added.job };
+		await this.refreshPackages().catch(() => {});
+		this.#follow(added.id, added.job);
+		return added.id;
+	}
+
+	/** Removes a community model: its files and its place in the list. Returns how many bytes that freed. */
+	async removeCommunity(id: string): Promise<number> {
+		const answer = await api.communityRemove(id);
+		delete this.installs[id];
+		await Promise.all([this.refreshPackages().catch(() => {}), this.refreshSystem(), this.refreshUsage()]);
+		import('./chat.svelte').then(({ chat }) => chat.syncEngine());
+		return answer.freed_bytes;
 	}
 
 	/** Removes one installed build, or all of a package. Returns how many bytes that freed. */

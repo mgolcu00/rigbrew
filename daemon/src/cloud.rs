@@ -204,18 +204,18 @@ pub async fn usage(State(app): State<Shared>) -> Json<Value> {
             store.pending_count().unwrap_or(0),
         )
     };
-    let dir = app.packages_dir();
     let mut packages = Vec::new();
     let mut seen = std::collections::HashSet::new();
     let mut total = 0u64;
-    for p in &app.manifest.packages {
+    for p in &app.all_packages() {
+        let dir = app.files_dir(p);
         for v in app.installed(p) {
             // A file shared by two variants is on disk once: count it once in the total.
             let bytes: u64 = v.files.iter().map(|f| std::fs::metadata(dir.join(&f.path)).map(|m| m.len()).unwrap_or(0)).sum();
             total += v
                 .files
                 .iter()
-                .filter(|f| seen.insert(f.path.clone()))
+                .filter(|f| seen.insert(dir.join(&f.path)))
                 .map(|f| std::fs::metadata(dir.join(&f.path)).map(|m| m.len()).unwrap_or(0))
                 .sum::<u64>();
             packages.push(json!({"id": p.id, "name": p.name, "variant": v.id, "bytes": bytes}));
@@ -242,7 +242,8 @@ pub async fn activity(State(app): State<Shared>, Query(q): Query<std::collection
         .into_iter()
         .map(|(day, prompts, images, tokens_out, events)| json!({"day": day, "prompts": prompts, "images": images, "tokens_out": tokens_out, "events": events}))
         .collect();
-    let names: std::collections::HashMap<&str, &str> = app.manifest.packages.iter().map(|p| (p.id.as_str(), p.name.as_str())).collect();
+    let all = app.all_packages();
+    let names: std::collections::HashMap<&str, &str> = all.iter().map(|p| (p.id.as_str(), p.name.as_str())).collect();
     let packages: Vec<Value> = store
         .package_use(since)
         .unwrap_or_default()
@@ -394,6 +395,7 @@ mod tests {
         let app = App {
             profile: hardware::scan_with_data_dir(&dir),
             manifest: Manifest::parse(r#"{"schema":1,"generated":"2026-11-20","base_url":"http://127.0.0.1:9/","packages":[]}"#).unwrap(),
+            community: Mutex::new(rigbrew_core::community::Store::load(&dir)),
             root: dir.clone(),
             token: "t".into(),
             events: Mutex::new(EventStore::open(&dir.join("events.db")).unwrap()),

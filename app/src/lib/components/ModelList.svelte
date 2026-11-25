@@ -63,7 +63,8 @@
 		queueMicrotask(() => document.getElementById(`model-${id}`)?.scrollIntoView({ block: 'center' }));
 	});
 
-	const rows = $derived(app.packages);
+	// Community models have their own section under this list (Community.svelte).
+	const rows = $derived(app.catalogue);
 </script>
 
 <ul class="models">

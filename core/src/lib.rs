@@ -5,6 +5,7 @@
 
 pub mod bundle;
 pub mod chats;
+pub mod community;
 pub mod crash;
 pub mod download;
 pub mod engine;

@@ -4,6 +4,7 @@
 	import { chat } from '#lib/chat.svelte.ts';
 	import { ux } from '#lib/experience.svelte.ts';
 	import { machine } from '#lib/words.ts';
+	import Community from '#lib/components/Community.svelte';
 	import Hint from '#lib/components/Hint.svelte';
 	import ModelList from '#lib/components/ModelList.svelte';
 	import { RUNS_LATER, budgetOf, bytes, families, familyOf, gb, installedVariant, measures, percent, sentence, size, variantName, type Family } from '#lib/format.ts';
@@ -82,12 +83,13 @@
 	}
 
 	const shelves = $derived.by(() => {
-		const known: Family[] = [...families, ...app.packages.map(familyOf).filter((f) => !families.some((k) => k.id === f.id))].filter(
+		// Community models are not builds Rigbrew measured: they are listed under the table.
+		const known: Family[] = [...families, ...app.catalogue.map(familyOf).filter((f) => !families.some((k) => k.id === f.id))].filter(
 			(family, i, all) => all.findIndex((f) => f.id === family.id) === i
 		);
 		return known
 			.map((family) => {
-				const packages = app.packages.filter((p) => familyOf(p).id === family.id);
+				const packages = app.catalogue.filter((p) => familyOf(p).id === family.id);
 				let rows: Row[] = packages.flatMap((pkg) => {
 					const budget = budgetFor(pkg);
 					const rec = pkg.recommendation;
@@ -117,7 +119,7 @@
 			.filter((shelf) => shelf.packages.length > 0 && (!onlyFamily || shelf.family.id === onlyFamily));
 	});
 
-	const present = $derived(families.filter((f) => app.packages.some((p) => familyOf(p).id === f.id)));
+	const present = $derived(families.filter((f) => app.catalogue.some((p) => familyOf(p).id === f.id)));
 	const shown = $derived(shelves.reduce((n, s) => n + s.rows.length, 0));
 
 	function sortBy(key: SortKey) {
@@ -151,7 +153,7 @@
 	$effect(() => {
 		const id = app.spotlight;
 		if (!id || !flags.buildsTable) return;
-		const pkg = app.packages.find((p) => p.id === id);
+		const pkg = app.catalogue.find((p) => p.id === id);
 		app.spotlight = '';
 		if (!pkg) return;
 		const rec = pkg.recommendation;
@@ -208,6 +210,7 @@
 				{#if flags.plainNames}Each model does one thing. Install what you want to use; Rigbrew picks the version that suits this {machine}.{:else}One row per model, with the version Rigbrew recommends for this {machine}. The other versions are under each one.{/if}
 			</p>
 			<ModelList />
+			<Community />
 		{:else}
 		<table>
 			<colgroup>
@@ -364,6 +367,7 @@
 		<p class="legend num">
 			{shown} {shown === 1 ? 'build' : 'builds'} shown · rows open in place · pointing at a row shows where it would sit in the bay below
 		</p>
+		<Community />
 		{/if}
 	</div>
 </section>

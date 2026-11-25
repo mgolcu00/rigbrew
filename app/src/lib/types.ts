@@ -64,6 +64,44 @@ export interface Package {
 	credit?: string | null;
 	/** Licence terms to agree to before the download. */
 	terms?: { summary: string; url: string } | null;
+	/** Added by the person from a link (Hugging Face or GitHub). Not in Rigbrew's catalogue and not tested by Rigbrew. */
+	community?: boolean;
+}
+
+/** One GGUF file a looked-up repo offers. */
+export interface CommunityFile {
+	file: string;
+	/** Bytes. */
+	size: number;
+	/** Memory it needs: its size and about 15% more. */
+	needs_mb: number;
+	fits: boolean;
+	/** The site gives a sha256, so the download is verified. */
+	checked: boolean;
+	/** The package id it has, or would get. */
+	id: string;
+	installed: boolean;
+}
+
+/** `POST /v1/community/lookup`: what a pasted link holds. */
+export interface CommunityFound {
+	host: 'huggingface' | 'github';
+	/** "Hugging Face" or "GitHub". */
+	site: string;
+	owner: string;
+	repo: string;
+	url: string;
+	license: string | null;
+	/** The owner asks for a sign-in before downloading; Rigbrew cannot install it. */
+	gated: boolean;
+	budget_mb: number;
+	files: CommunityFile[];
+	/** The file to preselect: the one the link named, or the largest that fits. */
+	pick: string | null;
+	/** GGUF files left out (parts of split models, picture add-ons). */
+	skipped: number;
+	/** Hugging Face models a GitHub README links to, when the repo has no files itself. */
+	links: string[];
 }
 
 export interface Job {
