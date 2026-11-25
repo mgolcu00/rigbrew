@@ -17,7 +17,6 @@ const MAX_REDIRECTS: usize = 5;
 const MAX_RESULTS: usize = 5;
 const MAX_TITLE_CHARS: usize = 100;
 const MAX_SNIPPET_CHARS: usize = 160;
-const SEARCH: &str = "https://html.duckduckgo.com/html/";
 const USER_AGENT: &str = concat!("Mozilla/5.0 (compatible; Rigbrew/", env!("CARGO_PKG_VERSION"), ")");
 
 fn public_v4(ip: Ipv4Addr) -> bool {
@@ -280,94 +279,75 @@ pub async fn fetch_url(raw: &str) -> Result<String, String> {
     Ok(format!("{}\n\n{}{note}", page.url, super::files::cap(&text, super::files::RESULT_CHARS)))
 }
 
-#[derive(Debug, PartialEq)]
+/// One search result.
+#[derive(Debug, Clone, PartialEq)]
 pub struct Hit {
     pub title: String,
     pub url: String,
     pub snippet: String,
 }
 
-fn strip_tags(html: &str) -> String {
-    let no_tags = regex::Regex::new(r"(?s)<[^>]*>").expect("static pattern").replace_all(html, "");
-    decode_entities(&no_tags).split_whitespace().collect::<Vec<_>>().join(" ")
+/// The results in the answer of Rigbrew's server (`GET /v1/search`): few, short, public addresses only.
+pub fn parse_results(answer: &serde_json::Value) -> Vec<Hit> {
+    let Some(list) = answer["results"].as_array() else { return vec![] };
+    list.iter()
+        .filter_map(|r| {
+            let url = check_url(r["url"].as_str()?).ok()?.to_string();
+            let title = collapse(r["title"].as_str().unwrap_or(""));
+            if title.is_empty() {
+                return None;
+            }
+            Some(Hit {
+                title: short_to(&title, MAX_TITLE_CHARS),
+                url,
+                snippet: short_to(&collapse(r["snippet"].as_str().unwrap_or("")), MAX_SNIPPET_CHARS),
+            })
+        })
+        .take(MAX_RESULTS)
+        .collect()
 }
 
-/// The address a result link really leads to: DuckDuckGo wraps it as `/l/?uddg=<address>`.
-fn unwrap_link(href: &str) -> Option<String> {
-    let href = decode_entities(href);
-    let full = if href.starts_with("//") { format!("https:{href}") } else { href };
-    let url = Url::parse(&full).or_else(|_| Url::parse(SEARCH).and_then(|b| b.join(&full))).ok()?;
-    let wrapped = url.host_str().is_some_and(|h| h.ends_with("duckduckgo.com"));
-    if wrapped {
-        // Sponsored links go through y.js and carry no plain address.
-        if url.path() != "/l/" {
-            return None;
-        }
-        let target = url.query_pairs().find(|(k, _)| k == "uddg").map(|(_, v)| v.into_owned())?;
-        return check_url(&target).ok().map(|u| u.to_string());
-    }
-    matches!(url.scheme(), "http" | "https").then(|| url.to_string())
-}
-
-/// Titles, addresses and snippets out of DuckDuckGo's HTML results page.
-pub fn parse_results(html: &str) -> Vec<Hit> {
-    let title = regex::Regex::new(r#"(?s)<a\b[^>]*class="[^"]*\bresult__a\b[^"]*"[^>]*>(.*?)</a>"#).expect("static pattern");
-    let href = regex::Regex::new(r#"href="([^"]+)""#).expect("static pattern");
-    let snippet = regex::Regex::new(r#"(?s)<a\b[^>]*class="[^"]*\bresult__snippet\b[^"]*"[^>]*>(.*?)</a>"#).expect("static pattern");
-    let titles: Vec<_> = title.captures_iter(html).collect();
-    let mut out = Vec::new();
-    for (i, t) in titles.iter().enumerate() {
-        let whole = t.get(0).expect("match");
-        let Some(url) = href.captures(whole.as_str()).and_then(|h| unwrap_link(&h[1])) else { continue };
-        // The snippet of a result sits between its title and the next title.
-        let until = titles.get(i + 1).map_or(html.len(), |n| n.get(0).expect("match").start());
-        let text = snippet.captures(&html[whole.end()..until]).map(|s| strip_tags(&s[1])).unwrap_or_default();
-        let name = strip_tags(&t[1]);
-        if name.is_empty() {
-            continue;
-        }
-        out.push(Hit { title: short_to(&name, MAX_TITLE_CHARS), url, snippet: short_to(&text, MAX_SNIPPET_CHARS) });
-        if out.len() == MAX_RESULTS {
-            break;
-        }
-    }
-    out
-}
-
-/// `web_search`: the first results for a query, as title, address and a line of text each.
-pub async fn search(query: &str) -> Result<String, String> {
-    let query = query.trim();
-    if query.is_empty() {
-        return Err("A search needs some words to look for.".into());
-    }
-    let mut url = Url::parse(SEARCH).expect("static address");
-    url.query_pairs_mut().append_pair("q", &query.chars().take(300).collect::<String>());
-    let page = tokio::time::timeout(TIMEOUT, get(url)).await.map_err(|_| "The search took too long to answer.".to_string())??;
-    results_text(&String::from_utf8_lossy(&page.body))
-}
-
-/// What the model is told when the search page came back without results and without saying
-/// that there are none: the engine turns automated searches away at times. Searching again
-/// then only makes it worse, so this is an error, and after two of them in a row the search is
-/// switched off for the request (see `pace`).
-pub const NO_ANSWER: &str = "The search engine gave no results this time; it sometimes turns automated searches away. Searching again will not help now. \
+/// What the model is told when the search could not be done: searching again will not help,
+/// so this is an error, and after two of them in a row the search is switched off for the
+/// request (see `pace`).
+pub const NO_ANSWER: &str = "The web search is not available right now. Searching again will not help now. \
 Open a page you know with fetch_url, such as the official site or its documentation, or answer from what you know and say that it is not checked.";
 
-/// A results page as the model reads it: a short numbered list, or why there is none.
-pub fn results_text(html: &str) -> Result<String, String> {
-    let hits = parse_results(html);
+/// The results as the model reads them: a short numbered list, or that there are none.
+pub fn results_text(answer: &serde_json::Value) -> String {
+    let hits = parse_results(answer);
     if hits.is_empty() {
-        // A page that says "No results" is an answer; any other page without results is not.
-        let lower = html.to_lowercase();
-        return if lower.contains("no-results") || lower.contains("no results") {
-            Ok("The search found nothing for these words. Use fewer or other words, once.".into())
-        } else {
-            Err(NO_ANSWER.into())
-        };
+        return "The search found nothing for these words. Use fewer or other words, once.".into();
     }
     let lines: Vec<String> =
         hits.iter().enumerate().map(|(i, h)| format!("{}. {}\n   {}\n   {}", i + 1, h.title, h.url, h.snippet)).collect();
-    Ok(super::files::cap(&lines.join("\n"), super::files::RESULT_CHARS))
+    super::files::cap(&lines.join("\n"), super::files::RESULT_CHARS)
+}
+
+/// `web_search`: the first results for a query, as title, address and a line of text each.
+/// The words go to Rigbrew's server, which asks a search service and keeps nothing.
+pub async fn search(server: &str, net: &reqwest::Client, query: &str) -> Result<String, String> {
+    let query: String = query.trim().chars().take(300).collect();
+    if query.is_empty() {
+        return Err("A search needs some words to look for.".into());
+    }
+    let mut url = Url::parse(&format!("{server}/v1/search")).map_err(|_| NO_ANSWER.to_string())?;
+    url.query_pairs_mut().append_pair("q", &query);
+    let resp = net.get(url).timeout(TIMEOUT).send().await.map_err(|e| {
+        if e.is_timeout() {
+            "The search took too long to answer.".to_string()
+        } else {
+            NO_ANSWER.to_string()
+        }
+    })?;
+    if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        return Err("The search is busy. Work with what you have, or open a page you know with fetch_url.".into());
+    }
+    if !resp.status().is_success() {
+        return Err(NO_ANSWER.into());
+    }
+    let answer: serde_json::Value = resp.json().await.map_err(|_| NO_ANSWER.to_string())?;
+    Ok(results_text(&answer))
 }
 
 #[cfg(test)]
@@ -454,25 +434,16 @@ mod tests {
     }
 
     #[test]
-    fn search_results_are_read_from_the_page() {
-        let html = r#"
-        <div class="result results_links results_links_deep web-result ">
-          <h2 class="result__title"><a rel="nofollow" class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.rust%2Dlang.org%2Flearn&amp;rut=abc">Learn <b>Rust</b></a></h2>
-          <a class="result__snippet" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.rust%2Dlang.org%2Flearn&amp;rut=abc">Get started with <b>Rust</b> &amp; friends.</a>
-        </div>
-        <div class="result result--ad">
-          <h2 class="result__title"><a rel="nofollow" class="result__a" href="https://duckduckgo.com/y.js?ad_domain=example.com&amp;u3=x">An ad</a></h2>
-          <a class="result__snippet" href="https://duckduckgo.com/y.js?x">Buy things.</a>
-        </div>
-        <div class="result">
-          <h2 class="result__title"><a rel="nofollow" class="result__a" href="https://doc.rust-lang.org/book/">The Book</a></h2>
-        </div>
-        <div class="result">
-          <h2 class="result__title"><a rel="nofollow" class="result__a" href="//duckduckgo.com/l/?uddg=http%3A%2F%2F127.0.0.1%2Fadmin">Local</a></h2>
-        </div>"#;
-        let hits = parse_results(html);
+    fn search_results_are_read_from_the_answer() {
+        let answer = serde_json::json!({"results": [
+            {"title": "Learn  Rust", "url": "https://www.rust-lang.org/learn", "snippet": "Get started with Rust & friends."},
+            {"title": "The Book", "url": "https://doc.rust-lang.org/book/"},
+            {"title": "Local", "url": "http://127.0.0.1/admin", "snippet": "x"},
+            {"title": "", "url": "https://example.com/"},
+            {"title": "Odd", "url": "file:///etc/passwd"},
+        ]});
         assert_eq!(
-            hits,
+            parse_results(&answer),
             vec![
                 Hit {
                     title: "Learn Rust".into(),
@@ -482,39 +453,24 @@ mod tests {
                 Hit { title: "The Book".into(), url: "https://doc.rust-lang.org/book/".into(), snippet: String::new() },
             ]
         );
-        assert!(parse_results("<html><body>Nothing here</body></html>").is_empty());
+        assert!(parse_results(&serde_json::json!({"error": {"code": "search_off"}})).is_empty());
+        assert!(results_text(&serde_json::json!({"results": []})).starts_with("The search found nothing"));
     }
 
     #[test]
     fn results_are_few_and_short() {
         let long = "word ".repeat(100);
-        let one = |i: usize| {
-            format!(
-                r#"<a class="result__a" href="https://example.com/{i}">Result {i} {long}</a><a class="result__snippet">Text {i} {long}</a>"#
-            )
-        };
-        let html: String = (0..20).map(one).collect();
-        let hits = parse_results(&html);
+        let list: Vec<_> = (0..20)
+            .map(|i| serde_json::json!({"title": format!("Result {i} {long}"), "url": format!("https://example.com/{i}"), "snippet": format!("Text {i} {long}")}))
+            .collect();
+        let answer = serde_json::json!({"results": list});
+        let hits = parse_results(&answer);
         assert_eq!(hits.len(), 5);
         assert!(hits[4].snippet.starts_with("Text 4 word") && hits[4].snippet.ends_with('…'));
         assert!(hits.iter().all(|h| h.snippet.chars().count() <= 160 && h.title.chars().count() <= 100));
         // Five results as the model reads them fit in a small part of its context.
-        let shown = results_text(&html).unwrap();
+        let shown = results_text(&answer);
         assert!(shown.starts_with("1. Result 0 word") && shown.contains("\n5. Result 4") && !shown.contains("\n6. "), "{shown}");
         assert!(shown.chars().count() < 1600, "{}", shown.chars().count());
-    }
-
-    #[test]
-    fn a_page_without_results_is_an_answer_only_when_it_says_so() {
-        let none = r#"<div class="no-results">No results found for <b>qqzzxx</b>.</div>"#;
-        assert!(results_text(none).unwrap().starts_with("The search found nothing"));
-        // A page that asks to prove you are a person, an empty page, an error page: not an answer.
-        for turned_away in [
-            "<html><body><form id=\"challenge-form\">Select all squares</form></body></html>",
-            "",
-            "<html><body>Service unavailable</body></html>",
-        ] {
-            assert_eq!(results_text(turned_away).unwrap_err(), NO_ANSWER);
-        }
     }
 }

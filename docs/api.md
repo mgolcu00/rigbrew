@@ -256,7 +256,7 @@ The task gets a `note` step that says what came back, and the model is told on i
   given the web. On Windows and Linux it is not confined yet and can do whatever the person's account can.
 - **Everything is capped.** A tool result is at most about 4,000 characters and says when it was cut; a task stops
   after 40 model turns for one request and says so.
-- **Web tools leave the machine.** `web_search` sends the query to DuckDuckGo's HTML endpoint; `fetch_url` gets one
+- **Web tools leave the machine.** `web_search` sends the query to Rigbrew's server (`GET /v1/search`), which asks a search service (Brave Search) and stores nothing; `fetch_url` gets one
   http(s) page (public addresses only, checked again at every redirect; 15 seconds, 2 MB) and returns its text.
   They are off unless the task says `"web": true`.
 
@@ -342,7 +342,7 @@ Models run locally and prompts are never sent to a model provider. `rigbrewd` se
 - **Content, only with consent and an account.** The text of prompts and answers. Builds from this repository have
   no account module, so they never send content.
 
-A Code task with web search allowed sends its search queries to DuckDuckGo and fetches the pages the model opens.
+A Code task with web search allowed sends its search queries to Rigbrew's server, which passes them to a search service (Brave Search) without storing them, and fetches the pages the model opens.
 That is off by default and chosen per task. Usage events of Code tasks carry the tool's name, the decision and
 counts, never a path, a command or file content.
 

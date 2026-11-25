@@ -140,7 +140,7 @@ export const articles: Article[] = [
 		body: [
 			`Choose a folder and say what you want done in plain words. A chat model on this ${Mac} reads the files, works step by step and shows each step.`,
 			'It asks before it changes a file or runs a command. A change is shown as what is removed and what is added, so you can say yes or no. “Read only” lets it look and answer without changing anything.',
-			`On a Mac a command can change files only inside the folder you chose, and it has no internet unless you switch on “Allow web search”. Web search sends your search words to DuckDuckGo; everything else stays on this ${Mac}.`,
+			`On a Mac a command can change files only inside the folder you chose, and it has no internet unless you switch on “Allow web search”. Web search sends your search words through Rigbrew's server to a search service (Brave Search), and they are not stored; everything else stays on this ${Mac}.`,
 			'A task keeps going when you open another screen. A small model does small jobs well: one bug, one file, one question about the code.'
 		]
 	},

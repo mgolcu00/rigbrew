@@ -832,7 +832,7 @@ async fn call_tool(app: &Shared, id: &str, folder: &Folder, call: &str, name: &s
         }
         "web_search" => {
             let Some(query) = arg_str(args, "query") else { return missing("query") };
-            done(web::search(query).await)
+            done(web::search(&app.server, &app.net, query).await)
         }
         "fetch_url" => {
             let Some(url) = arg_str(args, "url") else { return missing("url") };

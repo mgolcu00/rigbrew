@@ -1,6 +1,6 @@
 # Privacy Policy
 
-Draft of 2026-11-23 (revision 3: the waiting list on rigbrew.dev). Not reviewed by a lawyer.
+Draft of 2026-11-25 (revision 4: web search). Not reviewed by a lawyer.
 
 ## Who is responsible
 
@@ -41,6 +41,15 @@ Developers can switch this layer off by starting the app with the environment va
 Generated pictures, audio and video are not uploaded. Files on your computer are not read, except the model
 packages Rigbrew itself downloaded.
 
+## Web search
+
+Web search is off until you switch it on for a task. When it is on and the model searches, the search words go to
+our server, which passes them to Brave Search (Brave Software, Inc.) and sends the results back. We do not store or
+log the search words and do not tie them to your account or installation; we keep only a count of searches per day.
+Brave receives the words from our server, not from your computer, so it does not see your IP address. Pages the
+model then opens are fetched by your computer directly from the sites they are on. Your files and conversations are
+not sent with a search.
+
 ## Data we collect on rigbrew.dev
 
 Page views without cookies: page, referrer, screen size, language, time zone, country, device class, and a visitor
@@ -63,6 +72,8 @@ you leave the list, and the form on rigbrew.dev takes an address off it at once.
 - **Cloudflare, Inc.** carries traffic to the server and the site, and hosts model package files.
 - **Google Firebase Authentication** (Google LLC / Google Ireland Ltd.) handles sign-in and holds your account's
   e-mail address and identifiers.
+- **Brave Software, Inc.** answers web searches, when you have switched web search on; it receives the search
+  words only.
 - **GitHub** hosts the source code and, if you sponsor the project, handles the sponsorship; we receive what GitHub
   shares with sponsored projects.
 
