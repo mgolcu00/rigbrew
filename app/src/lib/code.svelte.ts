@@ -78,6 +78,8 @@ class Code {
 	#watching = false;
 	#visible = false;
 	#listedAt = 0;
+	/** The lists are asked for a little longer after the work ends: a task's name may still arrive. */
+	#lingerUntil = 0;
 
 	/** The tasks of the chosen folder (the service knows which folder is which, links followed). */
 	tasks = $state<AgentTaskRow[]>([]);
@@ -186,6 +188,7 @@ class Code {
 				// as above
 			}
 		}
+		if (this.working || active(this.task)) this.#lingerUntil = Date.now() + 30_000;
 		// The lists change slowly; once a second is enough for them.
 		if (Date.now() - this.#listedAt < 1000) return;
 		this.#listedAt = Date.now();
@@ -206,7 +209,7 @@ class Code {
 	async #watch() {
 		if (this.#watching) return;
 		this.#watching = true;
-		while (this.#visible || this.working || active(this.task)) {
+		while (this.#visible || this.working || active(this.task) || Date.now() < this.#lingerUntil) {
 			await this.#tick();
 			// Quick while the open task is working in front of the person, slow otherwise.
 			const quick = this.#visible && active(this.task);
@@ -219,6 +222,31 @@ class Code {
 		this.problem = '';
 		try {
 			this.#show(await api.agentTask(id));
+		} catch (e) {
+			this.problem = say(e);
+		}
+	}
+
+	/** Opens a task from anywhere (the sidebar, the search): its folder first, then the task. */
+	async show(row: { id: string; folder: string }) {
+		if (this.task?.id === row.id) return;
+		if (this.folder !== row.folder && !this.tasks.some((t) => t.id === row.id)) await this.setFolder(row.folder);
+		await this.open(row.id);
+		this.#watch();
+	}
+
+	/** The person names a task. The name is theirs from then on. */
+	async rename(id: string, title: string) {
+		const clean = title.replace(/\s+/g, ' ').trim().slice(0, 80);
+		const known = this.all.find((t) => t.id === id);
+		if (!clean || clean === (known?.title ?? this.task?.title)) return;
+		try {
+			const task = await api.renameAgentTask(id, clean);
+			if (this.task?.id === id) this.#show(task);
+			for (const list of [this.all, this.tasks]) {
+				const row = list.find((t) => t.id === id);
+				if (row) Object.assign(row, { title: task.title, title_by: 'person', updated_ms: task.updated_ms });
+			}
 		} catch (e) {
 			this.problem = say(e);
 		}

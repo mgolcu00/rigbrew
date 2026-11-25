@@ -371,6 +371,8 @@ export async function saveVideo(name: string, clip: Blob): Promise<'saved' | 'do
 export interface ChatRow {
 	id: string;
 	title: string;
+	/** Who wrote the title: "words", "model" or "person". Empty or missing when it is not known. */
+	title_by?: string;
 	created_ms: number;
 	updated_ms: number;
 	size: number;
@@ -381,7 +383,16 @@ export const chats = async () => (await optional<{ chats: ChatRow[] }>('GET', '/
 /** One chat with the app's own data; null when it is not there. */
 export const chatById = (id: string) => optional<ChatRow & { data: unknown }>('GET', `/v1/chats/${enc(id)}`);
 /** Saves a chat (creates or replaces it). */
-export const saveChat = (id: string, title: string, data: unknown) => json<ChatRow>('PUT', `/v1/chats/${enc(id)}`, { title, data });
+export const saveChat = (id: string, title: string, data: unknown, titleBy?: string) =>
+	json<ChatRow>('PUT', `/v1/chats/${enc(id)}`, { title, data, ...(titleBy ? { title_by: titleBy } : {}) });
+
+/**
+ * A name for a conversation that began with `text`. `by` is "model" when the chat model wrote
+ * it and "words" when it is only the first words (the model was not there to ask). `load: false`
+ * asks only a model that is in memory. Null from a service that is too old to write titles.
+ */
+export const title = (body: { text: string; answer?: string; model?: string; load?: boolean }) =>
+	optional<{ title: string; by: 'model' | 'words' }>('POST', '/v1/title', body);
 export const deleteChat = (id: string) => optional('DELETE', `/v1/chats/${enc(id)}`);
 export const deleteAllChats = () => optional('DELETE', '/v1/chats');
 
@@ -900,6 +911,8 @@ export interface AgentTaskRow {
 	id: string;
 	folder: string;
 	title: string;
+	/** Who wrote the title: "words", "model" or "person". */
+	title_by?: string;
 	model: string;
 	mode: AgentMode;
 	state: AgentState;
@@ -963,6 +976,8 @@ export const answerAgentTask = (id: string, call: string, allow: boolean, always
 	taskOf(json('POST', `/v1/agent/tasks/${enc(id)}/approve`, { call, allow, always }));
 export const undoAgentTask = (id: string) => taskOf(json('POST', `/v1/agent/tasks/${enc(id)}/undo`));
 export const stopAgentTask = (id: string) => taskOf(json('DELETE', `/v1/agent/tasks/${enc(id)}`));
+/** The person names a task; nothing else changes the name after that. */
+export const renameAgentTask = (id: string, title: string) => taskOf(json('PUT', `/v1/agent/tasks/${enc(id)}`, { title }));
 export const removeAgentTask = (id: string) => json<{ removed: string }>('DELETE', `/v1/agent/tasks/${enc(id)}?remove=true`);
 export const agentSkills = (folder: string) => optional<{ skills: AgentSkill[]; dir: string; folder_dir: string }>('GET', `/v1/agent/skills?folder=${enc(folder)}`);
 
