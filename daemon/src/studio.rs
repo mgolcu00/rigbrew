@@ -829,7 +829,8 @@ async fn list(State(app): State<Shared>) -> Json<Value> {
     let seen = paces(&app);
     let pace = json!({"frames": 121, "plain": pace::estimate(&seen, 121, false), "continuing": pace::estimate(&seen, 121, true), "measured": !seen.is_empty()});
     Json(
-        json!({"projects": films, "home": films_home().map(|h| h.to_string_lossy().to_string()), "pace": pace, "can_continue": can_continue(&app)}),
+        json!({"projects": films, "home": films_home().map(|h| h.to_string_lossy().to_string()), "pace": pace, "can_continue": can_continue(&app),
+               "voices": dub::voices(&app)}),
     )
 }
 
@@ -1245,8 +1246,12 @@ async fn save(State(app): State<Shared>, Path(id): Path<String>, Json(body): Jso
     if let Some(chosen) = body.dub {
         // One language is heard at a time: choosing it unmutes its voice track and mutes the others.
         let chosen = words::language(&chosen);
-        p.dub = if chosen.eq_ignore_ascii_case(&dub::own_language(&p)) { String::new() } else { chosen };
-        dub::hear_one(&mut p);
+        let chosen = if chosen.eq_ignore_ascii_case(&dub::own_language(&p)) { String::new() } else { chosen };
+        // Only when the choice changes: after that the mutes are the person's own again.
+        if !chosen.eq_ignore_ascii_case(&p.dub) {
+            p.dub = chosen;
+            dub::hear_one(&mut p);
+        }
     }
     if let Some(master) = body.master.filter(|v| v.is_finite()) {
         p.master = master.clamp(0.0, 2.0);

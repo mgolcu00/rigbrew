@@ -576,9 +576,29 @@ pub(super) struct CaptionQuery {
 }
 
 /// Keeps one subtitle picture. When the last one of a set is in, the set is noted as whole.
-pub(super) async fn caption_put(State(app): State<Shared>, Path(id): Path<String>, Query(q): Query<CaptionQuery>, body: Bytes) -> Response {
+pub(super) async fn caption_put(
+    State(app): State<Shared>,
+    Path(id): Path<String>,
+    Query(q): Query<CaptionQuery>,
+    headers: axum::http::HeaderMap,
+    body: Bytes,
+) -> Response {
+    use base64::Engine as _;
     let Some(p) = load(&app, &id) else {
         return fail(StatusCode::NOT_FOUND, "no such film, or its folder is gone");
+    };
+    // The points as they are, or as base64 in {"rgba"} for a client that only sends JSON.
+    let json = headers.get(axum::http::header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).is_some_and(|v| v.contains("json"));
+    let body = if json {
+        let points = serde_json::from_slice::<Value>(&body)
+            .ok()
+            .and_then(|v| base64::engine::general_purpose::STANDARD.decode(v["rgba"].as_str()?.as_bytes()).ok());
+        match points {
+            Some(points) => Bytes::from(points),
+            None => return fail(StatusCode::BAD_REQUEST, "send the picture as base64 in \"rgba\""),
+        }
+    } else {
+        body
     };
     let key_ok = q.key.len() == 16 && q.key.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase());
     if !key_ok || q.of == 0 || q.of > 2000 || q.n >= q.of {
