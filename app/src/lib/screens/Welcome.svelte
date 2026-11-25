@@ -59,6 +59,7 @@
 			}
 			if (ACCOUNTS) {
 				step = 'account';
+				app.wakeAccount();
 				app.track('account_step_shown', {});
 			} else toScan();
 		} catch (e) {
@@ -87,6 +88,7 @@
 	onMount(() => {
 		if (step === 'consent') app.track('consent_shown', { reason: again ? 'changed' : 'first' });
 		if (step === 'scan') runScan();
+		if (step === 'account') app.wakeAccount();
 		return () => timers.forEach(clearTimeout);
 	});
 </script>

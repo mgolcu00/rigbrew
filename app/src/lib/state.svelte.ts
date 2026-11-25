@@ -501,6 +501,11 @@ class AppState {
 		this.consent = await api.acceptConsent(this.requiredConsent);
 	}
 
+	/** The account step of the first launch comes before the app proper is entered: start the account for it. */
+	wakeAccount() {
+		startAccount();
+	}
+
 	async withdraw() {
 		await api.withdrawConsent();
 		await pauseAccount();
