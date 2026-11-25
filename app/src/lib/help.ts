@@ -170,6 +170,15 @@ export const articles: Article[] = [
 		]
 	},
 	{
+		id: 'skills',
+		title: 'Skills and connectors',
+		body: [
+			'A skill is a short set of instructions for one kind of work, like writing an email or fixing a failing test. The model sees its name and when to use it, and reads the instructions when your request fits. Under Skills you can read them, switch them off, write your own, or add one from a folder or from GitHub.',
+			`A connector gives the model tools from outside Rigbrew: a program on this ${Mac}, or a web address. Add one under Connectors, start it, and switch connectors on for a Code task or for an agent. The model asks you before it uses a tool, unless you marked that tool “Always allow”.`,
+			`A connector that is a program runs on this ${Mac} with your own rights, and what a tool is sent may leave this ${Mac}. Add only connectors you trust. Connectors speak the Model Context Protocol, an open standard.`
+		]
+	},
+	{
 		id: 'levels',
 		title: 'Guided, Standard and Pro',
 		body: [

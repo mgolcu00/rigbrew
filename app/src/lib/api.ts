@@ -391,7 +391,14 @@ export const deleteAllChats = () => optional('DELETE', '/v1/chats');
 export const agents = async () => (await optional<{ agents: Agent[] }>('GET', '/v1/agents'))?.agents ?? null;
 /** Saves an agent (creates or replaces it) and returns it as stored. */
 export const saveAgent = (agent: Agent) =>
-	json<Agent>('PUT', `/v1/agents/${enc(agent.id)}`, { name: agent.name, instruction: agent.instruction, tools: agent.tools, starter: agent.starter });
+	json<Agent>('PUT', `/v1/agents/${enc(agent.id)}`, {
+		name: agent.name,
+		instruction: agent.instruction,
+		tools: agent.tools,
+		starter: agent.starter,
+		connectors: agent.connectors ?? false,
+		skills: agent.skills ?? []
+	});
 export const deleteAgent = (id: string) => optional('DELETE', `/v1/agents/${enc(id)}`);
 
 const frames = new Map<string, boolean>();
@@ -572,10 +579,11 @@ export interface AgentToolStep {
 
 export type AgentStep = { kind: 'user' | 'model' | 'note'; text: string } | AgentToolStep;
 
-/** A step that waits for the person: a change to a file (with its diff) or a command. */
+/** A step that waits for the person: a change to a file (with its diff), a command, or a connector's tool. */
 export interface AgentPending {
 	call: string;
 	tool: string;
+	/** The file, or for `call_tool` the name of the connector. */
 	path: string | null;
 	command: string | null;
 	diff: string | null;
@@ -594,6 +602,8 @@ export interface AgentTaskRow {
 
 export interface AgentTask extends AgentTaskRow {
 	web: boolean;
+	/** "Use connectors", and the connector tools allowed for the rest of the task. Missing from an older service. */
+	mcp?: { on: boolean; always: string[] };
 	steps: AgentStep[];
 	pending: AgentPending | null;
 	error: string | null;
@@ -610,8 +620,10 @@ const taskOf = async (answer: Promise<{ task: AgentTask }>) => (await answer).ta
 /** `null` from a service that is too old to have Code. */
 export const agentTasks = async (folder = '') => (await optional<{ tasks: AgentTaskRow[] }>('GET', `/v1/agent/tasks?folder=${enc(folder)}`))?.tasks ?? null;
 export const agentTask = (id: string) => taskOf(json('GET', `/v1/agent/tasks/${enc(id)}`));
-export const startAgentTask = (body: { folder: string; prompt: string; mode: AgentMode; web: boolean; model?: string }) => taskOf(json('POST', '/v1/agent/tasks', body));
-export const tellAgentTask = (id: string, body: { text: string; mode: AgentMode; web: boolean }) => taskOf(json('POST', `/v1/agent/tasks/${enc(id)}/message`, body));
+export const startAgentTask = (body: { folder: string; prompt: string; mode: AgentMode; web: boolean; connectors?: boolean; model?: string }) =>
+	taskOf(json('POST', '/v1/agent/tasks', body));
+export const tellAgentTask = (id: string, body: { text: string; mode: AgentMode; web: boolean; connectors?: boolean }) =>
+	taskOf(json('POST', `/v1/agent/tasks/${enc(id)}/message`, body));
 export const answerAgentTask = (id: string, call: string, allow: boolean, always = false) =>
 	taskOf(json('POST', `/v1/agent/tasks/${enc(id)}/approve`, { call, allow, always }));
 export const stopAgentTask = (id: string) => taskOf(json('DELETE', `/v1/agent/tasks/${enc(id)}`));
@@ -624,3 +636,138 @@ export async function pickFolder(title = 'Choose a folder'): Promise<string | nu
 	const { invoke } = await import('@tauri-apps/api/core');
 	return (await invoke<string | null>('pick_folder', { title })) ?? null;
 }
+
+// --- connectors: tools from outside that the person adds (see daemon/src/connectors.rs) ----------
+
+export interface ConnectorParam {
+	name: string;
+	type: string;
+	required: boolean;
+}
+
+export interface ConnectorTool {
+	name: string;
+	description: string;
+	params: ConnectorParam[];
+	/** The tool's own schema for its arguments. */
+	schema: { properties?: Record<string, { type?: string | string[]; description?: string }>; required?: string[] };
+	/** Runs without asking the person first. */
+	always: boolean;
+}
+
+export interface Connector {
+	id: string;
+	name: string;
+	description: string;
+	/** A program on this computer, or a web address. */
+	kind: 'stdio' | 'http';
+	command: string;
+	args: string[];
+	/** The names of its environment variables. Their values never leave the service. */
+	env: string[];
+	cwd: string;
+	command_line: string;
+	url: string;
+	has_token: boolean;
+	always_allow: string[];
+	on: boolean;
+	state: 'stopped' | 'starting' | 'running' | 'failed';
+	error: string | null;
+	/** How many tools it has, when it runs. */
+	tools: number;
+	/** What the connector says it is, in one line. */
+	about: string;
+}
+
+/** A ready-made connector: it only fills in the form. */
+export interface ReadyConnector {
+	id: string;
+	name: string;
+	does: string;
+	command: string;
+	args: string[];
+	needs: 'node' | 'python';
+}
+
+/** What is sent to add or change a connector. A variable with `null` keeps its saved value; no `token` keeps the saved token. */
+export interface ConnectorBody {
+	name: string;
+	description: string;
+	kind: 'stdio' | 'http';
+	command?: string;
+	args?: string[];
+	env?: Record<string, string | null>;
+	cwd?: string;
+	url?: string;
+	token?: string;
+	always_allow: string[];
+}
+
+export interface ConnectorList {
+	connectors: Connector[];
+	gallery: ReadyConnector[];
+	/** Which of the programs that fetch and run a connector are installed. */
+	programs: { npx: boolean; uvx: boolean };
+}
+
+/** `null` from a service that is too old to have connectors. */
+export const connectors = () => optional<ConnectorList>('GET', '/v1/connectors');
+export const addConnector = (body: ConnectorBody) => json<Connector>('POST', '/v1/connectors', body);
+export const saveConnector = (id: string, body: ConnectorBody) => json<Connector>('PUT', `/v1/connectors/${enc(id)}`, body);
+export const deleteConnector = (id: string) => json<{ deleted: string }>('DELETE', `/v1/connectors/${enc(id)}`);
+export const startConnector = (id: string) => json<Connector>('POST', `/v1/connectors/${enc(id)}/start`);
+export const stopConnector = (id: string) => json<Connector>('POST', `/v1/connectors/${enc(id)}/stop`);
+export const connectorTools = async (id: string) => (await json<{ tools: ConnectorTool[] }>('GET', `/v1/connectors/${enc(id)}/tools`)).tools;
+/** Calls one tool. `from: 'chat'` words the answer for a model; without it the answer is the tool's own text. */
+export const callConnector = (id: string, tool: string, args: unknown, from?: 'chat') =>
+	json<{ ok: boolean; text: string }>('POST', `/v1/connectors/${enc(id)}/call`, { tool, arguments: args, ...(from ? { from } : {}) });
+export const allowConnectorTool = (id: string, tool: string, always: boolean) => json<Connector>('POST', `/v1/connectors/${enc(id)}/allow`, { tool, always });
+/** The three tools that fit a few words best, across the running connectors, as text for a model. */
+export const findConnectorTool = (query: string) => json<{ text: string; matches: { connector: string; tool: string }[] }>('POST', '/v1/connectors/find', { query });
+
+// --- skills: instructions for one kind of work (see daemon/src/agent/skills.rs) -------------------
+
+export interface Skill {
+	name: string;
+	description: string;
+	source: 'built-in' | 'yours' | 'folder';
+	enabled: boolean;
+	/** Where it is offered: everywhere, only in Code, or only in the chat. */
+	where: 'any' | 'code' | 'chat';
+	/** The person's own skill that stands in for one that comes with Rigbrew. */
+	replaces_built_in: boolean;
+}
+
+export interface SkillDetail extends Skill {
+	body: string;
+	licence: string | null;
+	files: { path: string; bytes: number }[];
+}
+
+/** A skill that could be brought in from a folder or from a repository, as it is shown before saving. */
+export interface FoundSkill {
+	name: string;
+	description: string;
+	licence: string | null;
+	bytes: number;
+	files: string[];
+	/** Why it cannot be brought in, when it cannot. */
+	problem: string | null;
+	at: string;
+	replaces_built_in: boolean;
+}
+
+const folderQuery = (folder?: string) => (folder ? `?folder=${enc(folder)}` : '');
+/** `null` from a service that is too old to manage skills. */
+export const skills = (folder?: string) => optional<{ skills: Skill[]; dir: string }>('GET', `/v1/skills${folderQuery(folder)}`);
+export const skill = (name: string, folder?: string) => json<SkillDetail>('GET', `/v1/skills/${enc(name)}${folderQuery(folder)}`);
+export const createSkill = (body: { name: string; description: string; body: string; copy_of?: string }) => json<Skill>('POST', '/v1/skills', body);
+export const saveSkill = (was: string, body: { name: string; description: string; body: string }) => json<Skill>('PUT', `/v1/skills/${enc(was)}`, body);
+export const setSkillEnabled = (name: string, enabled: boolean) => json<Skill>('PUT', `/v1/skills/${enc(name)}`, { enabled });
+export const deleteSkill = (name: string) => json<{ deleted: string }>('DELETE', `/v1/skills/${enc(name)}`);
+/** What `use_skill` answers in the chat. */
+export const useSkill = (name: string) => json<{ ok: boolean; text: string }>('POST', `/v1/skills/${enc(name)}/use`);
+export const skillFile = (name: string, path: string) => json<{ ok: boolean; text: string }>('GET', `/v1/skills/${enc(name)}/file?path=${enc(path)}`);
+/** Looks at the skills in a folder or at a repository address; with `save`, saves the ones named. */
+export const importSkills = (from: 'folder' | 'github', location: string, save?: string[]) =>
+	json<{ found: FoundSkill[]; saved: string[] }>('POST', '/v1/skills/import', { from, location, ...(save ? { save } : {}) });
