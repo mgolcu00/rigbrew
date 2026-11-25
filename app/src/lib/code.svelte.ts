@@ -82,7 +82,7 @@ class Code {
 	/** The tasks of the chosen folder (the service knows which folder is which, links followed). */
 	tasks = $state<AgentTaskRow[]>([]);
 	/** How many tasks, in any folder, wait for an answer: shown next to Code in the sidebar. */
-	waiting = $derived(this.all.filter((t) => t.state === 'waiting').length);
+	waiting = $derived(this.all.filter((t) => t.state === 'waiting' || t.state === 'asking').length);
 	working = $derived(this.all.some((t) => active(t)));
 
 	setMode(mode: AgentMode) {
