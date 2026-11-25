@@ -1,11 +1,11 @@
 <script lang="ts">
 	import { onMount, tick } from 'svelte';
 	import { copyText, isTauri, openExternal, type AgentToolStep } from '#lib/api.ts';
-	import { code, isActive, modes } from '#lib/code.svelte.ts';
+	import { code, isActive, modes, purposeOf } from '#lib/code.svelte.ts';
 	import { ago } from '#lib/format.ts';
 	import { renderMarkdown } from '#lib/markdown.ts';
 	import { app } from '#lib/state.svelte.ts';
-	import { isMac, machine } from '#lib/words.ts';
+	import { isMac, machine, mod } from '#lib/words.ts';
 	import Icon from '#lib/components/Icon.svelte';
 
 	// Code: pick a folder, say what should be done, and watch a model on this computer do it one
@@ -23,6 +23,10 @@
 	const model = $derived(app.chatPackages[0] ?? null);
 	const folderName = $derived(code.folder.split(/[/\\]/).filter(Boolean).pop() ?? code.folder);
 	const mode = $derived(modes.find((m) => m.id === code.mode) ?? modes[0]);
+	const nameOf = (folder: string) => folder.split(/[/\\]/).filter(Boolean).pop() ?? folder;
+	const others = $derived(code.recent.filter((f) => f !== code.folder));
+	const plan = $derived(task?.plan ?? []);
+	const planDone = $derived(plan.filter((s) => s.status === 'done').length);
 
 	onMount(() => {
 		code.enter();
@@ -34,6 +38,7 @@
 		void task?.steps.length;
 		void task?.pending;
 		void task?.state;
+		void code.writing;
 		tick().then(() => thread?.scrollTo({ top: thread.scrollHeight }));
 	});
 
@@ -53,12 +58,80 @@
 		}
 	}
 
+	// Enter sends and Shift+Enter makes a new line. With Cmd or Ctrl held, Enter belongs to the
+	// card that waits for an answer (see `onkey`).
 	function onkeydown(event: KeyboardEvent) {
-		if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
+		if (event.key === 'Enter' && !event.shiftKey && !event.isComposing && !event.metaKey && !event.ctrlKey) {
 			event.preventDefault();
 			send();
 		}
 	}
+
+	/** Esc asks before it stops the work: shown as a line above the box to type in. */
+	let stopping = $state(false);
+	$effect(() => {
+		if (!working) stopping = false;
+	});
+
+	// Keys that work anywhere on the screen: Cmd or Ctrl with Enter allows the step that waits,
+	// Esc asks whether to stop (and a second Esc takes the question back).
+	function onkey(event: KeyboardEvent) {
+		if (event.isComposing || !task) return;
+		if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+			if (task.pending && !code.busy) {
+				event.preventDefault();
+				code.answer(true);
+			} else if (!working && document.activeElement === input) {
+				event.preventDefault();
+				send();
+			}
+		} else if (event.key === 'Escape' && working) {
+			event.preventDefault();
+			stopping = !stopping;
+		}
+	}
+
+	async function stop() {
+		stopping = false;
+		await code.stop();
+	}
+
+	// --- what the newest request changed -------------------------------------------------------
+
+	interface Changed {
+		path: string;
+		plus: number;
+		minus: number;
+		created: boolean;
+		diffs: string[];
+	}
+
+	/** How many messages the person sent: the number of the request being looked at. */
+	const requests = $derived(task?.steps.filter((s) => s.kind === 'user').length ?? 0);
+
+	/** The files the newest request changed, with the lines that came and went. */
+	const changed = $derived.by((): Changed[] => {
+		if (!task) return [];
+		const from = task.steps.findLastIndex((s) => s.kind === 'user');
+		const files = new Map<string, Changed>();
+		for (const step of task.steps.slice(from + 1)) {
+			if (step.kind !== 'tool' || step.status !== 'done' || !step.diff || (step.name !== 'edit_file' && step.name !== 'write_file')) continue;
+			const path = text(step, 'path');
+			const file = files.get(path) ?? { path, plus: 0, minus: 0, created: false, diffs: [] };
+			for (const l of step.diff.split('\n')) {
+				if (l.startsWith('+') && !l.startsWith('+++')) file.plus++;
+				else if (l.startsWith('-') && !l.startsWith('---')) file.minus++;
+			}
+			if (step.diff.startsWith('--- /dev/null') && file.diffs.length === 0) file.created = true;
+			file.diffs.push(step.diff);
+			files.set(path, file);
+		}
+		return [...files.values()];
+	});
+
+	/** The newest request that can still be taken back, if there is one. */
+	const undoable = $derived((task?.undo ?? []).findLast((u) => !u.undone && (u.kind === 'git' || (u.files?.length ?? 0) > 0)) ?? null);
+	const takenBack = $derived((task?.undo ?? []).some((u) => u.undone && u.request === requests));
 
 	const text = (step: AgentToolStep, key: string) => (typeof step.arguments[key] === 'string' ? (step.arguments[key] as string) : '');
 	const short = (value: string, max = 64) => (value.length > max ? `${value.slice(0, max - 1)}…` : value);
@@ -87,6 +160,10 @@
 				return `Searched the web for “${short(text(step, 'query'), 48)}”`;
 			case 'fetch_url':
 				return `Opened ${short(text(step, 'url').replace(/^https?:\/\//, ''), 56)}`;
+			case 'outline':
+				return `Looked at what is in ${!path || path === '.' ? 'the folder' : path}`;
+			case 'update_plan':
+				return 'Updated the plan';
 			case 'use_skill':
 				return `Read the skill ${text(step, 'name')}`;
 			default:
@@ -143,12 +220,29 @@
 	const ideas = ['Summarise this folder', 'Why does the test fail?', 'Write a README'];
 </script>
 
+<svelte:window onkeydown={onkey} />
+
 {#snippet diffView(diff: string)}
 	<pre class="diff selectable">{#each diffLines(diff) as l, i (i)}<span class={l.kind}>{l.text}
 </span>{/each}</pre>
 {/snippet}
 
-{#snippet composer(placeholder: string)}
+{#snippet folders(list: string[])}
+	<ul class="recent">
+		{#each list as f (f)}
+			<li>
+				<button class="task" onclick={() => code.setFolder(f)} title="Open {f}">
+					<Icon name="folder" size={14} />
+					<span class="name">{nameOf(f)}</span>
+					<span class="when path">{f}</span>
+				</button>
+				<button class="del" onclick={() => code.forget(f)} title="Take this folder off the list. Nothing is deleted." aria-label="Take {nameOf(f)} off the list"><Icon name="trash" size={13} /></button>
+			</li>
+		{/each}
+	</ul>
+{/snippet}
+
+{#snippet composer(placeholder: string, explain: boolean)}
 	<div class="composer" class:off={!model}>
 		<textarea bind:this={input} bind:value={draft} oninput={grow} {onkeydown} rows="1" spellcheck="false" disabled={!model} {placeholder} aria-label="What should be done"></textarea>
 		<div class="tools">
@@ -163,14 +257,24 @@
 			</label>
 			<span class="grow"></span>
 			{#if working}
-				<button class="go stop" onclick={() => code.stop()}>Stop</button>
+				<button class="go stop" onclick={stop} title="Stops the work where it is (Esc)">Stop</button>
 			{:else}
 				<button class="go" onclick={send} disabled={!draft.trim() || !model || code.busy}>Send</button>
 			{/if}
 		</div>
 	</div>
+	{#if explain}
+		<dl class="modes">
+			{#each modes as m (m.id)}
+				<div class:on={code.mode === m.id}>
+					<dt>{m.name}</dt>
+					<dd>{m.does}</dd>
+				</div>
+			{/each}
+		</dl>
+	{/if}
 	<p class="fine">
-		{mode.does}
+		{#if !explain}{mode.does}{/if}
 		{#if code.web}
 			Web search is on: the search words go to DuckDuckGo and the pages the model opens are fetched from the internet. Your files are not sent.
 		{:else}
@@ -205,6 +309,12 @@
 					{/if}
 					{#if code.problem}<p class="problem selectable">{code.problem}</p>{/if}
 				</div>
+				{#if code.recent.length}
+					<div class="again">
+						<h2>Recent folders</h2>
+						{@render folders(code.recent)}
+					</div>
+				{/if}
 			</div>
 		</div>
 	{:else}
@@ -225,6 +335,23 @@
 				{/if}
 			</div>
 		</header>
+
+		{#if task && plan.length}
+			<div class="column">
+				<details class="plan" open>
+					<summary>Plan <span class="count">{planDone} of {plan.length} done</span></summary>
+					<ol>
+						{#each plan as s, i (i)}
+							<li class={s.status} aria-current={s.status === 'doing' ? 'step' : undefined}>
+								<span class="box" aria-hidden="true">{#if s.status === 'done'}<Icon name="check" size={11} />{/if}</span>
+								<span class="what">{s.text}</span>
+								<span class="sr">{s.status === 'done' ? 'done' : s.status === 'doing' ? 'in progress' : 'to do'}</span>
+							</li>
+						{/each}
+					</ol>
+				</details>
+			</div>
+		{/if}
 
 		{#if task}
 			<div class="thread scroll" bind:this={thread}>
@@ -261,6 +388,11 @@
 								</li>
 							{/if}
 						{/each}
+						{#if working && code.writing}
+							<li class="turn model writing">
+								<div class="prose selectable">{@html renderMarkdown(code.writing)}</div>
+							</li>
+						{/if}
 					</ol>
 
 					{#if task.pending}
@@ -269,6 +401,7 @@
 							{#if p.command}
 								<h2>Run this command?</h2>
 								<pre class="raw selectable">{p.command}</pre>
+								{#if purposeOf(p.command)}<p class="purpose">{purposeOf(p.command)}</p>{/if}
 								{#if isMac}<p class="fine">It can change files only inside this folder{code.web ? '' : ', and it has no internet'}.</p>{/if}
 								<p class="why">It runs in {folderName} with your own rights, so it can do anything you can do in a terminal. Allow it only if you know what it does.</p>
 							{:else}
@@ -276,16 +409,61 @@
 								{#if p.diff}{@render diffView(p.diff)}{/if}
 							{/if}
 							<div class="answers">
-								<button class="go" onclick={() => code.answer(true)} disabled={code.busy}>Allow</button>
+								<button class="go" onclick={() => code.answer(true)} disabled={code.busy} title="Allow ({mod}Enter)">Allow</button>
 								<button class="plainbtn" onclick={() => code.answer(false)} disabled={code.busy}>Deny</button>
 								<span class="grow"></span>
 								<button class="plainbtn" onclick={() => code.answer(true, true)} disabled={code.busy} title={p.command ? 'Runs this exact command without asking again in this task' : 'Applies every file change in this task without asking'}>
 									{p.command ? 'Always allow this command' : 'Always allow file changes'}
 								</button>
 							</div>
+							<p class="keys">{mod}Enter allows it.</p>
 						</div>
 					{:else if task.state === 'running'}
-						<p class="working"><span class="dot"></span>Working</p>
+						<p class="working"><span class="dot"></span>{code.writing ? 'Writing' : 'Working'}</p>
+					{/if}
+
+					{#if !working && !takenBack && (changed.length || (undoable && undoable.request === requests))}
+						<div class="changed" role="group" aria-label="What changed">
+							<h2>What changed</h2>
+							{#if changed.length}
+								<ul>
+									{#each changed as file (file.path)}
+										<li>
+											<details>
+												<summary>
+													<span class="file">{file.path}</span>
+													{#if file.created}<span class="tag">new</span>{/if}
+													<span class="plus" aria-label="{file.plus} lines added">+{file.plus}</span>
+													<span class="minus" aria-label="{file.minus} lines removed">−{file.minus}</span>
+												</summary>
+												{#each file.diffs as diff, i (i)}{@render diffView(diff)}{/each}
+											</details>
+										</li>
+									{/each}
+								</ul>
+							{:else}
+								<p class="fine">No file was changed with the model's own tools. A command ran, and it may have changed files.</p>
+							{/if}
+							{#if undoable && undoable.request === requests}
+								<div class="answers">
+									<button class="plainbtn" onclick={() => code.undo()} disabled={code.busy} title="Puts the files back as they were before this request">Undo this request</button>
+									<span class="fine">
+										{#if undoable.kind === 'git'}
+											Every file goes back to how it was before this request. Files that git ignores stay as they are.
+										{:else if undoable.commands}
+											The files above go back to how they were. What commands changed cannot be undone, because this folder is not a git repository.
+										{:else}
+											The files above go back to how they were before this request.
+										{/if}
+									</span>
+								</div>
+							{/if}
+						</div>
+					{:else if !working && undoable && undoable.request !== requests}
+						<div class="answers earlier">
+							<button class="plainbtn" onclick={() => code.undo()} disabled={code.busy}>Undo the earlier changes</button>
+							<span class="fine">Takes back what request {undoable.request} of this task changed.</span>
+						</div>
 					{/if}
 
 					{#if task.error}<p class="ended selectable" class:bad={task.state === 'failed'}>{task.error}</p>
@@ -295,7 +473,16 @@
 			</div>
 			<div class="dock">
 				<div class="column">
-					{@render composer(task.pending ? 'Answer the question above first' : working ? 'It is working. You can stop it.' : 'Ask for the next thing')}
+					{#if stopping}
+						<div class="stopask" role="alertdialog" aria-label="Stop the work?">
+							<span>Stop the work? What is already changed stays changed.</span>
+							<span class="grow"></span>
+							<!-- svelte-ignore a11y_autofocus -->
+							<button class="plainbtn" onclick={stop} autofocus>Stop</button>
+							<button class="plainbtn" onclick={() => (stopping = false)}>Keep going</button>
+						</div>
+					{/if}
+					{@render composer(task.pending ? 'Answer the question above first' : working ? 'It is working. Press Esc to stop it.' : 'Ask for the next thing', false)}
 				</div>
 			</div>
 		{:else}
@@ -305,7 +492,7 @@
 					{#if !model}
 						<p class="lede">Code needs a chat model. <button class="link" onclick={() => app.go('models')}>Install one under Models</button>, then come back.</p>
 					{/if}
-					{@render composer('Say it in plain words')}
+					{@render composer('Say it in plain words', true)}
 					{#if code.problem}<p class="problem selectable">{code.problem}</p>{/if}
 
 					{#if code.tasks.length === 0}
@@ -328,6 +515,11 @@
 								</li>
 							{/each}
 						</ul>
+					{/if}
+
+					{#if others.length}
+						<h2>Recent folders</h2>
+						{@render folders(others)}
 					{/if}
 
 					<details class="skills">
@@ -510,6 +702,105 @@
 		color: var(--accent);
 	}
 
+	/* --- the plan: a small checklist that stays above the work --- */
+	.plan {
+		flex: none;
+		margin: 0 0 10px;
+		padding: 8px 12px;
+		border: 1px solid var(--line-soft);
+		border-radius: 12px;
+		font-size: 13.5px;
+	}
+
+	.plan summary {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		min-height: 22px;
+		cursor: pointer;
+		font: 500 12.5px/1 var(--rb-text);
+		color: var(--muted);
+		list-style: none;
+	}
+
+	.plan summary::-webkit-details-marker {
+		display: none;
+	}
+
+	.plan .count {
+		color: var(--faint);
+		font-weight: 400;
+	}
+
+	.plan ol {
+		margin: 6px 0 2px;
+		padding: 0;
+		list-style: none;
+		display: grid;
+		gap: 5px;
+		max-height: 30vh;
+		overflow: auto;
+	}
+
+	.plan li {
+		display: flex;
+		align-items: baseline;
+		gap: 9px;
+		color: var(--muted);
+		line-height: 1.4;
+	}
+
+	.plan .box {
+		flex: none;
+		display: grid;
+		place-items: center;
+		width: 14px;
+		height: 14px;
+		border-radius: 4px;
+		box-shadow: inset 0 0 0 1.5px var(--line);
+		transform: translateY(2px);
+	}
+
+	.plan li.done {
+		color: var(--faint);
+	}
+
+	.plan li.done .box {
+		background: var(--fit-soft);
+		box-shadow: none;
+		color: var(--fit);
+	}
+
+	.plan li.doing {
+		color: var(--ink);
+	}
+
+	.plan li.doing .box {
+		box-shadow: inset 0 0 0 1.5px var(--accent);
+	}
+
+	.plan li.doing .box::after {
+		content: '';
+		width: 6px;
+		height: 6px;
+		border-radius: 2px;
+		background: var(--accent);
+	}
+
+	.plan .what {
+		min-width: 0;
+		overflow-wrap: anywhere;
+	}
+
+	.sr {
+		position: absolute;
+		width: 1px;
+		height: 1px;
+		overflow: hidden;
+		clip-path: inset(50%);
+		white-space: nowrap;
+	}
+
 	/* --- the start page of a folder --- */
 	.start {
 		display: grid;
@@ -559,7 +850,8 @@
 		color: var(--ink);
 	}
 
-	.tasks {
+	.tasks,
+	.recent {
 		margin: -8px 0 0;
 		padding: 0;
 		list-style: none;
@@ -567,8 +859,43 @@
 		gap: 1px;
 	}
 
-	.tasks li {
+	.tasks li,
+	.recent li {
 		position: relative;
+	}
+
+	.recent .task {
+		align-items: center;
+		color: var(--ink);
+	}
+
+	.recent .task .name {
+		flex: none;
+		max-width: 50%;
+	}
+
+	.recent .task .path {
+		flex: 1;
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		font-family: var(--rb-data);
+		font-size: 12px;
+	}
+
+	.again {
+		display: grid;
+		gap: 14px;
+		width: min(520px, 100%);
+		margin: 22px auto 0;
+		text-align: left;
+	}
+
+	.again h2 {
+		padding: 0 4px;
+		font: 500 12px/1 var(--rb-text);
+		color: var(--faint);
 	}
 
 	.task {
@@ -614,6 +941,7 @@
 	}
 
 	.tasks li:hover .del,
+	.recent li:hover .del,
 	.del:focus-visible {
 		display: grid;
 	}
@@ -695,6 +1023,8 @@
 		padding: 8px 0 0;
 		list-style: none;
 		display: grid;
+		/* A long command in one line is cut with an ellipsis; it never widens the column. */
+		grid-template-columns: minmax(0, 1fr);
 		gap: 14px;
 	}
 
@@ -882,6 +1212,162 @@
 
 	.plainbtn:disabled {
 		opacity: 0.4;
+	}
+
+	.purpose,
+	.keys {
+		font-size: 13px;
+		line-height: 1.45;
+		color: var(--muted);
+	}
+
+	.keys {
+		font-size: 12px;
+		color: var(--faint);
+	}
+
+	/* --- what the request changed, and the way back --- */
+	.changed {
+		display: grid;
+		gap: 8px;
+		margin-top: 18px;
+		padding: 12px 14px;
+		border: 1px solid var(--line-soft);
+		border-radius: 12px;
+	}
+
+	.changed h2 {
+		font: 500 12.5px/1 var(--rb-text);
+		color: var(--muted);
+	}
+
+	.changed ul {
+		margin: 0;
+		padding: 0;
+		list-style: none;
+		display: grid;
+		gap: 1px;
+	}
+
+	.changed summary {
+		display: flex;
+		align-items: baseline;
+		gap: 10px;
+		min-height: 28px;
+		padding: 4px 6px;
+		margin: 0 -6px;
+		border-radius: 6px;
+		cursor: pointer;
+		font-size: 13.5px;
+		list-style: none;
+	}
+
+	.changed summary::-webkit-details-marker {
+		display: none;
+	}
+
+	.changed summary:hover {
+		background: var(--hover);
+	}
+
+	.changed .file {
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		font-family: var(--rb-data);
+		font-size: 12.5px;
+	}
+
+	.changed .tag {
+		flex: none;
+		font-size: 12px;
+		color: var(--faint);
+	}
+
+	.changed .plus,
+	.changed .minus {
+		flex: none;
+		font: 12.5px var(--rb-data);
+	}
+
+	.changed .plus {
+		margin-left: auto;
+		color: var(--fit);
+	}
+
+	.changed .minus {
+		color: var(--fail);
+	}
+
+	.changed .diff {
+		margin: 4px 0 8px;
+	}
+
+	.changed .answers,
+	.earlier {
+		flex-wrap: nowrap;
+		align-items: center;
+		gap: 12px;
+		margin-top: 4px;
+	}
+
+	.earlier {
+		margin-top: 16px;
+	}
+
+	.changed .answers .plainbtn,
+	.earlier .plainbtn {
+		flex: none;
+	}
+
+	.changed .fine,
+	.earlier .fine {
+		margin: 0;
+		padding: 0;
+	}
+
+	.stopask {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: 8px;
+		margin-bottom: 8px;
+		padding: 8px 8px 8px 14px;
+		border: 1px solid var(--line);
+		border-radius: 14px;
+		background: var(--bg);
+		font-size: 13.5px;
+		animation: appear 0.15s var(--ease) both;
+	}
+
+	/* --- the three modes, each in one line --- */
+	.modes {
+		display: grid;
+		gap: 3px;
+		margin: 10px 0 0;
+		padding: 0 10px;
+		font-size: 12.5px;
+		line-height: 1.45;
+		color: var(--faint);
+	}
+
+	.modes div {
+		display: grid;
+		grid-template-columns: 5.5em 1fr;
+		gap: 10px;
+	}
+
+	.modes dt {
+		font-weight: 500;
+	}
+
+	.modes dd {
+		margin: 0;
+	}
+
+	.modes .on {
+		color: var(--ink);
 	}
 
 	.working {

@@ -10,7 +10,7 @@ use std::time::Duration;
 /// Characters of one tool result the model gets to see.
 pub const RESULT_CHARS: usize = 4000;
 /// Largest file `read_file` and `edit_file` open.
-const MAX_READ_BYTES: u64 = 2 * 1024 * 1024;
+pub const MAX_READ_BYTES: u64 = 2 * 1024 * 1024;
 /// Largest file `search` looks into.
 const MAX_SEARCH_BYTES: u64 = 1024 * 1024;
 /// Largest content `write_file` accepts.
@@ -23,7 +23,7 @@ const MAX_SEARCH_FILES: usize = 5000;
 /// Command output kept in memory while it runs.
 const MAX_OUTPUT_BYTES: usize = 512 * 1024;
 
-/// Folders that are never listed or searched.
+/// Folders that are never listed or searched, whether an ignore file names them or not.
 const SKIP_DIRS: &[&str] = &[".git", "node_modules", "target", ".svelte-kit", ".venv", "__pycache__", ".next", ".gradle"];
 
 /// The first `max` characters, with a note when something was left out.
@@ -170,20 +170,32 @@ fn human_size(bytes: u64) -> String {
     }
 }
 
-/// Entries of a directory, sorted by name. Links are reported as what they are, never followed.
-fn entries(dir: &Path) -> Vec<(String, PathBuf, std::fs::FileType)> {
-    let mut out: Vec<_> = std::fs::read_dir(dir)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter_map(|e| Some((e.file_name().to_string_lossy().into_owned(), e.path(), e.file_type().ok()?)))
-        .filter(|(name, _, _)| name != ".DS_Store")
-        .collect();
-    out.sort_by(|a, b| a.0.cmp(&b.0));
-    out
+/// Whether this is a folder of build output or dependencies that is skipped even when no
+/// ignore file names it.
+fn heavy(entry: &ignore::DirEntry) -> bool {
+    entry.depth() > 0 && entry.file_type().is_some_and(|t| t.is_dir()) && entry.file_name().to_str().is_some_and(|n| SKIP_DIRS.contains(&n))
 }
 
-/// `list_files`: a tree of the folder, `depth` levels deep.
+/// Everything under `start`, folders before what is in them and names in order, the way git
+/// sees the folder: what `.gitignore`, `.ignore` and git's own exclude files name is left out,
+/// in a repository or not. Hidden files are kept (`.github`, `.env.example`); links are
+/// reported and never followed. The folders in `SKIP_DIRS` are never entered; with `name_heavy`
+/// they are still reported, so a listing can say they are there.
+pub fn walk(start: &Path, depth: Option<usize>, name_heavy: bool) -> impl Iterator<Item = ignore::DirEntry> {
+    let in_heavy = |e: &ignore::DirEntry| {
+        e.depth() > 1 && e.path().parent().and_then(Path::file_name).and_then(|n| n.to_str()).is_some_and(|n| SKIP_DIRS.contains(&n))
+    };
+    ignore::WalkBuilder::new(start)
+        .hidden(false)
+        .require_git(false)
+        .max_depth(depth)
+        .sort_by_file_name(|a, b| a.cmp(b))
+        .filter_entry(move |e| !in_heavy(e) && (name_heavy || !heavy(e)) && e.file_name() != ".DS_Store")
+        .build()
+        .flatten()
+}
+
+/// `list_files`: a tree of the folder, `depth` levels deep, without what git ignores.
 pub fn list(folder: &Folder, path: &str, depth: usize) -> Result<String, String> {
     let start = folder.existing(path)?;
     if !start.is_dir() {
@@ -192,31 +204,24 @@ pub fn list(folder: &Folder, path: &str, depth: usize) -> Result<String, String>
     let depth = depth.clamp(1, 4);
     let mut lines = Vec::new();
     let mut more = false;
-    fn walk(dir: &Path, level: usize, depth: usize, lines: &mut Vec<String>, more: &mut bool) {
-        for (name, path, kind) in entries(dir) {
-            if lines.len() >= MAX_LIST_ENTRIES {
-                *more = true;
-                return;
-            }
-            let pad = "  ".repeat(level);
-            if kind.is_dir() {
-                if SKIP_DIRS.contains(&name.as_str()) {
-                    lines.push(format!("{pad}{name}/ (not listed)"));
-                } else {
-                    lines.push(format!("{pad}{name}/"));
-                    if level + 1 < depth {
-                        walk(&path, level + 1, depth, lines, more);
-                    }
-                }
-            } else if kind.is_symlink() {
-                lines.push(format!("{pad}{name} (link)"));
-            } else {
-                let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-                lines.push(format!("{pad}{name} ({})", human_size(size)));
-            }
+    for entry in walk(&start, Some(depth), true).filter(|e| e.depth() > 0) {
+        if lines.len() >= MAX_LIST_ENTRIES {
+            more = true;
+            break;
         }
+        let pad = "  ".repeat(entry.depth() - 1);
+        let name = entry.file_name().to_string_lossy();
+        let Some(kind) = entry.file_type() else { continue };
+        lines.push(if heavy(&entry) {
+            format!("{pad}{name}/ (not listed)")
+        } else if kind.is_dir() {
+            format!("{pad}{name}/")
+        } else if kind.is_symlink() {
+            format!("{pad}{name} (link)")
+        } else {
+            format!("{pad}{name} ({})", human_size(entry.metadata().map(|m| m.len()).unwrap_or(0)))
+        });
     }
-    walk(&start, 0, depth, &mut lines, &mut more);
     if lines.is_empty() {
         return Ok(format!("{} is empty.", folder.relative(&start)));
     }
@@ -227,7 +232,7 @@ pub fn list(folder: &Folder, path: &str, depth: usize) -> Result<String, String>
     Ok(cap(&out, RESULT_CHARS * 2))
 }
 
-fn read_text(path: &Path, shown: &str, limit: u64) -> Result<String, String> {
+pub fn read_text(path: &Path, shown: &str, limit: u64) -> Result<String, String> {
     let size = std::fs::metadata(path).map_err(|e| format!("Cannot read {shown}: {e}"))?.len();
     if size > limit {
         return Err(format!("{shown} is {} and too large to open here. Use search to find the part you need.", human_size(size)));
@@ -274,11 +279,15 @@ pub fn read(folder: &Folder, path: &str, from_line: Option<usize>, lines: Option
         head.push_str(&format!(" [truncated: call read_file with from_line={} for more]", last + 1));
     } else if last < total {
         head.push_str(&format!(" [the file goes on: from_line={} reads more]", last + 1));
+        if from_line.is_none() && total > 400 && super::outline::lang_of(&file).is_some() {
+            head.push_str(" [outline shows what is on which line]");
+        }
     }
     Ok(format!("{head}\n{out}"))
 }
 
-/// `search`: lines that contain `pattern`, as plain text or as a regular expression.
+/// `search`: lines that contain `pattern`, as plain text or as a regular expression. Files git
+/// ignores are not looked into, unless the path names one.
 pub fn search(folder: &Folder, pattern: &str, path: Option<&str>) -> Result<String, String> {
     if pattern.is_empty() {
         return Err("A pattern to look for is needed.".into());
@@ -290,31 +299,17 @@ pub fn search(folder: &Folder, pattern: &str, path: Option<&str>) -> Result<Stri
     let mut hits: Vec<String> = Vec::new();
     let mut files = 0usize;
     let mut cut = false;
-    let mut stack = vec![start.clone()];
-    while let Some(next) = stack.pop() {
+    for entry in walk(&start, None, false) {
         if hits.len() >= MAX_SEARCH_HITS || files >= MAX_SEARCH_FILES {
             cut = true;
             break;
         }
-        let meta = match std::fs::symlink_metadata(&next) {
-            Ok(m) => m,
-            Err(_) => continue,
-        };
-        if meta.is_dir() {
-            // Pushed in reverse so files come out in name order.
-            for (name, path, kind) in entries(&next).into_iter().rev() {
-                if kind.is_symlink() || (kind.is_dir() && SKIP_DIRS.contains(&name.as_str())) {
-                    continue;
-                }
-                stack.push(path);
-            }
-            continue;
-        }
-        if !meta.is_file() || meta.len() > MAX_SEARCH_BYTES {
+        // Links are never followed, so nothing outside the folder is read.
+        if !entry.file_type().is_some_and(|t| t.is_file()) || entry.metadata().map_or(true, |m| m.len() > MAX_SEARCH_BYTES) {
             continue;
         }
         files += 1;
-        let Ok(bytes) = std::fs::read(&next) else { continue };
+        let Ok(bytes) = std::fs::read(entry.path()) else { continue };
         if looks_binary(&bytes) {
             continue;
         }
@@ -326,7 +321,7 @@ pub fn search(folder: &Folder, pattern: &str, path: Option<&str>) -> Result<Stri
                     break;
                 }
                 let shown: String = line.trim().chars().take(200).collect();
-                hits.push(format!("{}:{}: {shown}", folder.relative(&next), n + 1));
+                hits.push(format!("{}:{}: {shown}", folder.relative(entry.path()), n + 1));
             }
         }
     }
@@ -534,6 +529,32 @@ fn seatbelt_profile(folder: &Path, network: bool) -> String {
 #[cfg(target_os = "macos")]
 fn sandboxed() -> bool {
     Path::new("/usr/bin/sandbox-exec").is_file()
+}
+
+/// A program the service itself starts in the folder (git, for undo), confined the way a
+/// command of the task is: on macOS it can write only inside the folder and has no network.
+/// What it creates gets the usual permissions, not the private ones of the service.
+pub fn confined(folder: &Path, program: &str) -> std::process::Command {
+    #[cfg(target_os = "macos")]
+    let mut cmd = if sandboxed() {
+        let mut c = std::process::Command::new("/usr/bin/sandbox-exec");
+        c.arg("-p").arg(seatbelt_profile(folder, false)).arg(program);
+        c
+    } else {
+        std::process::Command::new(program)
+    };
+    #[cfg(not(target_os = "macos"))]
+    let mut cmd = std::process::Command::new(program);
+    #[cfg(unix)]
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        cmd.pre_exec(|| {
+            libc::umask(0o022);
+            Ok(())
+        });
+    }
+    cmd.current_dir(folder);
+    cmd
 }
 
 /// `run_command`: one shell command with the folder as its working directory. On macOS it runs
@@ -774,6 +795,46 @@ mod tests {
         let out = search(&f, "needle", None).unwrap();
         assert!(out.contains("[truncated"));
         assert_eq!(out.lines().filter(|l| l.starts_with("many.txt:")).count(), MAX_SEARCH_HITS);
+    }
+
+    #[test]
+    fn what_git_ignores_is_not_listed_or_searched() {
+        let (f, inside, _) = folder();
+        // No repository here: the ignore file counts all the same.
+        std::fs::write(inside.join(".gitignore"), "dist/\n*.log\n/local.txt\n!keep.log\n").unwrap();
+        for dir in ["dist/assets", "src/dist", ".github/workflows", "docs"] {
+            std::fs::create_dir_all(inside.join(dir)).unwrap();
+        }
+        for (path, text) in [
+            ("dist/assets/app.txt", "needle in build output\n"),
+            ("src/dist/deep.txt", "needle in nested build output\n"),
+            ("debug.log", "needle in a log\n"),
+            ("keep.log", "needle kept\n"),
+            ("local.txt", "needle at the top\n"),
+            ("docs/local.txt", "needle further down\n"),
+            (".github/workflows/ci.txt", "needle in a hidden folder\n"),
+            ("docs/.ignore", "draft.txt\n"),
+            ("docs/draft.txt", "needle in a draft\n"),
+        ] {
+            std::fs::write(inside.join(path), text).unwrap();
+        }
+        let found = search(&f, "needle", None).unwrap();
+        let files: Vec<&str> = found.lines().map(|l| l.split(':').next().unwrap()).collect();
+        assert_eq!(files, [".github/workflows/ci.txt", "docs/local.txt", "keep.log"], "{found}");
+        // The rules of the folder also hold when only a part of it is searched.
+        assert!(search(&f, "needle", Some("src")).unwrap().starts_with("Nothing"));
+        // A file named outright is looked into, ignored or not.
+        assert_eq!(search(&f, "needle", Some("debug.log")).unwrap(), "debug.log:1: needle in a log");
+        assert!(read(&f, "dist/assets/app.txt", None, None).unwrap().contains("needle"));
+        let tree = list(&f, ".", 3).unwrap();
+        assert!(tree.contains(".github/\n  workflows/\n    ci.txt"), "{tree}");
+        assert!(tree.contains(".gitignore") && tree.contains("keep.log"), "{tree}");
+        for gone in ["dist", "debug.log", "draft.txt", "deep.txt"] {
+            assert!(!tree.contains(gone), "{gone} is listed: {tree}");
+        }
+        assert_eq!(tree.matches("local.txt").count(), 1, "{tree}");
+        // An ignored folder can still be listed by name.
+        assert!(list(&f, "dist", 2).unwrap().contains("app.txt"));
     }
 
     #[test]

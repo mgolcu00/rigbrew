@@ -46,9 +46,11 @@
 //!   GET    /v1/videos/files/{id}.webm     a saved clip; DELETE removes it
 //!   ...    /v1/studio/...                 films made of shots in a folder (see `studio.rs`)
 //!   POST   /v1/agent/tasks                Code: {"folder", "prompt", "model", "mode", "web"} starts a task on a folder
-//!   GET    /v1/agent/tasks[/{id}]         tasks (?folder=), or one with its steps; DELETE stops it (?remove=true forgets it)
+//!   GET    /v1/agent/tasks[/{id}]         tasks (?folder=), or one with its steps, its plan and the answer being written
+//!                                        (?brief=true leaves the steps out); DELETE stops it (?remove=true forgets it)
 //!   POST   /v1/agent/tasks/{id}/approve   {"call", "allow", "always"}: answer a step that waits for the person
 //!   POST   /v1/agent/tasks/{id}/message   {"text"}: continue the task
+//!   POST   /v1/agent/tasks/{id}/undo      take back what the newest request changed in the folder
 //!   GET    /v1/agent/skills               the skills a task can use (?folder=)
 
 mod agent;
@@ -724,31 +726,111 @@ fn error_message(raw: &[u8]) -> String {
         .unwrap_or_else(|| text.chars().take(300).collect())
 }
 
-/// A whole chat answer, not streamed, for work the service does itself (a Code task). It goes
-/// the same way as a chat from the app: same engine, same memory rules, same events.
-async fn complete(app: &App, package: &Package, body: Value) -> Result<Value, String> {
+/// What the pieces of a streamed chat answer add up to: the text and the tool calls, which
+/// arrive a few characters at a time.
+#[derive(Default)]
+struct Assembled {
+    text: String,
+    calls: Vec<Value>,
+    finish: Value,
+}
+
+impl Assembled {
+    /// Takes one line of the stream. Returns whether it added text, or the error the engine sent.
+    fn take(&mut self, line: &str) -> Result<bool, String> {
+        let Some(data) = line.trim().strip_prefix("data:").map(str::trim) else { return Ok(false) };
+        let Ok(chunk) = serde_json::from_str::<Value>(data) else { return Ok(false) };
+        if !chunk["error"].is_null() {
+            return Err(chunk["error"]["message"].as_str().unwrap_or("The model stopped with an error.").to_string());
+        }
+        let choice = &chunk["choices"][0];
+        let piece = choice["delta"]["content"].as_str().unwrap_or("");
+        self.text.push_str(piece);
+        // The name comes first, then the arguments as text, a few characters at a time.
+        for part in choice["delta"]["tool_calls"].as_array().into_iter().flatten() {
+            let at = part["index"].as_u64().unwrap_or(0) as usize;
+            while self.calls.len() <= at {
+                self.calls.push(json!({"id": "", "type": "function", "function": {"name": "", "arguments": ""}}));
+            }
+            let call = &mut self.calls[at];
+            if let Some(id) = part["id"].as_str().filter(|id| !id.is_empty()) {
+                call["id"] = json!(id);
+            }
+            for key in ["name", "arguments"] {
+                if let Some(more) = part["function"][key].as_str() {
+                    call["function"][key] = json!(format!("{}{more}", call["function"][key].as_str().unwrap_or("")));
+                }
+            }
+        }
+        if choice["finish_reason"].is_string() {
+            self.finish = choice["finish_reason"].clone();
+        }
+        Ok(!piece.is_empty())
+    }
+
+    /// The answer in the shape of one that was not streamed.
+    fn message(self) -> Value {
+        let mut message = json!({"role": "assistant", "content": self.text});
+        if !self.calls.is_empty() {
+            message["tool_calls"] = json!(self.calls);
+        }
+        json!({"choices": [{"message": message, "finish_reason": self.finish}]})
+    }
+}
+
+/// A whole chat answer for work the service does itself (a Code task). It goes the same way as
+/// a chat from the app: same engine, same memory rules, same events. The engine is asked to
+/// stream, and `heard` gets the text so far every time more of it arrives, so the task can show
+/// the words as they come. What comes back has the shape of an answer that was not streamed.
+async fn complete(app: &App, package: &Package, mut body: Value, heard: &mut (dyn FnMut(&str) + Send)) -> Result<Value, String> {
     let started = std::time::Instant::now();
-    let (resp, variant) = match engine_chat(app, package, body).await {
+    body["stream"] = json!(true);
+    body["stream_options"] = json!({"include_usage": true});
+    let (mut resp, variant) = match engine_chat(app, package, body).await {
         Ok(v) => v,
         Err(resp) => {
             let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024).await.unwrap_or_default();
             return Err(error_message(&bytes));
         }
     };
-    let ok = resp.status().is_success();
-    let raw = resp.bytes().await.map_err(|e| e.to_string())?;
-    if !ok {
-        let message = error_message(&raw);
+    let problem = |message: String| {
         app.record("error", json!({"where": "chat", "message": message}));
-        return Err(message);
+        message
+    };
+    if !resp.status().is_success() {
+        let raw = resp.bytes().await.map_err(|e| e.to_string())?;
+        return Err(problem(error_message(&raw)));
     }
-    let mut answer = summarize_answer(&String::from_utf8_lossy(&raw), false);
-    answer["package"] = json!(package.id);
-    answer["variant"] = json!(variant);
-    answer["seconds"] = json!(started.elapsed().as_secs_f64());
-    app.record("response", answer);
+    let streaming = resp.headers().get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).is_some_and(|t| t.contains("event-stream"));
+    let mut raw: Vec<u8> = Vec::new();
+    let mut read = 0;
+    let mut answer = Assembled::default();
+    while let Some(chunk) = resp.chunk().await.map_err(|e| problem(e.to_string()))? {
+        raw.extend_from_slice(&chunk);
+        // Whole lines only: a piece of the stream can end in the middle of one, or of a letter.
+        while let Some(end) = raw[read..].iter().position(|b| *b == b'\n').filter(|_| streaming) {
+            let line = String::from_utf8_lossy(&raw[read..read + end]).into_owned();
+            read += end + 1;
+            if answer.take(&line).map_err(problem)? {
+                heard(&answer.text);
+            }
+        }
+    }
+    let rest = String::from_utf8_lossy(&raw[read..]).into_owned();
+    let raw = String::from_utf8_lossy(&raw);
+    let message = if streaming {
+        answer.take(&rest).map_err(problem)?;
+        answer.message()
+    } else {
+        serde_json::from_str(&raw).map_err(|_| "The model's answer could not be read.".to_string())?
+    };
+    let mut summary = summarize_answer(&raw, streaming);
+    summary["package"] = json!(package.id);
+    summary["variant"] = json!(variant);
+    summary["seconds"] = json!(started.elapsed().as_secs_f64());
+    app.record("response", summary);
     touch(app, &package.id).await;
-    serde_json::from_slice(&raw).map_err(|_| "The model's answer could not be read.".to_string())
+    Ok(message)
 }
 
 async fn chat(State(app): State<Shared>, Json(body): Json<Value>) -> Response {
@@ -1270,6 +1352,7 @@ async fn main() {
         .route("/v1/agent/tasks/{id}", get(agent::task_get).delete(agent::task_delete))
         .route("/v1/agent/tasks/{id}/approve", post(agent::task_approve))
         .route("/v1/agent/tasks/{id}/message", post(agent::task_message))
+        .route("/v1/agent/tasks/{id}/undo", post(agent::task_undo))
         .route("/v1/agent/skills", get(agent::skills_list))
         .layer(middleware::from_fn_with_state(app.clone(), auth))
         // Added after the token check, so it needs none: a frame cannot send one, and the page is the same for everyone.
@@ -1323,4 +1406,44 @@ async fn main() {
         .await
         .expect("server");
     std::fs::remove_file(info).ok();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_streamed_answer_is_put_together_from_its_pieces() {
+        let mut answer = Assembled::default();
+        let lines = [
+            r#"data: {"choices":[{"delta":{"role":"assistant","content":null}}]}"#,
+            r#"data: {"choices":[{"delta":{"content":"I will "}}]}"#,
+            "",
+            ": a comment",
+            r#"data: {"choices":[{"delta":{"content":"look."}}]}"#,
+            r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"read_file","arguments":""}}]}}]}"#,
+            r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"path\":"}}]}}]}"#,
+            r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"a.txt\"}"}}]}}]}"#,
+            r#"data: {"choices":[{"delta":{"tool_calls":[{"index":1,"id":"call_2","function":{"name":"finish","arguments":"{}"}}]}}]}"#,
+            r#"data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#,
+            r#"data: {"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5}}"#,
+            "data: [DONE]",
+        ];
+        let heard: Vec<bool> = lines.iter().map(|l| answer.take(l).unwrap()).collect();
+        assert_eq!(heard.iter().filter(|h| **h).count(), 2, "only the two pieces of text are passed on");
+        let out = answer.message();
+        let message = &out["choices"][0]["message"];
+        assert_eq!(message["content"], "I will look.");
+        assert_eq!(message["tool_calls"][0]["id"], "call_1");
+        assert_eq!(message["tool_calls"][0]["function"]["name"], "read_file");
+        assert_eq!(message["tool_calls"][0]["function"]["arguments"], r#"{"path":"a.txt"}"#);
+        assert_eq!(message["tool_calls"][1]["function"]["name"], "finish");
+        assert_eq!(out["choices"][0]["finish_reason"], "tool_calls");
+        // Text alone has no tool calls, and an error in the stream ends it.
+        let mut plain = Assembled::default();
+        plain.take(r#"data: {"choices":[{"delta":{"content":"Hello"},"finish_reason":"stop"}]}"#).unwrap();
+        assert!(plain.message()["choices"][0]["message"].get("tool_calls").is_none());
+        let mut broken = Assembled::default();
+        assert_eq!(broken.take(r#"data: {"error":{"message":"out of memory"}}"#).unwrap_err(), "out of memory");
+    }
 }

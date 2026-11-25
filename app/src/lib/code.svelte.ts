@@ -16,10 +16,46 @@ export const modes: { id: AgentMode; name: string; does: string }[] = [
 	{ id: 'auto_edits', name: 'Auto edits', does: 'Changes files in the folder without asking. Still asks before it runs a command.' }
 ];
 
+const MAX_RECENT = 8;
+
+/** What was remembered, with the folder that is open first when the list does not have it yet. */
+function recentFolders(): string[] {
+	const kept = remembered.json<unknown>('code.folders', []);
+	const list = Array.isArray(kept) ? kept.filter((f): f is string => typeof f === 'string' && f.trim() !== '') : [];
+	const open = remembered.get('code.folder');
+	return (open && !list.includes(open) ? [open, ...list] : list).slice(0, MAX_RECENT);
+}
+
+/** What a command is for, said only when the command line leaves no doubt. */
+export function purposeOf(command: string): string {
+	const line = command.trim();
+	// Two commands in one line, a pipe or a redirect: no guessing.
+	if (/[;&|<>`\n]|\$\(/.test(line)) return '';
+	const rules: [RegExp, string][] = [
+		[/^(cargo|go) test\b/, 'This runs the tests of the project.'],
+		[/^(npm|pnpm|yarn|bun) (run )?test\b/, 'This runs the tests of the project.'],
+		[/^(python3?|py) -m (pytest|unittest)\b/, 'This runs the tests of the project.'],
+		[/^(pytest|jest|vitest( run)?|swift test|make test|\.\/gradlew test|gradle test|mvn test)( |$)/, 'This runs the tests of the project.'],
+		[/^(cargo (build|check|clippy)|go (build|vet)|swift build|tsc)( |$)/, 'This builds or checks the project.'],
+		[/^make( (build|check|all))?$/, 'This builds or checks the project.'],
+		[/^(npm|pnpm|yarn|bun) (run )?(build|check|lint|typecheck)( |$)/, 'This builds or checks the project.'],
+		[/^git (status|diff|log|show|branch)( |$)/, 'This only looks at the history and the state of the files.'],
+		[/^(ls|pwd|cat|head|tail|wc|grep|rg|find|tree|which|file)( |$)/, 'This only reads.'],
+		[/^(npm|pnpm|yarn|bun) (install|i|add)( |$)/, 'This downloads and installs packages.'],
+		[/^(pip3?|python3? -m pip|uv pip) install( |$)/, 'This downloads and installs packages.'],
+		[/^(rm|rmdir) /, 'This deletes files.']
+	];
+	// `find` and `git branch` can also change things; then nothing is said.
+	if (/^find .*-(delete|exec)/.test(line) || /^git branch .*-[dDmM]\b/.test(line)) return '';
+	return rules.find(([pattern]) => pattern.test(line))?.[1] ?? '';
+}
+
 class Code {
 	/** The folder being worked on, as the person chose it. Empty until they do. */
 	folder = $state(remembered.get('code.folder') ?? '');
 	mode = $state<AgentMode>(modes.some((m) => m.id === remembered.get('code.mode')) ? (remembered.get('code.mode') as AgentMode) : 'ask');
+	/** The folders worked on lately, newest first, at most eight. */
+	recent = $state<string[]>(recentFolders());
 	/** "Allow web search": off until the person switches it on. */
 	web = $state(remembered.get('code.web') === 'on');
 	/** Every task the service knows, newest first. */
@@ -33,8 +69,12 @@ class Code {
 	available = $state(true);
 	busy = $state(false);
 
+	/** What the model has written of its answer so far, while the open task works. */
+	writing = $state('');
+
 	#watching = false;
 	#visible = false;
+	#listedAt = 0;
 
 	/** The tasks of the chosen folder (the service knows which folder is which, links followed). */
 	tasks = $state<AgentTaskRow[]>([]);
@@ -57,9 +97,18 @@ class Code {
 		if (!folder) return;
 		this.folder = folder;
 		this.task = null;
+		this.writing = '';
 		this.problem = '';
 		remembered.set('code.folder', folder);
+		this.recent = [folder, ...this.recent.filter((f) => f !== folder)].slice(0, MAX_RECENT);
+		remembered.setJson('code.folders', this.recent);
 		await this.refresh();
+	}
+
+	/** Takes a folder off the list of recent ones. Nothing on disk changes. */
+	forget(folder: string) {
+		this.recent = this.recent.filter((f) => f !== folder);
+		remembered.setJson('code.folders', this.recent);
 	}
 
 	async choose() {
@@ -105,21 +154,44 @@ class Code {
 	}
 
 	async #tick() {
-		if (this.task && (active(this.task) || this.all.find((t) => t.id === this.task?.id)?.updated_ms !== this.task.updated_ms)) {
-			const id = this.task.id;
+		const open = this.task;
+		if (open && active(open)) {
+			// While it works, a small question several times a second: has anything changed, and
+			// what has the model written so far. The whole task is asked for only when it changed.
 			try {
-				const fresh = await api.agentTask(id);
-				if (this.task?.id === id) this.task = fresh;
+				const brief = await api.agentTaskBrief(open.id);
+				if (this.task?.id !== open.id) return;
+				if (brief.updated_ms !== open.updated_ms || brief.state !== open.state) {
+					const fresh = await api.agentTask(open.id);
+					if (this.task?.id === open.id) this.#show(fresh);
+				} else {
+					this.writing = brief.writing ?? '';
+				}
 			} catch {
 				// The service is away for a moment; the next round asks again.
 			}
+		} else if (open && this.all.find((t) => t.id === open.id)?.updated_ms !== open.updated_ms) {
+			try {
+				const fresh = await api.agentTask(open.id);
+				if (this.task?.id === open.id) this.#show(fresh);
+			} catch {
+				// as above
+			}
 		}
+		// The lists change slowly; once a second is enough for them.
+		if (Date.now() - this.#listedAt < 1000) return;
+		this.#listedAt = Date.now();
 		try {
 			this.all = (await api.agentTasks()) ?? this.all;
 			if (this.#visible && this.folder) this.tasks = (await api.agentTasks(this.folder)) ?? this.tasks;
 		} catch {
 			// as above
 		}
+	}
+
+	#show(task: AgentTask) {
+		this.task = task;
+		this.writing = active(task) ? (task.writing ?? '') : '';
 	}
 
 	/** Asks again and again while the screen is shown or something is working. */
@@ -130,7 +202,7 @@ class Code {
 			await this.#tick();
 			// Quick while the open task is working in front of the person, slow otherwise.
 			const quick = this.#visible && active(this.task);
-			await new Promise((r) => setTimeout(r, quick ? 700 : this.#visible ? 2500 : 5000));
+			await new Promise((r) => setTimeout(r, quick ? 150 : this.#visible ? 2500 : 5000));
 		}
 		this.#watching = false;
 	}
@@ -138,7 +210,7 @@ class Code {
 	async open(id: string) {
 		this.problem = '';
 		try {
-			this.task = await api.agentTask(id);
+			this.#show(await api.agentTask(id));
 		} catch (e) {
 			this.problem = say(e);
 		}
@@ -146,6 +218,7 @@ class Code {
 
 	close() {
 		this.task = null;
+		this.writing = '';
 		this.problem = '';
 	}
 
@@ -156,9 +229,11 @@ class Code {
 		this.busy = true;
 		this.problem = '';
 		try {
-			this.task = this.task
-				? await api.tellAgentTask(this.task.id, { text: prompt, mode: this.mode, web: this.web })
-				: await api.startAgentTask({ folder: this.folder, prompt, mode: this.mode, web: this.web, ...(model ? { model } : {}) });
+			this.#show(
+				this.task
+					? await api.tellAgentTask(this.task.id, { text: prompt, mode: this.mode, web: this.web })
+					: await api.startAgentTask({ folder: this.folder, prompt, mode: this.mode, web: this.web, ...(model ? { model } : {}) })
+			);
 			this.#watch();
 			return true;
 		} catch (e) {
@@ -174,7 +249,7 @@ class Code {
 		if (!task?.pending || this.busy) return;
 		this.busy = true;
 		try {
-			this.task = await api.answerAgentTask(task.id, task.pending.call, allow, always);
+			this.#show(await api.answerAgentTask(task.id, task.pending.call, allow, always));
 		} catch (e) {
 			this.problem = say(e);
 			await this.open(task.id);
@@ -186,9 +261,24 @@ class Code {
 	async stop() {
 		if (!this.task) return;
 		try {
-			this.task = await api.stopAgentTask(this.task.id);
+			this.#show(await api.stopAgentTask(this.task.id));
 		} catch (e) {
 			this.problem = say(e);
+		}
+	}
+
+	/** Takes back what the newest request changed in the folder. */
+	async undo() {
+		const task = this.task;
+		if (!task || this.busy) return;
+		this.busy = true;
+		this.problem = '';
+		try {
+			this.#show(await api.undoAgentTask(task.id));
+		} catch (e) {
+			this.problem = say(e);
+		} finally {
+			this.busy = false;
 		}
 	}
 

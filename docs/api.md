@@ -48,6 +48,7 @@ Browsers are refused unless the request comes from the app's own origin.
 | `GET /v1/agent/tasks`, `GET /v1/agent/tasks/{id}` | Tasks, newest first (`?folder=` for one folder); one task with its state, its steps so far and what waits for an answer. |
 | `POST /v1/agent/tasks/{id}/approve` | `{"call", "allow": true or false, "always": false}`: answer the step that waits. |
 | `POST /v1/agent/tasks/{id}/message` | `{"text", "mode", "web"}`: continue a task that is not working with a follow-up. |
+| `POST /v1/agent/tasks/{id}/undo` | Take back what the newest request changed in the folder; see [Undo](#undo). Answers `{"task", "restored", "removed"}`. `409` while the task works or when nothing is left to take back. |
 | `DELETE /v1/agent/tasks/{id}` | Stop a task where it is (a running command is killed). `?remove=true` also forgets it. |
 | `GET /v1/agent/skills` | The skills a task can use (`?folder=` adds the folder's own): name, description, where it comes from. |
 | `GET/DELETE /v1/chats`, `GET/PUT/DELETE /v1/chats/{id}` | Saved conversations. `PUT {title, data}`; `data` is the app's own JSON, 8 MB at most. |
@@ -98,8 +99,53 @@ status `running`, `waiting`, `done`, `failed`, `denied` or `stopped`. `pending` 
 `"always": true` on a command allows that exact command line for the rest of the task; on a file change it turns
 the task to `auto_edits`. A call the person said no to is not asked again until their next message, and after two refusals of one tool that tool is not asked for again until then.
 
-The tools: `list_files`, `read_file`, `search`, `edit_file`, `write_file`, `run_command`, `use_skill`, `finish`,
-and `web_search` and `fetch_url` when the task was started with `"web": true`.
+The tools: `list_files`, `read_file`, `search`, `edit_file`, `write_file`, `run_command`, `update_plan`,
+`outline`, `use_skill`, `finish`, and `web_search` and `fetch_url` when the task was started with `"web": true`.
+
+A task also has a `plan`: the steps the model wrote with `update_plan`, each `{"text", "status"}` with the status
+`pending`, `doing` or `done`, and at most one step `doing`. The plan is sent back to the model at the end of the
+system message on every turn, so it is still there when older messages were left out to fit the context. A plan
+that is finished is cleared by the person's next message.
+
+`list_files` and `search` see the folder the way git does: what `.gitignore`, `.ignore` and git's own exclude files
+name is left out, in a repository or not, and so are `.git`, `node_modules`, `target` and a few more build folders
+even when nothing names them. Hidden files are kept. A file or folder named outright is still read. `outline` gives
+the definitions of a source file with their line numbers (functions, classes, types, exported constants; the
+methods one level in), or the top-level ones of each source file in a folder. It works with a few regular
+expressions per language, not a parser, for Rust, Python, JavaScript, TypeScript, Go, Swift, Kotlin, Java, C, C++
+and Svelte.
+
+After a change to a file went in, the result the model reads ends with the command that checks this project
+(`cargo test`, the `test`, `check` or `build` script of `package.json` with the package manager of the lock file,
+`python3 -m pytest` or `python3 -m unittest`, `go test ./...`, the `test`, `check` or `build` target of a
+`Makefile`). When the final answer says that something works, passes or is fixed, and no command ended well
+after the last change of that request, the task gets a `note` step under the answer: "Not checked: no test or
+build ran after the last change." The first of those commands is also named at the end of the system message, and the
+model is told that commands already run inside the folder.
+
+While the model writes, `GET /v1/agent/tasks/{id}` has the text so far in `writing` (the engine streams to the
+service; the text becomes a `model` step when the turn ends, and `writing` is empty again). To follow it, ask with
+`?brief=true` a few times a second: that answer has only `id`, `state`, `updated_ms`, the number of `steps` and
+`writing`, and `updated_ms` says when to ask for the whole task again.
+
+### Undo
+
+Before the first change of each request (a write, an edit or an allowed command) the folder is recorded, and
+`POST .../undo` puts it back. A task lists these in `undo`, oldest first: `{"request", "kind", "undone", ...}`, where
+`request` counts the person's messages from 1. Each call takes back the newest request that was not taken back yet
+and has something to take back (outside git, a request in which only commands ran has nothing saved).
+
+- **In a git repository** (`kind: "git"`, the folder has its own `.git` folder) the working tree is kept as a
+  commit on the hidden ref `refs/rigbrew/<task>/<request>`, built with a temporary index file. The index, the
+  branch and the stash are not touched. Undo writes every tracked and untracked file back as it was in that commit
+  and removes the files made since, also when a command made them. What git ignores is left alone, and so is an
+  untracked file over 50 MB. The state just before the undo is kept on `refs/rigbrew/<task>/<request>-undone`.
+  Commits a command made stay on the branch. The refs go when the task is removed.
+- **Anywhere else** (`kind: "copies"`) each file is copied to `agent/undo/<task>/<request>/` in the data folder
+  before the task's own write or edit touches it. Undo puts those copies back and removes the files the task
+  created. What a command changed cannot be taken back there; `commands: true` on the entry says one ran.
+
+The task gets a `note` step that says what came back, and the model is told on its next turn.
 
 - **Files stay inside the folder.** Every path is resolved through the file system first, so `..`, an absolute
   path and a symbolic link that leads out are refused alike. Nothing inside `.git` is written. Rigbrew's own data

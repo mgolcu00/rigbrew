@@ -6,17 +6,25 @@
 //!
 //!   POST   /v1/agent/tasks                {folder, prompt, model?, mode, web?} starts a task
 //!   GET    /v1/agent/tasks?folder=        tasks, newest first
-//!   GET    /v1/agent/tasks/{id}           state, steps so far, what waits for an answer
+//!   GET    /v1/agent/tasks/{id}           state, steps so far, what waits for an answer, and the
+//!                                         answer being written (`writing`); ?brief=true leaves the steps out
 //!   POST   /v1/agent/tasks/{id}/approve   {call, allow, always?}
 //!   POST   /v1/agent/tasks/{id}/message   {text, mode?, web?} continues the task
+//!   POST   /v1/agent/tasks/{id}/undo      takes back what the newest request changed
 //!   DELETE /v1/agent/tasks/{id}           stops it; ?remove=true also forgets it
 //!   GET    /v1/agent/skills?folder=       the skills a task there can use
 //!
 //! What a task may touch: files inside its folder (see `files`), commands the person allowed,
 //! and, only when the person switched it on, a web search and public pages (see `web`).
 
+mod extra;
 mod files;
+mod outline;
+mod plan;
 mod skills;
+mod stream;
+mod undo;
+mod verify;
 mod web;
 
 use std::collections::HashMap;
@@ -35,6 +43,7 @@ use tokio::sync::oneshot;
 
 use crate::{fail, Shared};
 use files::Folder;
+pub use undo::task_undo;
 
 /// Model turns one request may take before the task stops and says so.
 const STEP_LIMIT: usize = 40;
@@ -122,6 +131,9 @@ struct Task {
     /// The conversation as the model sees it. Kept with the task, not shown by the API.
     #[serde(default)]
     messages: Vec<Value>,
+    /// What the harness keeps with the task: see `extra`.
+    #[serde(flatten)]
+    extra: extra::Extra,
 }
 
 impl Task {
@@ -185,6 +197,8 @@ struct Running {
     started: Instant,
     /// Set while a tool call waits for the person.
     approve: Option<oneshot::Sender<Decision>>,
+    /// The text of the answer the model is writing right now.
+    writing: stream::Writing,
 }
 
 /// Every task of this installation, and the ones working right now.
@@ -256,7 +270,9 @@ impl Agents {
             let mut old: Vec<(i64, String)> = tasks.values().filter(|t| !t.active()).map(|t| (t.updated_ms, t.id.clone())).collect();
             old.sort();
             for (_, id) in old.into_iter().take(tasks.len() + 1 - MAX_KEPT) {
-                tasks.remove(&id);
+                if let Some(gone) = tasks.remove(&id) {
+                    undo::forget(&self.dir, &gone);
+                }
                 std::fs::remove_file(self.dir.join(format!("{id}.json"))).ok();
             }
         }
@@ -265,7 +281,9 @@ impl Agents {
     }
 
     fn remove(&self, id: &str) {
-        self.tasks.lock().unwrap().remove(id);
+        if let Some(gone) = self.tasks.lock().unwrap().remove(id) {
+            undo::forget(&self.dir, &gone);
+        }
         std::fs::remove_file(self.dir.join(format!("{id}.json"))).ok();
     }
 }
@@ -299,6 +317,7 @@ fn system_prompt(folder: &Folder, mode: Mode, web: bool, skills: &[skills::Skill
             lines.push(format!("- {}: {}", s.name, s.description));
         }
     }
+    lines.extend(extra::rules(mode));
     lines.push("When the work is done, call finish with a short summary of what you did or found. Keep it short and plain.".into());
     lines.join("\n")
 }
@@ -327,7 +346,7 @@ fn tool_defs(mode: Mode, web: bool, with_skills: bool) -> Vec<Value> {
         ),
         tool(
             "search",
-            "Find lines that contain a text or match a regular expression, in all text files under a path.",
+            "Find lines that contain a text or match a regular expression, in all text files under a path. Files git ignores are skipped.",
             json!({"pattern": text("Text or regular expression"), "path": text("Folder or file to look in (the whole folder if left out)")}),
             &["pattern"],
         ),
@@ -369,6 +388,7 @@ fn tool_defs(mode: Mode, web: bool, with_skills: bool) -> Vec<Value> {
     if with_skills {
         out.push(tool("use_skill", "Get the instructions of a skill by name.", json!({"name": text("Name of the skill")}), &["name"]));
     }
+    out.extend(extra::tool_defs());
     out.push(tool(
         "finish",
         "End the task with a summary for the person.",
@@ -528,7 +548,7 @@ async fn call_tool(app: &Shared, id: &str, folder: &Folder, call: &str, name: &s
     let offered = match name {
         "edit_file" | "write_file" | "run_command" => task.mode != Mode::ReadOnly,
         "web_search" | "fetch_url" => task.web,
-        _ => KNOWN_TOOLS.contains(&name),
+        _ => KNOWN_TOOLS.contains(&name) || extra::TOOLS.contains(&name),
     };
     if !offered {
         return (format!("There is no tool named {name} in this task."), "failed");
@@ -594,7 +614,8 @@ async fn call_tool(app: &Shared, id: &str, folder: &Folder, call: &str, name: &s
             } else {
                 agents.change(id, |t| t.set_tool(call, "running", None, Some(diff)));
             }
-            done(change.apply(folder))
+            undo::before_change(app, id, folder, Some(&change.shown)).await;
+            verify::after_change(folder.root(), done(change.apply(folder)))
         }
         "run_command" => {
             let Some(command) = arg_str(args, "command").map(str::trim).filter(|c| !c.is_empty()) else { return missing("command") };
@@ -608,6 +629,7 @@ async fn call_tool(app: &Shared, id: &str, folder: &Folder, call: &str, name: &s
                     agents.change(id, |t| t.always.push(command.to_string()));
                 }
             }
+            undo::before_change(app, id, folder, None).await;
             let ran = files::run(folder, command, COMMAND_TIMEOUT, task.web).await;
             (ran.text, if ran.ok { "done" } else { "failed" })
         }
@@ -633,6 +655,7 @@ async fn call_tool(app: &Shared, id: &str, folder: &Folder, call: &str, name: &s
                 ),
             }
         }
+        _ if extra::TOOLS.contains(&name) => extra::call(app, id, folder, name, args).await,
         _ => (format!("There is no tool named {name}."), "failed"),
     }
 }
@@ -650,6 +673,7 @@ async fn work(app: &Shared, id: &str) -> Ended {
         return failed(format!("There is no chat model named {}.", task.model));
     };
     agents.change(id, |t| repair(&mut t.messages));
+    let writing = agents.running.lock().unwrap().get(id).map(|r| r.writing.clone()).unwrap_or_default();
     let mut budget = HISTORY_CHARS;
     // The same call with the same arguments, over and over: a small model that is stuck.
     let mut repeated: (String, usize) = (String::new(), 0);
@@ -662,19 +686,22 @@ async fn work(app: &Shared, id: &str) -> Ended {
             };
         }
         let skills = skills::load(&app.root, Some(folder.root()));
-        let mut messages = vec![json!({"role": "system", "content": system_prompt(&folder, task.mode, task.web, &skills)})];
+        let mut messages =
+            vec![json!({"role": "system", "content": system_prompt(&folder, task.mode, task.web, &skills) + &extra::context(&task)})];
         messages.extend(fit(&task.messages, budget));
         let body = json!({
             "model": package.id,
             "messages": messages,
             "tools": tool_defs(task.mode, task.web, !skills.is_empty()),
             "parallel_tool_calls": false,
-            "stream": false,
+            "stream": true,
             "temperature": 0.2,
             "max_tokens": MAX_ANSWER_TOKENS,
             "chat_template_kwargs": {"enable_thinking": false},
         });
-        let answer = match crate::complete(app, package, body).await {
+        let answer = crate::complete(app, package, body, &mut |so_far| writing.hear(so_far)).await;
+        writing.clear();
+        let answer = match answer {
             Ok(v) => v,
             // Too much for the model's context: send less of the history, once.
             Err(e) if e.to_lowercase().contains("context") && budget > HISTORY_CHARS / 4 => {
@@ -698,6 +725,7 @@ async fn work(app: &Shared, id: &str) -> Ended {
                 } else {
                     Step::Model { text: text.clone() }
                 });
+                verify::note_unchecked(t, &text);
             });
             return Ended { state: "done", error: None };
         }
@@ -723,9 +751,10 @@ async fn work(app: &Shared, id: &str) -> Ended {
             let raw = c["function"]["arguments"].as_str().unwrap_or("{}");
             let parsed: Option<Value> = serde_json::from_str::<Value>(raw).ok().filter(Value::is_object);
             let args = parsed.clone().unwrap_or_else(|| json!({}));
-            app.record("agent_tool_called", json!({"tool": if KNOWN_TOOLS.contains(&name.as_str()) { name.as_str() } else { "unknown" }}));
+            app.record("agent_tool_called", json!({"tool": if KNOWN_TOOLS.contains(&name.as_str()) || extra::TOOLS.contains(&name.as_str()) { name.as_str() } else { "unknown" }}));
             if name == "finish" {
                 let summary = arg_str(&args, "summary").unwrap_or("").trim().to_string();
+                let said = format!("{text}\n{summary}");
                 agents.change(id, |t| {
                     t.messages.push(json!({"role": "tool", "tool_call_id": model_id, "content": "Finished."}));
                     if !summary.is_empty() && summary != text {
@@ -733,6 +762,7 @@ async fn work(app: &Shared, id: &str) -> Ended {
                     } else if text.is_empty() {
                         t.steps.push(Step::Note { text: "Finished.".into() });
                     }
+                    verify::note_unchecked(t, &said);
                 });
                 return Ended { state: "done", error: None };
             }
@@ -790,7 +820,10 @@ fn start(app: &Shared, id: &str, follow_up: bool) {
         });
         finished(&task_app, &task_id);
     });
-    running.insert(id.to_string(), Running { abort: handle.abort_handle(), started: Instant::now(), approve: None });
+    running.insert(
+        id.to_string(),
+        Running { abort: handle.abort_handle(), started: Instant::now(), approve: None, writing: Default::default() },
+    );
 }
 
 /// Takes the task out of the running ones and records how it went.
@@ -874,6 +907,7 @@ pub async fn task_create(State(app): State<Shared>, Json(body): Json<NewTask>) -
         denied: Vec::new(),
         turns: 0,
         messages: vec![json!({"role": "user", "content": prompt})],
+        extra: Default::default(),
     };
     let (id, view) = (task.id.clone(), task.view());
     app.agent.insert(task);
@@ -898,9 +932,9 @@ pub async fn tasks(State(app): State<Shared>, Query(q): Query<FolderQuery>) -> J
     Json(json!({"tasks": list.iter().map(|t| t.summary()).collect::<Vec<_>>()}))
 }
 
-pub async fn task_get(State(app): State<Shared>, Path(id): Path<String>) -> Response {
+pub async fn task_get(State(app): State<Shared>, Path(id): Path<String>, Query(q): Query<stream::Shown>) -> Response {
     match app.agent.get(&id) {
-        Some(task) => Json(json!({"task": task.view()})).into_response(),
+        Some(task) => Json(json!({"task": stream::shown(&app, &task, &q)})).into_response(),
         None => not_found(),
     }
 }
@@ -965,6 +999,7 @@ pub async fn task_message(State(app): State<Shared>, Path(id): Path<String>, Jso
         t.error = None;
         t.turns = 0;
         t.denied.clear();
+        extra::next_request(t);
         if let Some(mode) = body.mode {
             t.mode = mode;
         }
@@ -1090,14 +1125,14 @@ mod tests {
         let names = |mode, web, skills| -> Vec<String> {
             tool_defs(mode, web, skills).iter().map(|t| t["function"]["name"].as_str().unwrap().to_string()).collect()
         };
-        assert_eq!(names(Mode::ReadOnly, false, false), ["list_files", "read_file", "search", "finish"]);
+        assert_eq!(names(Mode::ReadOnly, false, false), ["list_files", "read_file", "search", "update_plan", "outline", "finish"]);
         let ask = names(Mode::Ask, false, true);
         assert!(ask.contains(&"edit_file".into()) && ask.contains(&"write_file".into()) && ask.contains(&"run_command".into()));
         assert!(ask.contains(&"use_skill".into()));
         assert!(!ask.contains(&"web_search".into()) && !ask.contains(&"fetch_url".into()));
         let web = names(Mode::ReadOnly, true, false);
         assert!(web.contains(&"web_search".into()) && web.contains(&"fetch_url".into()) && !web.contains(&"run_command".into()));
-        assert_eq!(names(Mode::AutoEdits, true, true).len(), KNOWN_TOOLS.len());
+        assert_eq!(names(Mode::AutoEdits, true, true).len(), KNOWN_TOOLS.len() + extra::TOOLS.len());
     }
 
     #[test]
@@ -1126,6 +1161,7 @@ mod tests {
             denied: vec![],
             turns: 1,
             messages: vec![json!({"role": "user", "content": "secret"})],
+            extra: Default::default(),
         };
         let view = task.view();
         assert!(view.get("messages").is_none());
@@ -1162,6 +1198,7 @@ mod tests {
             denied: vec![],
             turns: 3,
             messages: vec![],
+            extra: Default::default(),
         };
         agents.insert(task.clone());
         task.id = "b".repeat(32);
