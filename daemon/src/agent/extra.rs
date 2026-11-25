@@ -3,9 +3,10 @@
 //! reminded of on every turn. Kept apart from the loop so the loop stays short.
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 
-use super::{plan, undo, Mode, Task};
+use super::files::Folder;
+use super::{outline, plan, undo, Mode, Task};
 use crate::Shared;
 
 /// Saved with the task and shown by the API next to its other fields.
@@ -20,16 +21,27 @@ pub struct Extra {
 }
 
 /// Tools of the harness itself. They change nothing in the folder, so every mode has them.
-pub const TOOLS: &[&str] = &["update_plan"];
+pub const TOOLS: &[&str] = &["update_plan", "outline"];
 
 pub fn tool_defs() -> Vec<Value> {
-    vec![plan::tool_def()]
+    vec![
+        plan::tool_def(),
+        json!({"type": "function", "function": {
+            "name": "outline",
+            "description": "List what a source file defines (functions, classes, types) with line numbers, or the same for each source file in a folder.",
+            "parameters": {"type": "object", "required": ["path"], "properties": {
+                "path": {"type": "string", "description": "Source file or folder"},
+            }},
+        }}),
+    ]
 }
 
 /// Lines for the system message that say how to work with these tools.
 pub fn rules(_mode: Mode) -> Vec<String> {
     vec!["For anything longer than one step, call update_plan first with the steps. Keep exactly one step \"doing\", and update the plan when a step is done."
-        .into()]
+        .into(),
+        "Before you read a large file, call outline to see what is on which line. Then read only the part you need with read_file, from_line and lines."
+            .into()]
 }
 
 /// What goes at the end of the system message on every turn: the state the model must not lose
@@ -54,7 +66,7 @@ pub fn next_request(task: &mut Task) {
 }
 
 /// Runs one of `TOOLS`.
-pub async fn call(app: &Shared, id: &str, name: &str, args: &Value) -> (String, &'static str) {
+pub async fn call(app: &Shared, id: &str, folder: &Folder, name: &str, args: &Value) -> (String, &'static str) {
     match name {
         "update_plan" => match plan::parse(args) {
             Ok(steps) => {
@@ -64,6 +76,15 @@ pub async fn call(app: &Shared, id: &str, name: &str, args: &Value) -> (String, 
             }
             Err(why) => (why, "failed"),
         },
+        "outline" => {
+            let Some(path) = args["path"].as_str().map(str::to_string) else { return ("\"path\" is needed.".into(), "failed") };
+            let folder = folder.clone();
+            match tokio::task::spawn_blocking(move || outline::outline(&folder, &path)).await {
+                Ok(Ok(text)) => (text, "done"),
+                Ok(Err(why)) => (why, "failed"),
+                Err(_) => ("That did not work.".into(), "failed"),
+            }
+        }
         _ => (format!("There is no tool named {name}."), "failed"),
     }
 }

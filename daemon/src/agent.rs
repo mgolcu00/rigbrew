@@ -18,6 +18,7 @@
 
 mod extra;
 mod files;
+mod outline;
 mod plan;
 mod skills;
 mod undo;
@@ -340,7 +341,7 @@ fn tool_defs(mode: Mode, web: bool, with_skills: bool) -> Vec<Value> {
         ),
         tool(
             "search",
-            "Find lines that contain a text or match a regular expression, in all text files under a path.",
+            "Find lines that contain a text or match a regular expression, in all text files under a path. Files git ignores are skipped.",
             json!({"pattern": text("Text or regular expression"), "path": text("Folder or file to look in (the whole folder if left out)")}),
             &["pattern"],
         ),
@@ -649,7 +650,7 @@ async fn call_tool(app: &Shared, id: &str, folder: &Folder, call: &str, name: &s
                 ),
             }
         }
-        _ if extra::TOOLS.contains(&name) => extra::call(app, id, name, args).await,
+        _ if extra::TOOLS.contains(&name) => extra::call(app, id, folder, name, args).await,
         _ => (format!("There is no tool named {name}."), "failed"),
     }
 }
@@ -1110,7 +1111,7 @@ mod tests {
         let names = |mode, web, skills| -> Vec<String> {
             tool_defs(mode, web, skills).iter().map(|t| t["function"]["name"].as_str().unwrap().to_string()).collect()
         };
-        assert_eq!(names(Mode::ReadOnly, false, false), ["list_files", "read_file", "search", "update_plan", "finish"]);
+        assert_eq!(names(Mode::ReadOnly, false, false), ["list_files", "read_file", "search", "update_plan", "outline", "finish"]);
         let ask = names(Mode::Ask, false, true);
         assert!(ask.contains(&"edit_file".into()) && ask.contains(&"write_file".into()) && ask.contains(&"run_command".into()));
         assert!(ask.contains(&"use_skill".into()));

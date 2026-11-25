@@ -89,6 +89,8 @@
 				return `Searched the web for “${short(text(step, 'query'), 48)}”`;
 			case 'fetch_url':
 				return `Opened ${short(text(step, 'url').replace(/^https?:\/\//, ''), 56)}`;
+			case 'outline':
+				return `Looked at what is in ${!path || path === '.' ? 'the folder' : path}`;
 			case 'update_plan':
 				return 'Updated the plan';
 			case 'use_skill':

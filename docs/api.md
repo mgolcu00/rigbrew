@@ -100,12 +100,20 @@ status `running`, `waiting`, `done`, `failed`, `denied` or `stopped`. `pending` 
 the task to `auto_edits`. A call the person said no to is not asked again until their next message, and after two refusals of one tool that tool is not asked for again until then.
 
 The tools: `list_files`, `read_file`, `search`, `edit_file`, `write_file`, `run_command`, `update_plan`,
-`use_skill`, `finish`, and `web_search` and `fetch_url` when the task was started with `"web": true`.
+`outline`, `use_skill`, `finish`, and `web_search` and `fetch_url` when the task was started with `"web": true`.
 
 A task also has a `plan`: the steps the model wrote with `update_plan`, each `{"text", "status"}` with the status
 `pending`, `doing` or `done`, and at most one step `doing`. The plan is sent back to the model at the end of the
 system message on every turn, so it is still there when older messages were left out to fit the context. A plan
 that is finished is cleared by the person's next message.
+
+`list_files` and `search` see the folder the way git does: what `.gitignore`, `.ignore` and git's own exclude files
+name is left out, in a repository or not, and so are `.git`, `node_modules`, `target` and a few more build folders
+even when nothing names them. Hidden files are kept. A file or folder named outright is still read. `outline` gives
+the definitions of a source file with their line numbers (functions, classes, types, exported constants; the
+methods one level in), or the top-level ones of each source file in a folder. It works with a few regular
+expressions per language, not a parser, for Rust, Python, JavaScript, TypeScript, Go, Swift, Kotlin, Java, C, C++
+and Svelte.
 
 ### Undo
 
