@@ -6,7 +6,8 @@
 //!
 //!   POST   /v1/agent/tasks                {folder, prompt, model?, mode, web?} starts a task
 //!   GET    /v1/agent/tasks?folder=        tasks, newest first
-//!   GET    /v1/agent/tasks/{id}           state, steps so far, what waits for an answer
+//!   GET    /v1/agent/tasks/{id}           state, steps so far, what waits for an answer, and the
+//!                                         answer being written (`writing`); ?brief=true leaves the steps out
 //!   POST   /v1/agent/tasks/{id}/approve   {call, allow, always?}
 //!   POST   /v1/agent/tasks/{id}/message   {text, mode?, web?} continues the task
 //!   POST   /v1/agent/tasks/{id}/undo      takes back what the newest request changed
@@ -21,6 +22,7 @@ mod files;
 mod outline;
 mod plan;
 mod skills;
+mod stream;
 mod undo;
 mod verify;
 mod web;
@@ -195,6 +197,8 @@ struct Running {
     started: Instant,
     /// Set while a tool call waits for the person.
     approve: Option<oneshot::Sender<Decision>>,
+    /// The text of the answer the model is writing right now.
+    writing: stream::Writing,
 }
 
 /// Every task of this installation, and the ones working right now.
@@ -669,6 +673,7 @@ async fn work(app: &Shared, id: &str) -> Ended {
         return failed(format!("There is no chat model named {}.", task.model));
     };
     agents.change(id, |t| repair(&mut t.messages));
+    let writing = agents.running.lock().unwrap().get(id).map(|r| r.writing.clone()).unwrap_or_default();
     let mut budget = HISTORY_CHARS;
     // The same call with the same arguments, over and over: a small model that is stuck.
     let mut repeated: (String, usize) = (String::new(), 0);
@@ -689,12 +694,14 @@ async fn work(app: &Shared, id: &str) -> Ended {
             "messages": messages,
             "tools": tool_defs(task.mode, task.web, !skills.is_empty()),
             "parallel_tool_calls": false,
-            "stream": false,
+            "stream": true,
             "temperature": 0.2,
             "max_tokens": MAX_ANSWER_TOKENS,
             "chat_template_kwargs": {"enable_thinking": false},
         });
-        let answer = match crate::complete(app, package, body).await {
+        let answer = crate::complete(app, package, body, &mut |so_far| writing.hear(so_far)).await;
+        writing.clear();
+        let answer = match answer {
             Ok(v) => v,
             // Too much for the model's context: send less of the history, once.
             Err(e) if e.to_lowercase().contains("context") && budget > HISTORY_CHARS / 4 => {
@@ -813,7 +820,10 @@ fn start(app: &Shared, id: &str, follow_up: bool) {
         });
         finished(&task_app, &task_id);
     });
-    running.insert(id.to_string(), Running { abort: handle.abort_handle(), started: Instant::now(), approve: None });
+    running.insert(
+        id.to_string(),
+        Running { abort: handle.abort_handle(), started: Instant::now(), approve: None, writing: Default::default() },
+    );
 }
 
 /// Takes the task out of the running ones and records how it went.
@@ -922,9 +932,9 @@ pub async fn tasks(State(app): State<Shared>, Query(q): Query<FolderQuery>) -> J
     Json(json!({"tasks": list.iter().map(|t| t.summary()).collect::<Vec<_>>()}))
 }
 
-pub async fn task_get(State(app): State<Shared>, Path(id): Path<String>) -> Response {
+pub async fn task_get(State(app): State<Shared>, Path(id): Path<String>, Query(q): Query<stream::Shown>) -> Response {
     match app.agent.get(&id) {
-        Some(task) => Json(json!({"task": task.view()})).into_response(),
+        Some(task) => Json(json!({"task": stream::shown(&app, &task, &q)})).into_response(),
         None => not_found(),
     }
 }

@@ -36,6 +36,7 @@
 		void task?.steps.length;
 		void task?.pending;
 		void task?.state;
+		void code.writing;
 		tick().then(() => thread?.scrollTo({ top: thread.scrollHeight }));
 	});
 
@@ -284,6 +285,11 @@
 								</li>
 							{/if}
 						{/each}
+						{#if working && code.writing}
+							<li class="turn model writing">
+								<div class="prose selectable">{@html renderMarkdown(code.writing)}</div>
+							</li>
+						{/if}
 					</ol>
 
 					{#if task.pending}
@@ -308,7 +314,7 @@
 							</div>
 						</div>
 					{:else if task.state === 'running'}
-						<p class="working"><span class="dot"></span>Working</p>
+						<p class="working"><span class="dot"></span>{code.writing ? 'Writing' : 'Working'}</p>
 					{/if}
 
 					{#if task.error}<p class="ended selectable" class:bad={task.state === 'failed'}>{task.error}</p>

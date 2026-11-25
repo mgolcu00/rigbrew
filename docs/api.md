@@ -122,6 +122,11 @@ After a change to a file went in, the result the model reads ends with the comma
 after the last change of that request, the task gets a `note` step under the answer: "Not checked: no test or
 build ran after the last change."
 
+While the model writes, `GET /v1/agent/tasks/{id}` has the text so far in `writing` (the engine streams to the
+service; the text becomes a `model` step when the turn ends, and `writing` is empty again). To follow it, ask with
+`?brief=true` a few times a second: that answer has only `id`, `state`, `updated_ms`, the number of `steps` and
+`writing`, and `updated_ms` says when to ask for the whole task again.
+
 ### Undo
 
 Before the first change of each request (a write, an edit or an allowed command) the folder is recorded, and

@@ -616,6 +616,8 @@ export interface AgentTask extends AgentTaskRow {
 	plan?: AgentPlanStep[];
 	/** The folder before each request that changed it, oldest first. */
 	undo?: AgentUndo[];
+	/** The answer the model is writing right now, as far as it got. Empty between turns. */
+	writing?: string;
 }
 
 export interface AgentSkill {
@@ -629,6 +631,9 @@ const taskOf = async (answer: Promise<{ task: AgentTask }>) => (await answer).ta
 /** `null` from a service that is too old to have Code. */
 export const agentTasks = async (folder = '') => (await optional<{ tasks: AgentTaskRow[] }>('GET', `/v1/agent/tasks?folder=${enc(folder)}`))?.tasks ?? null;
 export const agentTask = (id: string) => taskOf(json('GET', `/v1/agent/tasks/${enc(id)}`));
+/** Only what changes while the model writes, for asking several times a second. */
+export const agentTaskBrief = async (id: string) =>
+	(await json<{ task: AgentTaskRow & { writing?: string } }>('GET', `/v1/agent/tasks/${enc(id)}?brief=true`)).task;
 export const startAgentTask = (body: { folder: string; prompt: string; mode: AgentMode; web: boolean; model?: string }) => taskOf(json('POST', '/v1/agent/tasks', body));
 export const tellAgentTask = (id: string, body: { text: string; mode: AgentMode; web: boolean }) => taskOf(json('POST', `/v1/agent/tasks/${enc(id)}/message`, body));
 export const answerAgentTask = (id: string, call: string, allow: boolean, always = false) =>

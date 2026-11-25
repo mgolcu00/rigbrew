@@ -33,8 +33,12 @@ class Code {
 	available = $state(true);
 	busy = $state(false);
 
+	/** What the model has written of its answer so far, while the open task works. */
+	writing = $state('');
+
 	#watching = false;
 	#visible = false;
+	#listedAt = 0;
 
 	/** The tasks of the chosen folder (the service knows which folder is which, links followed). */
 	tasks = $state<AgentTaskRow[]>([]);
@@ -57,6 +61,7 @@ class Code {
 		if (!folder) return;
 		this.folder = folder;
 		this.task = null;
+		this.writing = '';
 		this.problem = '';
 		remembered.set('code.folder', folder);
 		await this.refresh();
@@ -105,21 +110,44 @@ class Code {
 	}
 
 	async #tick() {
-		if (this.task && (active(this.task) || this.all.find((t) => t.id === this.task?.id)?.updated_ms !== this.task.updated_ms)) {
-			const id = this.task.id;
+		const open = this.task;
+		if (open && active(open)) {
+			// While it works, a small question several times a second: has anything changed, and
+			// what has the model written so far. The whole task is asked for only when it changed.
 			try {
-				const fresh = await api.agentTask(id);
-				if (this.task?.id === id) this.task = fresh;
+				const brief = await api.agentTaskBrief(open.id);
+				if (this.task?.id !== open.id) return;
+				if (brief.updated_ms !== open.updated_ms || brief.state !== open.state) {
+					const fresh = await api.agentTask(open.id);
+					if (this.task?.id === open.id) this.#show(fresh);
+				} else {
+					this.writing = brief.writing ?? '';
+				}
 			} catch {
 				// The service is away for a moment; the next round asks again.
 			}
+		} else if (open && this.all.find((t) => t.id === open.id)?.updated_ms !== open.updated_ms) {
+			try {
+				const fresh = await api.agentTask(open.id);
+				if (this.task?.id === open.id) this.#show(fresh);
+			} catch {
+				// as above
+			}
 		}
+		// The lists change slowly; once a second is enough for them.
+		if (Date.now() - this.#listedAt < 1000) return;
+		this.#listedAt = Date.now();
 		try {
 			this.all = (await api.agentTasks()) ?? this.all;
 			if (this.#visible && this.folder) this.tasks = (await api.agentTasks(this.folder)) ?? this.tasks;
 		} catch {
 			// as above
 		}
+	}
+
+	#show(task: AgentTask) {
+		this.task = task;
+		this.writing = active(task) ? (task.writing ?? '') : '';
 	}
 
 	/** Asks again and again while the screen is shown or something is working. */
@@ -130,7 +158,7 @@ class Code {
 			await this.#tick();
 			// Quick while the open task is working in front of the person, slow otherwise.
 			const quick = this.#visible && active(this.task);
-			await new Promise((r) => setTimeout(r, quick ? 700 : this.#visible ? 2500 : 5000));
+			await new Promise((r) => setTimeout(r, quick ? 150 : this.#visible ? 2500 : 5000));
 		}
 		this.#watching = false;
 	}
@@ -138,7 +166,7 @@ class Code {
 	async open(id: string) {
 		this.problem = '';
 		try {
-			this.task = await api.agentTask(id);
+			this.#show(await api.agentTask(id));
 		} catch (e) {
 			this.problem = say(e);
 		}
@@ -146,6 +174,7 @@ class Code {
 
 	close() {
 		this.task = null;
+		this.writing = '';
 		this.problem = '';
 	}
 
@@ -156,9 +185,11 @@ class Code {
 		this.busy = true;
 		this.problem = '';
 		try {
-			this.task = this.task
-				? await api.tellAgentTask(this.task.id, { text: prompt, mode: this.mode, web: this.web })
-				: await api.startAgentTask({ folder: this.folder, prompt, mode: this.mode, web: this.web, ...(model ? { model } : {}) });
+			this.#show(
+				this.task
+					? await api.tellAgentTask(this.task.id, { text: prompt, mode: this.mode, web: this.web })
+					: await api.startAgentTask({ folder: this.folder, prompt, mode: this.mode, web: this.web, ...(model ? { model } : {}) })
+			);
 			this.#watch();
 			return true;
 		} catch (e) {
@@ -174,7 +205,7 @@ class Code {
 		if (!task?.pending || this.busy) return;
 		this.busy = true;
 		try {
-			this.task = await api.answerAgentTask(task.id, task.pending.call, allow, always);
+			this.#show(await api.answerAgentTask(task.id, task.pending.call, allow, always));
 		} catch (e) {
 			this.problem = say(e);
 			await this.open(task.id);
@@ -186,7 +217,7 @@ class Code {
 	async stop() {
 		if (!this.task) return;
 		try {
-			this.task = await api.stopAgentTask(this.task.id);
+			this.#show(await api.stopAgentTask(this.task.id));
 		} catch (e) {
 			this.problem = say(e);
 		}
@@ -199,7 +230,7 @@ class Code {
 		this.busy = true;
 		this.problem = '';
 		try {
-			this.task = await api.undoAgentTask(task.id);
+			this.#show(await api.undoAgentTask(task.id));
 		} catch (e) {
 			this.problem = say(e);
 		} finally {
