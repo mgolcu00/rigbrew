@@ -57,7 +57,7 @@ export interface Family {
 export const families: Family[] = [
 	{ id: 'steep', name: 'Steep', modality: 'chat', does: 'Chat', icon: 'chat', runs: true, adds: 'The model you talk to. It can call the other installed families for you.', can: 'Answers, writes, explains, calls the image model' },
 	{ id: 'crema', name: 'Crema', modality: 'image', does: 'Image', icon: 'image', runs: true, adds: 'Adds Image mode to the composer, and the chat model can make a picture when you ask for one.', can: 'Makes a picture from a description' },
-	{ id: 'pour', name: 'Pour', modality: 'video', does: 'Video', icon: 'video', runs: true, adds: 'Adds Video mode to the composer: a short clip from a description, in a few minutes.', can: 'Short video clips from a description' },
+	{ id: 'pour', name: 'Pour', modality: 'video', does: 'Video', icon: 'video', runs: true, adds: 'Adds Video mode to the composer: a clip with sound from a description, in a few minutes.', can: 'Video clips with sound from a description' },
 	{ id: 'whistle', name: 'Whistle', modality: 'voice', does: 'Voice', icon: 'voice', runs: true, adds: 'Adds Read aloud to every answer in the chat. Reads English.', can: 'Reads answers aloud, in English' },
 	{ id: 'sift', name: 'Sift', modality: 'listen', does: 'Listening', icon: 'listening', runs: true, adds: 'Adds a microphone to the composer: talk instead of typing, in English, Turkish and most other languages.', can: 'Writes down what you say' }
 ];

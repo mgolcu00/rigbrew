@@ -170,6 +170,7 @@ mod tests {
             ],
             engine_args: vec![],
             defaults: serde_json::Value::Null,
+            credit: None,
             terms: None,
         }
     }

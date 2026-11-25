@@ -239,7 +239,7 @@
 								<Icon name={shelf.family.icon} size={15} />
 								<span class="fname">{shelf.family.name}</span>
 								<span class="tag">{shelf.family.does}</span>
-								<span class="can">{shelf.family.can}.{#if !shelf.family.runs}&nbsp;{RUNS_LATER}{/if}</span>
+								<span class="can">{shelf.family.can}.{#if !shelf.family.runs}&nbsp;{RUNS_LATER}{/if}{#if shelf.packages.find((p) => p.credit)}&nbsp;<strong>{shelf.packages.find((p) => p.credit)?.credit}.</strong>{/if}</span>
 								<span class="num count">{shelf.rows.length === shelf.total ? `${shelf.total} ${shelf.total === 1 ? 'build' : 'builds'}` : `${shelf.rows.length} of ${shelf.total}`}</span>
 							</span>
 						</th>

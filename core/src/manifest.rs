@@ -94,6 +94,9 @@ pub struct Package {
     /// How to ask this package for its work: steps, guidance, sizes, lengths. Shown to the app as it is.
     #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
     pub defaults: serde_json::Value,
+    /// A notice the source licence wants shown wherever the package is used ("Powered by ...").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credit: Option<String>,
     /// Licence terms the person has to agree to before the download starts (regions, permitted use).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terms: Option<Terms>,

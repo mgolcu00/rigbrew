@@ -187,7 +187,7 @@
 							<span class="num build">{rec.verdict === 'run' ? variantName(rec.variant) : ''}</span>
 							<span class="tag">{family.does}</span>
 						{/if}
-						<span class="about">{flags.techDetails ? `${family.can}.` : plainDoes(pkg)}{#if !family.runs}&nbsp;{flags.techDetails ? RUNS_LATER : 'Download only for now.'}{/if}</span>
+						<span class="about">{flags.techDetails ? `${family.can}.` : plainDoes(pkg)}{#if !family.runs}&nbsp;{flags.techDetails ? RUNS_LATER : 'Download only for now.'}{/if}{#if pkg.credit}&nbsp;<strong>{pkg.credit}.</strong>{/if}</span>
 						<span class="num mem">{rec.verdict === 'run' ? (flags.techDetails ? `${size(rec.memory_mb)} of ${size(rec.placement === 'accelerator' ? system.accel_budget_mb : system.cpu_budget_mb)}` : `uses ${size(rec.memory_mb)} of memory`) : ''}</span>
 						<span class="control">
 							{#if pkg.installed.length > 0}<span class="tag accent">installed</span>{:else}<InstallControl {pkg} primary={family.runs && pkg.modality === 'chat'} from="first_run" />{/if}

@@ -235,6 +235,7 @@ async fn packages(State(app): State<Shared>) -> Json<Value> {
                 "account_required": cloud::account_required(&app, p),
                 "defaults": p.defaults,
                 "terms": p.terms,
+                "credit": p.credit,
             })
         })
         .collect();

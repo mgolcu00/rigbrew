@@ -142,6 +142,7 @@
 			<!-- svelte-ignore a11y_media_has_caption -->
 			<video {src} width={job.width} height={job.height} controls loop muted={!sound} autoplay={!sound} playsinline aria-label={job.prompt}></video>
 		</div>
+		{#if pkg?.credit}<p class="credit">{pkg.credit}</p>{/if}
 	{:else if job.state === 'done' && missing}
 		<p class="gone">This clip is no longer on this machine.</p>
 	{/if}
@@ -335,5 +336,11 @@
 
 	.problem {
 		font-size: 12.5px;
+	}
+
+	.credit {
+		margin-top: 6px;
+		font-size: 11.5px;
+		color: var(--muted);
 	}
 </style>

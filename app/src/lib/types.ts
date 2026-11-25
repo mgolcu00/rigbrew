@@ -60,6 +60,8 @@ export interface Package {
 		sizes?: Record<string, [number, number]>;
 		lengths?: { frames: number; label: string }[];
 	} | null;
+	/** A notice the source licence wants shown wherever the package is used. */
+	credit?: string | null;
 	/** Licence terms to agree to before the download. */
 	terms?: { summary: string; url: string } | null;
 }
