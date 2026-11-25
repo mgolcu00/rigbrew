@@ -67,8 +67,8 @@ export const LEVELS: Record<Level, LevelInfo> = {
 	guided: {
 		id: 'guided',
 		name: 'Guided',
-		line: 'Plain words, one button per model, tips and a checklist. For getting started.',
-		change: 'Guided: plain names, one row per model, tips and the checklist.',
+		line: 'Plain words and one button per model. For getting started.',
+		change: 'Guided: plain names and one row per model.',
 		flags: {
 			plainNames: true,
 			versionNames: false,
@@ -96,8 +96,8 @@ export const LEVELS: Record<Level, LevelInfo> = {
 	standard: {
 		id: 'standard',
 		name: 'Standard',
-		line: 'Versions, speeds and the memory ruler, with tips only for new things.',
-		change: 'Standard: model versions, speeds, the memory ruler and today’s figures are shown.',
+		line: 'Model versions and speeds are shown.',
+		change: 'Standard: model versions and speeds are shown.',
 		flags: {
 			plainNames: false,
 			versionNames: true,

@@ -608,7 +608,7 @@ async fn call_tool(app: &Shared, id: &str, folder: &Folder, call: &str, name: &s
                     agents.change(id, |t| t.always.push(command.to_string()));
                 }
             }
-            let ran = files::run(folder, command, COMMAND_TIMEOUT).await;
+            let ran = files::run(folder, command, COMMAND_TIMEOUT, task.web).await;
             (ran.text, if ran.ok { "done" } else { "failed" })
         }
         "web_search" => {

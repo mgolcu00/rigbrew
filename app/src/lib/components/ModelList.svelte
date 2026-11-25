@@ -87,7 +87,7 @@
 					{#if !flags.plainNames}<span class="tag">{roleOf(pkg)}</span>{/if}
 					{#if installed}<span class="tag accent" title={loaded ? 'In memory and ready to answer at once' : ''}>{loaded ? (flags.plainNames ? 'ready' : 'loaded') : 'installed'}</span>{/if}
 				</p>
-				<p class="does">{plainDoes(pkg)}{#if !family.runs}&nbsp;<b>Download only for now:</b> running it in Rigbrew comes later.{/if}</p>
+				<p class="does">{plainDoes(pkg)}{#if !family.runs}&nbsp;<b>Download only for now:</b> running it in Rigbrew comes later.{/if}{#if pkg.credit}&nbsp;<b>{pkg.credit}.</b>{/if}</p>
 				<p class="facts">
 					{#if v}<span>{usesMemory(v.accel_mem_mb)}</span>{/if}
 					{#if !family.runs && verdict.fits}

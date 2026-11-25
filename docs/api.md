@@ -104,8 +104,10 @@ and `web_search` and `fetch_url` when the task was started with `"web": true`.
 - **Files stay inside the folder.** Every path is resolved through the file system first, so `..`, an absolute
   path and a symbolic link that leads out are refused alike. Nothing inside `.git` is written. Rigbrew's own data
   folder cannot be chosen, nor a folder that contains it.
-- **Commands are not confined.** `run_command` runs a shell command with the folder as its working directory,
-  for two minutes at most. It can do whatever the person's account can, which is why it always waits for a yes.
+- **Commands wait for a yes, and on macOS run in a sandbox.** `run_command` runs a shell command with the folder as
+  its working directory, for two minutes at most. On macOS it runs under the system's sandbox: it can read what the
+  person can, write only inside the folder and the temporary folders, and reach the network only when the task was
+  given the web. On Windows and Linux it is not confined yet and can do whatever the person's account can.
 - **Everything is capped.** A tool result is at most about 4,000 characters and says when it was cut; a task stops
   after 40 model turns for one request and says so.
 - **Web tools leave the machine.** `web_search` sends the query to DuckDuckGo's HTML endpoint; `fetch_url` gets one

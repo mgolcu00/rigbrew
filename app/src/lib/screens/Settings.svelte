@@ -158,10 +158,9 @@
 						<dt>Help</dt>
 						<dd>
 							<span class="line">
-								<span class="muted">Short answers to common questions, and the four-step tour.</span>
+								<span class="muted">Short answers to common questions.</span>
 								<span class="ctl">
 									<button class="btn" onclick={() => (app.closeSheet(), guide.openHelp('', 'settings'))}>Open help</button>
-									<button class="btn quiet" onclick={() => (app.closeSheet(), app.go('chat'), guide.startTour('settings'))}>Take the tour</button>
 								</span>
 							</span>
 						</dd>

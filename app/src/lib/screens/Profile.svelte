@@ -227,7 +227,7 @@
 
 <section class="screen" aria-label="Profile">
 	<div class="body scroll">
-		<div class="grid">
+		<div class="grid" class:calm={!flags.techDetails}>
 			<header class="id">
 				<span class="avatar" class:named={initial !== ''}>{#if initial}{initial}{:else}<Icon name="person" size={24} />{/if}</span>
 				<div class="who selectable">
@@ -250,6 +250,7 @@
 				<AccountPanel />
 			</header>
 
+			{#if flags.techDetails}
 			<section class="year" aria-label="Activity in the last year">
 				<h2 class="rule label">
 					{#if activity}{count(activity.days.reduce((n, d) => n + d.prompts, 0))} {flags.techDetails ? 'prompts' : 'requests'} and {count(activity.days.reduce((n, d) => n + d.images, 0))} {flags.techDetails ? 'images' : 'pictures'} in the last year{:else}Activity{/if}
@@ -300,8 +301,10 @@
 					{/each}
 				</dl>
 			</section>
+			{/if}
 
-			<section class="side" aria-label="Streaks, models and sending">
+			<section class="side" class:calm={!flags.techDetails} aria-label="Streaks, models and sending">
+				{#if flags.techDetails}
 				<h2 class="rule label">Streaks</h2>
 				<dl class="pairs">
 					<div><dt>Current</dt><dd class="num">{days(streaks.current)}</dd></div>
@@ -326,6 +329,7 @@
 					<p class="foot">No prompts yet.</p>
 				{/if}
 
+				{/if}
 				<h2 class="rule label gap">Usage data <Hint topic="data" /></h2>
 				{#if usage}
 					<dl class="pairs" aria-live="polite">
@@ -346,6 +350,7 @@
 			</section>
 
 			<section class="recent" aria-label="Recent activity">
+				{#if flags.techDetails}
 				<h2 class="rule label">Recent activity</h2>
 				{#if recent.length > 0}
 					<ol class="log selectable">
@@ -370,6 +375,7 @@
 					</ol>
 				{:else}
 					<p class="foot">Nothing yet. Send a message and it shows up here.</p>
+				{/if}
 				{/if}
 				{#if usage?.disk}
 					<h2 class="rule label gap">On disk</h2>
@@ -802,5 +808,17 @@
 		.totals div:nth-child(n + 3) {
 			border-top: 1px solid var(--line-soft);
 		}
+	}
+
+	/* Without the figures the profile is one calm column: who you are, what is sent, what is on disk. */
+	.grid.calm {
+		grid-template-columns: minmax(0, 640px);
+		grid-template-areas: 'id' 'side' 'recent';
+		grid-template-rows: auto;
+	}
+
+	.screen :global(h1),
+	.screen :global(h2:not(.label)) {
+		font-family: var(--rb-text);
 	}
 </style>

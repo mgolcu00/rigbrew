@@ -211,7 +211,6 @@
 		}
 
 		out.push({ id: 'help', group: 'Help', title: 'Open help', keys: keys(`${mod}/`), icon: 'search', words: 'help manual how', run: () => guide.openHelp('', 'palette') });
-		out.push({ id: 'tour', group: 'Help', title: 'Take the tour', detail: 'Four short steps over the window', icon: 'chevron', words: 'tour guide introduction start', run: () => (app.go('chat'), guide.startTour('palette')) });
 		for (const a of articles) {
 			out.push({ id: `help-${a.id}`, group: 'Help', title: a.title, icon: 'search', words: 'help', run: () => guide.openHelp(a.id, 'palette') });
 		}

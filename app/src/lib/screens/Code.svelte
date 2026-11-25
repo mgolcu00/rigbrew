@@ -5,7 +5,7 @@
 	import { ago } from '#lib/format.ts';
 	import { renderMarkdown } from '#lib/markdown.ts';
 	import { app } from '#lib/state.svelte.ts';
-	import { machine } from '#lib/words.ts';
+	import { isMac, machine } from '#lib/words.ts';
 	import Icon from '#lib/components/Icon.svelte';
 
 	// Code: pick a folder, say what should be done, and watch a model on this computer do it one
@@ -269,6 +269,7 @@
 							{#if p.command}
 								<h2>Run this command?</h2>
 								<pre class="raw selectable">{p.command}</pre>
+								{#if isMac}<p class="fine">It can change files only inside this folder{code.web ? '' : ', and it has no internet'}.</p>{/if}
 								<p class="why">It runs in {folderName} with your own rights, so it can do anything you can do in a terminal. Allow it only if you know what it does.</p>
 							{:else}
 								<h2>{p.tool === 'write_file' ? 'Write' : 'Change'} {p.path}?</h2>

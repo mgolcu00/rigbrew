@@ -33,7 +33,6 @@ export const articles: Article[] = [
 			`It reads what this ${Mac} can handle, picks the models that suit it and installs them for you. One chat window uses all of them.`,
 			'Rigbrew is free and open source. In return it collects how the app is used and, with your consent, what you type, to make the models better. “Where my data goes” says exactly what.'
 		],
-		actions: [{ label: 'Take the tour', does: 'tour' }]
 	},
 	{
 		id: 'models',
@@ -139,7 +138,7 @@ export const articles: Article[] = [
 		id: 'levels',
 		title: 'Guided, Standard and Pro',
 		body: [
-			'Rigbrew can show more or less. Guided uses plain words, one button per model, tips and a checklist. Standard adds model versions, speeds, the memory ruler and today’s figures. Pro shows everything: every build with its measurements, raw ids, shortcuts and the queue of usage data.',
+			'Rigbrew can show more or less. Guided uses plain words and one button per model. Standard adds model versions and speeds. Pro shows everything: every build with its measurements, raw ids, shortcuts and the queue of usage data.',
 			`Change it any time in Settings, or by searching for “Guided”, “Standard” or “Pro” with ${mod}K. Switching installs and removes nothing.`,
 			'Rigbrew may suggest the next level once you use it more. It never switches by itself.'
 		],

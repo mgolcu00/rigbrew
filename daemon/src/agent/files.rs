@@ -512,11 +512,46 @@ async fn drain(mut pipe: impl tokio::io::AsyncRead + Unpin) -> Vec<u8> {
     kept
 }
 
-/// `run_command`: one shell command with the folder as its working directory.
-pub async fn run(folder: &Folder, command: &str, timeout: Duration) -> Ran {
+/// The macOS sandbox profile a command runs under: it may read anything the person can, write
+/// only inside the folder and the temporary folders, and reach the network only when the task
+/// was given the web. The last matching rule wins.
+#[cfg(target_os = "macos")]
+fn seatbelt_profile(folder: &Path, network: bool) -> String {
+    // A path inside a profile string: backslash and quote are the only characters to escape.
+    let quoted = |p: &Path| p.to_string_lossy().replace('\\', "\\\\").replace('"', "\\\"");
+    let mut profile = String::from("(version 1)\n(allow default)\n(deny file-write*)\n");
+    profile.push_str(&format!("(allow file-write* (subpath \"{}\"))\n", quoted(folder)));
+    for tmp in ["/private/tmp", "/private/var/folders", "/dev"] {
+        profile.push_str(&format!("(allow file-write* (subpath \"{tmp}\"))\n"));
+    }
+    if !network {
+        profile.push_str("(deny network*)\n(allow network* (local unix))\n");
+    }
+    profile
+}
+
+/// Whether commands run inside a sandbox on this system (macOS: yes, with the system's own tool).
+pub fn sandboxed() -> bool {
+    cfg!(target_os = "macos") && Path::new("/usr/bin/sandbox-exec").is_file()
+}
+
+/// `run_command`: one shell command with the folder as its working directory. On macOS it runs
+/// in a sandbox: it cannot write outside the folder, and has no network unless `network` is set.
+pub async fn run(folder: &Folder, command: &str, timeout: Duration, network: bool) -> Ran {
     use std::process::Stdio;
+    #[cfg(not(target_os = "macos"))]
+    let _ = network;
     #[cfg(unix)]
     let mut cmd = {
+        #[cfg(target_os = "macos")]
+        let mut c = if sandboxed() {
+            let mut c = tokio::process::Command::new("/usr/bin/sandbox-exec");
+            c.arg("-p").arg(seatbelt_profile(folder.root(), network)).arg("sh");
+            c
+        } else {
+            tokio::process::Command::new("sh")
+        };
+        #[cfg(not(target_os = "macos"))]
         let mut c = tokio::process::Command::new("sh");
         // Errors and output in one stream, in the order they were written.
         c.arg("-c").arg(format!("exec 2>&1\n{command}"));
@@ -768,16 +803,35 @@ mod tests {
     #[tokio::test]
     async fn commands_run_in_the_folder_with_capped_output_and_a_time_limit() {
         let (f, inside, _) = folder();
-        let ran = run(&f, "pwd; echo to-stderr 1>&2", Duration::from_secs(10)).await;
+        let ran = run(&f, "pwd; echo to-stderr 1>&2", Duration::from_secs(10), false).await;
         assert!(ran.ok);
         assert!(ran.text.contains(std::fs::canonicalize(&inside).unwrap().to_str().unwrap()), "{}", ran.text);
         assert!(ran.text.contains("to-stderr"));
-        let ran = run(&f, "exit 3", Duration::from_secs(10)).await;
+        // On macOS the command cannot write outside the folder, and has no network unless given it.
+        #[cfg(target_os = "macos")]
+        {
+            let outside = std::env::var("HOME").unwrap_or_default() + "/rigbrew-sandbox-probe";
+            let ran =
+                run(&f, &format!("echo inside > made-here.txt && cat made-here.txt; echo x > {outside}"), Duration::from_secs(10), false)
+                    .await;
+            assert!(ran.text.contains("inside"), "{}", ran.text);
+            assert!(!std::path::Path::new(&outside).exists(), "a command wrote outside the folder");
+            assert!(ran.text.contains("not permitted") || ran.text.contains("denied"), "{}", ran.text);
+            let net = run(
+                &f,
+                "curl -s -m 5 -o /dev/null -w '%{http_code}' https://example.com || echo no-network",
+                Duration::from_secs(15),
+                false,
+            )
+            .await;
+            assert!(net.text.contains("no-network"), "{}", net.text);
+        }
+        let ran = run(&f, "exit 3", Duration::from_secs(10), false).await;
         assert!(!ran.ok && ran.text.starts_with("exit code 3"), "{}", ran.text);
-        let ran = run(&f, "i=0; while [ $i -lt 3000 ]; do echo line-$i; i=$((i+1)); done", Duration::from_secs(20)).await;
+        let ran = run(&f, "i=0; while [ $i -lt 3000 ]; do echo line-$i; i=$((i+1)); done", Duration::from_secs(20), false).await;
         assert!(ran.text.contains("[truncated:") && ran.text.contains("line-2999") && ran.text.chars().count() < RESULT_CHARS + 200);
         let started = std::time::Instant::now();
-        let ran = run(&f, "sleep 30", Duration::from_millis(300)).await;
+        let ran = run(&f, "sleep 30", Duration::from_millis(300), false).await;
         assert!(!ran.ok && ran.text.starts_with("Stopped after"));
         assert!(started.elapsed() < Duration::from_secs(5));
     }

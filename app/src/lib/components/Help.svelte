@@ -95,9 +95,6 @@
 							<li class="none">Nothing matches “{query}”. Try one word, such as “memory” or “picture”.</li>
 						{/each}
 					</ul>
-					<p class="foot">
-						<button class="link" onclick={() => run('tour')}>Take the tour again</button>
-					</p>
 				</nav>
 			{/if}
 
