@@ -264,7 +264,7 @@ fn config_cache(app: &App) -> std::path::PathBuf {
 }
 
 /// Whether the manifest or the server's app config (the last copy kept on disk) says this package is only for
-/// signed-in accounts: `"account_required": ["video", "pour-5b"]` lists kinds of model and package ids.
+/// signed-in accounts: `"account_required": ["video", "pour-14b"]` lists kinds of model and package ids.
 pub fn account_required(app: &App, package: &rigbrew_core::manifest::Package) -> bool {
     // The manifest can say so itself; the server's config can add to it without a new manifest.
     if package.access != rigbrew_core::manifest::Access::Public {

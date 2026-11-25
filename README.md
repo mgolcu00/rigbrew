@@ -82,7 +82,7 @@ ready and never switches by itself.
 |---|---|---|---|
 | **Steep** | Chat, writing, explaining; can call the other families | Steep 4B | Runs |
 | **Crema** | Pictures from a description | Crema 6B | Runs |
-| **Pour** | Short video clips, in a few minutes | Pour 5B | Runs |
+| **Pour** | Video clips with sound, in a few minutes (account and licence terms; powered by MiniMax H3) | Pour 14B | Runs |
 | **Whistle** | Reading answers aloud, in English | Whistle 82M | Runs |
 | **Sift** | Writing down what you say: talk instead of typing | Sift 809M | Runs |
 
