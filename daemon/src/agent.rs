@@ -22,6 +22,7 @@ mod outline;
 mod plan;
 mod skills;
 mod undo;
+mod verify;
 mod web;
 
 use std::collections::HashMap;
@@ -610,7 +611,7 @@ async fn call_tool(app: &Shared, id: &str, folder: &Folder, call: &str, name: &s
                 agents.change(id, |t| t.set_tool(call, "running", None, Some(diff)));
             }
             undo::before_change(app, id, folder, Some(&change.shown)).await;
-            done(change.apply(folder))
+            verify::after_change(folder.root(), done(change.apply(folder)))
         }
         "run_command" => {
             let Some(command) = arg_str(args, "command").map(str::trim).filter(|c| !c.is_empty()) else { return missing("command") };
@@ -717,6 +718,7 @@ async fn work(app: &Shared, id: &str) -> Ended {
                 } else {
                     Step::Model { text: text.clone() }
                 });
+                verify::note_unchecked(t, &text);
             });
             return Ended { state: "done", error: None };
         }
@@ -745,6 +747,7 @@ async fn work(app: &Shared, id: &str) -> Ended {
             app.record("agent_tool_called", json!({"tool": if KNOWN_TOOLS.contains(&name.as_str()) || extra::TOOLS.contains(&name.as_str()) { name.as_str() } else { "unknown" }}));
             if name == "finish" {
                 let summary = arg_str(&args, "summary").unwrap_or("").trim().to_string();
+                let said = format!("{text}\n{summary}");
                 agents.change(id, |t| {
                     t.messages.push(json!({"role": "tool", "tool_call_id": model_id, "content": "Finished."}));
                     if !summary.is_empty() && summary != text {
@@ -752,6 +755,7 @@ async fn work(app: &Shared, id: &str) -> Ended {
                     } else if text.is_empty() {
                         t.steps.push(Step::Note { text: "Finished.".into() });
                     }
+                    verify::note_unchecked(t, &said);
                 });
                 return Ended { state: "done", error: None };
             }

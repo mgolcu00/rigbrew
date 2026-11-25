@@ -37,11 +37,15 @@ pub fn tool_defs() -> Vec<Value> {
 }
 
 /// Lines for the system message that say how to work with these tools.
-pub fn rules(_mode: Mode) -> Vec<String> {
-    vec!["For anything longer than one step, call update_plan first with the steps. Keep exactly one step \"doing\", and update the plan when a step is done."
-        .into(),
-        "Before you read a large file, call outline to see what is on which line. Then read only the part you need with read_file, from_line and lines."
-            .into()]
+pub fn rules(mode: Mode) -> Vec<String> {
+    let mut lines = vec![
+        "For anything longer than one step, call update_plan first with the steps. Keep exactly one step \"doing\", and update the plan when a step is done.".to_string(),
+        "Before you read a large file, call outline to see what is on which line. Then read only the part you need with read_file, from_line and lines.".to_string(),
+    ];
+    if mode != Mode::ReadOnly {
+        lines.push("After a change, run the project's tests or build. Never say that something works, passes or is fixed unless a command you ran after your last change showed it. If you could not check, say so.".to_string());
+    }
+    lines
 }
 
 /// What goes at the end of the system message on every turn: the state the model must not lose

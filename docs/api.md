@@ -115,6 +115,13 @@ methods one level in), or the top-level ones of each source file in a folder. It
 expressions per language, not a parser, for Rust, Python, JavaScript, TypeScript, Go, Swift, Kotlin, Java, C, C++
 and Svelte.
 
+After a change to a file went in, the result the model reads ends with the command that checks this project
+(`cargo test`, the `test`, `check` or `build` script of `package.json` with the package manager of the lock file,
+`python3 -m pytest` or `python3 -m unittest`, `go test ./...`, the `test`, `check` or `build` target of a
+`Makefile`). When the final answer says that something works, passes or is fixed, and no command ended well
+after the last change of that request, the task gets a `note` step under the answer: "Not checked: no test or
+build ran after the last change."
+
 ### Undo
 
 Before the first change of each request (a write, an edit or an allowed command) the folder is recorded, and
