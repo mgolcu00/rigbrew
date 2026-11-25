@@ -396,6 +396,7 @@ mod tests {
             profile: hardware::scan_with_data_dir(&dir),
             manifest: Manifest::parse(r#"{"schema":1,"generated":"2026-11-20","base_url":"http://127.0.0.1:9/","packages":[]}"#).unwrap(),
             community: Mutex::new(rigbrew_core::community::Store::load(&dir)),
+            catalog: tokio::sync::Mutex::new(crate::community::CatalogState::default()),
             root: dir.clone(),
             token: "t".into(),
             events: Mutex::new(EventStore::open(&dir.join("events.db")).unwrap()),

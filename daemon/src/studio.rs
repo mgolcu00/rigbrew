@@ -3287,6 +3287,7 @@ mod tests {
             profile: rigbrew_core::hardware::scan_with_data_dir(&dir),
             manifest: rigbrew_core::Manifest::parse(&manifest).unwrap(),
             community: Mutex::new(rigbrew_core::community::Store::load(&dir)),
+            catalog: tokio::sync::Mutex::new(crate::community::CatalogState::default()),
             root: dir.clone(),
             token: "t".into(),
             events: Mutex::new(rigbrew_core::events::EventStore::open(&dir.join("events.db")).unwrap()),

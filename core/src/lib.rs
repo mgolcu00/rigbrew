@@ -4,6 +4,7 @@
 //! model variant that fits it, downloading and verifying packages, running the engines.
 
 pub mod bundle;
+pub mod catalog;
 pub mod chats;
 pub mod community;
 pub mod crash;

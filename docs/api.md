@@ -28,6 +28,7 @@ Browsers are refused unless the request comes from the app's own origin.
 | `POST /v1/community/lookup` | `{"url"}`: what a link to an open chat model holds. Answers `{host, site, owner, repo, url, license, gated, budget_mb, files: [{file, size, needs_mb, fits, checked, id, installed}], pick, skipped, links}`. See [Community models](#community-models). |
 | `POST /v1/community` | `{"repo", "file"}`: add one of those files as a chat package and start its download. Answers `{"job", "id", "name"}`; follow the job like any other download. |
 | `DELETE /v1/community/{id}` | Remove a community model: its files and its place in the list. A running download of it stops first. |
+| `GET /v1/community/catalog` | The community models Rigbrew suggests, from a signed file: `{updated, stale, models: [{id, name, kind, by, url, license, about, status, added, note, more}]}`. `?refresh=1` asks for the file again now. See [The community catalog](#the-community-catalog). |
 | `GET /v1/jobs`, `GET /v1/jobs/{id}`, `DELETE /v1/jobs/{id}` | Download progress, and cancel. A cancelled or interrupted download resumes where it stopped. |
 | `GET /v1/engine`, `DELETE /v1/engine` | Which models are in memory (`loaded`: the one used last; `all`); unload them. A chat model and a picture or video model stay in memory together when both fit the budget. |
 | `POST /v1/chat/completions` | OpenAI-compatible chat. `model` is a package id such as `steep-4b`. Streaming and tool calls work. |
@@ -399,12 +400,66 @@ curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   http://127.0.0.1:$PORT/v1/community
 ```
 
+### The community catalog
+
+Rigbrew suggests a pool of community models. The pool is one file, so it grows without an app release:
+
+- `https://models.rigbrew.dev/community.json`, served as `application/json`;
+- `https://models.rigbrew.dev/community.json.minisig`, its minisign signature, made with the key that signs the
+  manifest (`registry/rigbrew-manifest.pub`): `minisign -S -s <secret key> -m community.json`.
+
+```json
+{
+  "version": 1,
+  "updated": "2026-11-25",
+  "models": [
+    {
+      "id": "example-chat",
+      "name": "Example Chat",
+      "kind": "chat",
+      "by": "Example Lab",
+      "url": "https://huggingface.co/example-owner/Example-Chat-GGUF",
+      "license": "Apache-2.0",
+      "about": "Coding and reasoning; about 20 GB of memory.",
+      "status": "add",
+      "note": "Non-commercial licence",
+      "more": [{"label": "Original", "url": "https://huggingface.co/example-lab/Example-Chat"}]
+    }
+  ]
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `id` | Names the entry; the first entry with an id keeps it. Up to 80 characters. |
+| `name`, `by`, `license` | Shown as they are. Up to 80, 80 and 60 characters. |
+| `kind` | `chat`, `image`, `video`, `speech` (text to speech), `listen` (speech to text), `music` or `tool`. The app lists any other kind under "Other". |
+| `url` | The model's page: an `https://huggingface.co/...` or `https://github.com/...` link, with no port or sign-in in it. An entry with any other link is left out. |
+| `about` | One line, up to 200 characters. |
+| `status` | `add`: a chat model Rigbrew can run now; the app puts `url` through `POST /v1/community/lookup` and the person picks a file. `listed`: a model to read about that Rigbrew cannot run yet. Anything else, and `add` on an entry that is not `chat` or whose link the lookup does not accept, counts as `listed`. |
+| `note` | Optional, up to 120 characters ("Non-commercial licence"). |
+| `more` | Optional, up to 4 links `{label, url}` under the same rule as `url`; others are dropped. |
+
+An entry without an `id`, a `name` or an accepted `url` is left out; the rest of the file is still read. Text is cut
+to the lengths above and loses its control characters. The file may be 512 KB at most and the first 500 entries
+count. A file that is larger, is not JSON or has no `models` list is refused as a whole.
+
+`GET /v1/community/catalog` fetches the file and its signature, checks the signature, and answers with the entries
+after these checks; every `add` entry also says whether a file of that repo is already among the person's community
+models (`added`). A file whose signature checks out is kept in `state/community-catalog.json` (with its `.minisig`)
+in the data folder; the kept copy is checked again each time it is read. The service asks for the file again after 6
+hours, 10 minutes after a fetch that failed, or at once with `?refresh=1`. When the file cannot be fetched or its
+signature does not check out, the answer is the kept copy with `"stale": true`, and with nothing kept
+`{"updated": "", "stale": true, "models": []}`; the endpoint never answers with an error. Looking at the catalog
+records no event.
+
 ## Environment
 
 | Variable | Effect |
 |---|---|
 | `RIGBREW_DATA_DIR` | Use another data folder (packages, chats, the event queue). |
 | `RIGBREW_MANIFEST` | Manifest file or URL, instead of the default. |
+| `RIGBREW_COMMUNITY_URL` | Community catalog file or URL, instead of `https://models.rigbrew.dev/community.json`. Its signature is read from the same place with `.minisig` added and is checked against the same key. A file without a signature is accepted only by a development build or with `RIGBREW_ALLOW_UNSIGNED=1`, like the manifest; a URL always needs its signature. |
 | `RIGBREW_BASE_URL` | Download package files from another mirror (files are still checked against the signed manifest). |
 | `RIGBREW_ENGINE_DIR` | Use engine programs from this folder instead of downloading them. |
 | `RIGBREW_PORT` | Listen on a fixed port. |
