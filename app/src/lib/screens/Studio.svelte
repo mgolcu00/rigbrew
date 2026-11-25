@@ -94,7 +94,7 @@
 		timer = undefined;
 		if (!project) return;
 		try {
-			const saved = await api.studioSave(project.id, { name: project.name, size: project.size, shots: project.shots.map(({ id, prompt, frames, trim_start, trim_end }) => ({ id, prompt, frames, trim_start: trim_start ?? 0, trim_end: trim_end ?? 0 })) });
+			const saved = await api.studioSave(project.id, { name: project.name, size: project.size, shots: project.shots.map(({ id, prompt, frames, trim_start, trim_end, continues }) => ({ id, prompt, frames, trim_start: trim_start ?? 0, trim_end: trim_end ?? 0, continues: Boolean(continues) })) });
 			// Keep what is being typed; take the states.
 			if (view && !timer) view = saved;
 		} catch (e) {
@@ -312,6 +312,9 @@
 								</select>
 								<span class="state {shot.state}">{stateWords[shot.state]}{shot.state === 'done' && shot.seconds ? `, took ${clock(shot.seconds)}` : ''}</span>
 								{#if shot.error}<span class="problem selectable">{shot.error}</span>{/if}
+								{#if i > 0 && view?.can_continue}
+									<label class="trim" title="This shot starts from the last picture of the shot before it, so the two join without a cut. It takes longer to make."><input type="checkbox" bind:checked={shot.continues} onchange={saveSoon} /> Continue the shot before</label>
+								{/if}
 								{#if shot.state === 'done' || shot.state === 'changed'}
 									<label class="trim" title="Seconds cut from the start and from the end of this shot in the exported film">Cut <input type="number" min="0" max="9" step="0.1" bind:value={shot.trim_start} oninput={saveSoon} aria-label="Seconds cut from the start of shot {i + 1}" /> <input type="number" min="0" max="9" step="0.1" bind:value={shot.trim_end} oninput={saveSoon} aria-label="Seconds cut from the end of shot {i + 1}" /> s</label>
 								{/if}
@@ -659,6 +662,11 @@
 		gap: 4px;
 		font-size: 12.5px;
 		color: var(--faint);
+	}
+
+	.trim input[type='checkbox'] {
+		width: auto;
+		height: auto;
 	}
 
 	.trim input {

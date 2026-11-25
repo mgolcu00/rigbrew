@@ -82,12 +82,29 @@ pub struct VideoBody {
     steps: Option<u32>,
     #[serde(default)]
     seed: Option<i64>,
+    /// A picture the clip starts from, base64 (JPEG or PNG). Needs a package that can see pictures.
+    #[serde(default)]
+    init_image: Option<String>,
 }
 
 impl VideoBody {
     /// A request made inside the service (Studio makes its shots this way).
     pub fn new(model: &str, prompt: &str, size: &str, frames: u32) -> VideoBody {
-        VideoBody { model: model.into(), prompt: prompt.into(), size: Some(size.into()), frames: Some(frames), steps: None, seed: None }
+        VideoBody {
+            model: model.into(),
+            prompt: prompt.into(),
+            size: Some(size.into()),
+            frames: Some(frames),
+            steps: None,
+            seed: None,
+            init_image: None,
+        }
+    }
+
+    /// The same request, starting from a picture.
+    pub fn starting_from(mut self, image: Option<String>) -> VideoBody {
+        self.init_image = image;
+        self
     }
 }
 
@@ -126,6 +143,15 @@ pub async fn generate(State(app): State<Shared>, Json(body): Json<VideoBody>) ->
     } else {
         body.steps.unwrap_or_else(|| num("steps", 20)).clamp(1, 50)
     };
+    // A clip can start from a picture only when the installed version carries the part that sees pictures.
+    let sees = app.installed(&package).iter().any(|v| v.files.iter().any(|f| f.role == "mmproj"));
+    let init_image = body.init_image.filter(|i| !i.is_empty());
+    if init_image.is_some() && !sees {
+        return fail(StatusCode::CONFLICT, format!("{} cannot start a clip from a picture", package.name));
+    }
+    if init_image.as_ref().is_some_and(|i| i.len() > 12 * 1024 * 1024) {
+        return fail(StatusCode::BAD_REQUEST, "the picture is too large");
+    }
     if app.videos.lock().unwrap().values().any(VideoJob::active) {
         return fail(StatusCode::CONFLICT, "A video is already being made. Wait for it or stop it first.");
     }
@@ -166,6 +192,7 @@ pub async fn generate(State(app): State<Shared>, Json(body): Json<VideoBody>) ->
         cfg: d["cfg"].as_f64().unwrap_or(6.0) as f32,
         flow_shift: if d["cfg"].is_null() { Some(3.0) } else { d["flow_shift"].as_f64().map(|v| v as f32) },
         tiling: false,
+        init_image,
     };
     tokio::spawn(run(app.clone(), id.clone(), package, req));
     (StatusCode::ACCEPTED, Json(json!({"job": id}))).into_response()

@@ -502,6 +502,8 @@ export interface StudioShot {
 	/** Seconds cut from the start and the end when the film is played or exported. */
 	trim_start?: number;
 	trim_end?: number;
+	/** Starts from the last picture of the shot before it. */
+	continues?: boolean;
 }
 
 export interface StudioProject {
@@ -519,6 +521,8 @@ export interface StudioView {
 	rendering: boolean;
 	made: number;
 	seconds: number;
+	/** Whether the installed video model can start a shot from a picture. */
+	can_continue?: boolean;
 }
 
 export interface StudioListing {
@@ -533,7 +537,7 @@ export interface StudioListing {
 export const studioList = async () => (await json<{ projects: StudioListing[] }>('GET', '/v1/studio/projects')).projects;
 export const studioOpen = (folder: string, name = '') => json<StudioView>('POST', '/v1/studio/projects', { folder, name });
 export const studioRead = (id: string) => json<StudioView>('GET', `/v1/studio/projects/${enc(id)}`);
-export const studioSave = (id: string, body: { name?: string; size?: string; shots?: { id?: string; prompt: string; frames: number; trim_start?: number; trim_end?: number }[] }) =>
+export const studioSave = (id: string, body: { name?: string; size?: string; shots?: { id?: string; prompt: string; frames: number; trim_start?: number; trim_end?: number; continues?: boolean }[] }) =>
 	json<StudioView>('PUT', `/v1/studio/projects/${enc(id)}`, body);
 export const studioForget = (id: string) => json<unknown>('DELETE', `/v1/studio/projects/${enc(id)}`);
 export const studioRender = (id: string, shots?: string[]) => json<StudioView>('POST', `/v1/studio/projects/${enc(id)}/render`, shots ? { shots } : {});

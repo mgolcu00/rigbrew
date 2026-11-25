@@ -849,6 +849,8 @@ async fn ensure_sd(app: &App, package: &Package) -> Result<(Arc<SdServer>, Strin
         tae,
         connector,
         audio_vae: file("audio_vae"),
+        // Only video packages start clips from a picture; the file is optional in the package.
+        vision: if package.modality == Modality::Video { file("mmproj") } else { None },
         extra_args: package.engine_args.clone(),
         log: app.root.join("logs").join("sd-server.log"),
     };

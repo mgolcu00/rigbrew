@@ -219,6 +219,8 @@ pub struct VideoRequest {
     pub flow_shift: Option<f32>,
     /// Decode in spatial tiles: less memory.
     pub tiling: bool,
+    /// A picture the clip starts from (JPEG or PNG, base64), for packages that can continue from one.
+    pub init_image: Option<String>,
 }
 
 /// Progress as the engine reports it: a stage (`conditioning`, `sampling`, `vae_decode`, ...)
@@ -312,6 +314,8 @@ pub struct SdConfig {
     pub connector: Option<PathBuf>,
     /// Decodes the sound track, for video packages that make sound.
     pub audio_vae: Option<PathBuf>,
+    /// Lets the text encoder see a picture, so a clip can start from one.
+    pub vision: Option<PathBuf>,
     /// More startup flags (`--vae-tiling`, ...).
     pub extra_args: Vec<String>,
     pub log: PathBuf,
@@ -368,6 +372,9 @@ impl SdServer {
         }
         if let Some(audio_vae) = &cfg.audio_vae {
             command.arg("--audio-vae").arg(audio_vae);
+        }
+        if let Some(vision) = &cfg.vision {
+            command.arg("--llm_vision").arg(vision);
         }
         let mut child = command
             .args(["--cfg-scale", "1.0"])
@@ -471,6 +478,9 @@ impl SdServer {
         });
         if let Some(shift) = req.flow_shift {
             body["sample_params"]["flow_shift"] = json!(shift);
+        }
+        if let Some(image) = &req.init_image {
+            body["init_image"] = json!(image);
         }
         self.submit("vid_gen", &body).await
     }

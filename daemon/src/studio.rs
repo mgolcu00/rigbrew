@@ -56,6 +56,9 @@ pub struct Shot {
     pub trim_start: f32,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub trim_end: f32,
+    /// Start this shot from the last picture of the shot before it, so the two join without a cut.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub continues: bool,
 }
 
 fn is_zero(v: &f32) -> bool {
@@ -85,6 +88,8 @@ struct Queue {
     now: Option<(String, String, String)>,
     working: bool,
     model: Option<String>,
+    /// Stop was asked for before the shot being made had a job in the engine.
+    stop_now: bool,
 }
 
 static QUEUE: Mutex<Option<Queue>> = Mutex::new(None);
@@ -160,7 +165,13 @@ fn view(app: &App, mut p: Project) -> Value {
     }
     let made = p.shots.iter().filter(|s| s.state == "done").count();
     let seconds: f32 = p.shots.iter().map(|s| s.frames as f32 / 24.0).sum();
-    json!({"project": p, "progress": progress, "rendering": now.is_some() || !waiting.is_empty(), "made": made, "seconds": seconds})
+    let continues = app
+        .manifest
+        .packages
+        .iter()
+        .filter(|pk| pk.modality == Modality::Video)
+        .any(|pk| app.installed(pk).iter().any(|v| v.files.iter().any(|f| f.role == "mmproj")));
+    json!({"project": p, "progress": progress, "rendering": now.is_some() || !waiting.is_empty(), "made": made, "seconds": seconds, "can_continue": continues})
 }
 
 async fn list(State(app): State<Shared>) -> Json<Value> {
@@ -241,6 +252,8 @@ struct ShotIn {
     trim_start: f32,
     #[serde(default)]
     trim_end: f32,
+    #[serde(default)]
+    continues: bool,
 }
 
 #[derive(Deserialize)]
@@ -273,7 +286,7 @@ fn merge_shots(old: &[Shot], new: Vec<ShotIn>, size_changed: bool) -> Result<Vec
         let id = s.id.filter(|i| valid_id(i) && !out.iter().any(|o| o.id == *i)).unwrap_or_else(new_id);
         let shot = match old.iter().find(|o| o.id == id) {
             Some(o) => {
-                let same = o.prompt == prompt && o.frames == frames && !size_changed;
+                let same = o.prompt == prompt && o.frames == frames && o.continues == s.continues && !size_changed;
                 let state = if same || o.state == "empty" { o.state.clone() } else { "changed".into() };
                 Shot {
                     id,
@@ -284,9 +297,10 @@ fn merge_shots(old: &[Shot], new: Vec<ShotIn>, size_changed: bool) -> Result<Vec
                     seconds: o.seconds,
                     trim_start,
                     trim_end,
+                    continues: s.continues,
                 }
             }
-            None => Shot { id, prompt, frames, state: empty(), error: None, seconds: None, trim_start, trim_end },
+            None => Shot { id, prompt, frames, state: empty(), error: None, seconds: None, trim_start, trim_end, continues: s.continues },
         };
         out.push(shot);
     }
@@ -386,7 +400,11 @@ async fn render(State(app): State<Shared>, Path(id): Path<String>, body: Option<
 async fn stop(State(app): State<Shared>, Path(id): Path<String>) -> Response {
     let job = with_queue(|q| {
         q.waiting.retain(|(pid, _)| *pid != id);
-        q.now.as_ref().filter(|(pid, _, _)| *pid == id).map(|(_, _, job)| job.clone())
+        let job = q.now.as_ref().filter(|(pid, _, _)| *pid == id).map(|(_, _, job)| job.clone());
+        if job.as_deref() == Some("") {
+            q.stop_now = true;
+        }
+        job.filter(|j| !j.is_empty())
     });
     if let Some(job) = job {
         if let Some(j) = app.videos.lock().unwrap().get_mut(&job) {
@@ -413,9 +431,13 @@ async fn work(app: Shared) {
     loop {
         let Some((project, shot)) = with_queue(|q| {
             let next = q.waiting.pop_front();
-            if next.is_none() {
-                q.working = false;
-                q.now = None;
+            match &next {
+                // The shot counts as being made from this moment, before the engine has a job for it.
+                Some((project, shot)) => q.now = Some((project.clone(), shot.clone(), String::new())),
+                None => {
+                    q.working = false;
+                    q.now = None;
+                }
             }
             next
         }) else {
@@ -424,9 +446,29 @@ async fn work(app: Shared) {
         let Some(p) = load(&app, &project) else { continue };
         let Some(s) = p.shots.iter().find(|s| s.id == shot).cloned() else { continue };
         let model = with_queue(|q| q.model.clone()).unwrap_or_default();
+        // A shot that continues the one before it starts from that shot's last picture.
+        let first = if s.continues {
+            let before = p
+                .shots
+                .iter()
+                .position(|x| x.id == shot)
+                .and_then(|i| i.checked_sub(1))
+                .map(|i| clip_path(&p, &p.shots[i].id))
+                .filter(|c| c.is_file());
+            match before {
+                Some(clip) => last_picture(&app, &clip).await,
+                None => None,
+            }
+        } else {
+            None
+        };
         // Another clip (from the chat) may be in the making: wait for the engine to be free.
         let job = loop {
-            let resp = video::generate(State(app.clone()), Json(video::VideoBody::new(&model, &s.prompt, &p.size, s.frames))).await;
+            let resp = video::generate(
+                State(app.clone()),
+                Json(video::VideoBody::new(&model, &s.prompt, &p.size, s.frames).starting_from(first.clone())),
+            )
+            .await;
             let status = resp.status();
             let body = axum::body::to_bytes(resp.into_body(), 64 * 1024).await.unwrap_or_default();
             let v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
@@ -452,7 +494,15 @@ async fn work(app: Shared) {
                 continue;
             }
         };
-        with_queue(|q| q.now = Some((project.clone(), shot.clone(), job.clone())));
+        let stop = with_queue(|q| {
+            q.now = Some((project.clone(), shot.clone(), job.clone()));
+            std::mem::take(&mut q.stop_now)
+        });
+        if stop {
+            if let Some(j) = app.videos.lock().unwrap().get_mut(&job) {
+                j.cancel = true;
+            }
+        }
         let (state, error, seconds, file) = loop {
             tokio::time::sleep(Duration::from_secs(1)).await;
             let seen = app.videos.lock().unwrap().get(&job).map(|j| (j.state.clone(), j.error.clone(), j.elapsed_ms, j.video.clone()));
@@ -488,6 +538,27 @@ async fn work(app: Shared) {
             app.record("studio_shot_made", json!({"frames": s.frames, "seconds": seconds}));
         }
     }
+}
+
+/// The last picture of a clip as base64 JPEG, or `None` when the tool for it is missing or fails
+/// (the shot is then made without it, with a cut).
+async fn last_picture(app: &Shared, clip: &FsPath) -> Option<String> {
+    use base64::Engine as _;
+    let ffmpeg = crate::engine_tool(app, crate::EngineKind::Ffmpeg, "ffmpeg").await.ok()?;
+    let out = std::env::temp_dir().join(format!("rigbrew-last-{}.jpg", uuid::Uuid::new_v4().simple()));
+    let status = tokio::process::Command::new(ffmpeg)
+        .args(["-hide_banner", "-loglevel", "error", "-y", "-sseof", "-0.2", "-i"])
+        .arg(clip)
+        .args(["-frames:v", "1", "-update", "1", "-q:v", "2"])
+        .arg(&out)
+        .stdin(std::process::Stdio::null())
+        .status()
+        .await
+        .ok()?;
+    let bytes = std::fs::read(&out).ok();
+    std::fs::remove_file(&out).ok();
+    status.success().then_some(())?;
+    Some(base64::engine::general_purpose::STANDARD.encode(bytes?))
 }
 
 async fn clip(State(app): State<Shared>, Path((id, name)): Path<(String, String)>) -> Response {
@@ -765,6 +836,7 @@ mod tests {
             seconds: Some(200.0),
             trim_start: 0.0,
             trim_end: 0.0,
+            continues: false,
         }
     }
 
@@ -772,9 +844,23 @@ mod tests {
     fn a_shot_keeps_its_clip_until_its_description_changes() {
         let old = vec![shot("a1", "a fox in snow", "done"), shot("b2", "waves at dusk", "done")];
         let new = vec![
-            ShotIn { id: Some("b2".into()), prompt: "waves at dusk".into(), frames: Some(121), trim_start: 0.0, trim_end: 0.0 },
-            ShotIn { id: Some("a1".into()), prompt: "a fox in rain".into(), frames: Some(121), trim_start: 0.0, trim_end: 0.0 },
-            ShotIn { id: None, prompt: "a new one".into(), frames: None, trim_start: 0.0, trim_end: 0.0 },
+            ShotIn {
+                id: Some("b2".into()),
+                prompt: "waves at dusk".into(),
+                frames: Some(121),
+                trim_start: 0.0,
+                trim_end: 0.0,
+                continues: false,
+            },
+            ShotIn {
+                id: Some("a1".into()),
+                prompt: "a fox in rain".into(),
+                frames: Some(121),
+                trim_start: 0.0,
+                trim_end: 0.0,
+                continues: false,
+            },
+            ShotIn { id: None, prompt: "a new one".into(), frames: None, trim_start: 0.0, trim_end: 0.0, continues: false },
         ];
         let out = merge_shots(&old, new, false).unwrap();
         assert_eq!(out.iter().map(|s| s.state.as_str()).collect::<Vec<_>>(), ["done", "changed", "empty"]);
@@ -783,7 +869,14 @@ mod tests {
         // A new shape means every made shot has to be made again.
         let again = merge_shots(
             &old,
-            vec![ShotIn { id: Some("a1".into()), prompt: "a fox in snow".into(), frames: Some(121), trim_start: 0.0, trim_end: 0.0 }],
+            vec![ShotIn {
+                id: Some("a1".into()),
+                prompt: "a fox in snow".into(),
+                frames: Some(121),
+                trim_start: 0.0,
+                trim_end: 0.0,
+                continues: false,
+            }],
             true,
         )
         .unwrap();
@@ -792,13 +885,17 @@ mod tests {
 
     #[test]
     fn shots_are_bounded_and_ids_cannot_repeat_or_leave_the_folder() {
-        assert!(merge_shots(&[], vec![ShotIn { id: None, prompt: "x".into(), frames: Some(999), trim_start: 0.0, trim_end: 0.0 }], false)
-            .is_err());
+        assert!(merge_shots(
+            &[],
+            vec![ShotIn { id: None, prompt: "x".into(), frames: Some(999), trim_start: 0.0, trim_end: 0.0, continues: false }],
+            false
+        )
+        .is_err());
         let twice = merge_shots(
             &[],
             vec![
-                ShotIn { id: Some("a1".into()), prompt: "one".into(), frames: None, trim_start: 0.0, trim_end: 0.0 },
-                ShotIn { id: Some("a1".into()), prompt: "two".into(), frames: None, trim_start: 0.0, trim_end: 0.0 },
+                ShotIn { id: Some("a1".into()), prompt: "one".into(), frames: None, trim_start: 0.0, trim_end: 0.0, continues: false },
+                ShotIn { id: Some("a1".into()), prompt: "two".into(), frames: None, trim_start: 0.0, trim_end: 0.0, continues: false },
             ],
             false,
         )
@@ -834,8 +931,12 @@ mod tests {
         assert_eq!(file_stem(&p.name), "A film take 2");
         assert_eq!(file_stem("///"), "film");
         // Trims always leave part of the shot.
-        let kept = merge_shots(&[], vec![ShotIn { id: None, prompt: "x".into(), frames: Some(49), trim_start: 9.0, trim_end: 9.0 }], false)
-            .unwrap();
+        let kept = merge_shots(
+            &[],
+            vec![ShotIn { id: None, prompt: "x".into(), frames: Some(49), trim_start: 9.0, trim_end: 9.0, continues: false }],
+            false,
+        )
+        .unwrap();
         assert!(kept[0].trim_start <= 49.0 / 24.0 - 0.5 && kept[0].trim_end == 0.0);
         std::fs::remove_dir_all(dir).ok();
     }
