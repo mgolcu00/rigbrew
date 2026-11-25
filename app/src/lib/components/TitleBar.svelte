@@ -47,6 +47,9 @@
 		{#if app.screen === 'chat'}
 			<button class="tool wide" class:on={app.pane} onclick={() => app.togglePane()} title="{app.pane ? 'Hide' : 'Show'} the list of chats{ux.flags.keyHints ? ` (${mod}\\)` : ''}" aria-label="{app.pane ? 'Hide' : 'Show'} the list of chats" aria-pressed={app.pane}><Icon name="pane" size={16} /></button>
 		{/if}
+		{#if app.sponsors}
+			<button class="tool heart" onclick={() => app.openSponsor('titlebar')} title="Sponsor Rigbrew on GitHub. It is free; sponsors pay for the builds." aria-label="Sponsor Rigbrew on GitHub"><Icon name="heart" size={16} /></button>
+		{/if}
 		<button class="tool" class:on={app.sheet !== null} onclick={() => app.openSettings()} title="Settings{ux.flags.keyHints ? ` (${mod},)` : ''}" aria-label="Settings"><Icon name="gear" size={16} /></button>
 		<button
 			class="tool help"
@@ -191,6 +194,10 @@
 	.tool:hover {
 		background: var(--hover);
 		color: var(--ink);
+	}
+
+	.tool.heart:hover {
+		color: var(--accent);
 	}
 
 	.tool.on {
