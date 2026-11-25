@@ -498,6 +498,16 @@ export async function openExternal(url: string) {
 
 // --- Studio: films made of shots, kept in a folder ----------------------------------------------
 
+/** One clip of a shot. Making a shot again keeps the clip before as a take. */
+export interface StudioTake {
+	n: number;
+	/** The seed it was made with: the same seed and description give the same clip again. */
+	seed?: number;
+	seconds?: number;
+	frames: number;
+	made_frames?: number;
+}
+
 export interface StudioShot {
 	id: string;
 	prompt: string;
@@ -506,11 +516,23 @@ export interface StudioShot {
 	state: 'empty' | 'queued' | 'making' | 'done' | 'failed' | 'changed';
 	error?: string;
 	seconds?: number;
+	/** The frames its clip really has: the video model rounds a length to what it can make. */
+	made_frames?: number;
 	/** Seconds cut from the start and the end when the film is played or exported. */
 	trim_start?: number;
 	trim_end?: number;
 	/** Starts from the last picture of the shot before it. */
 	continues?: boolean;
+	/** How the film goes from the shot before into this one. Not used when the shot continues. */
+	join?: 'cut' | 'dissolve' | 'black';
+	/** How loud the shot's own sound is, 0 to 1.5. */
+	volume?: number;
+	mute?: boolean;
+	/** The clips made for this shot (the last four), and the number of the one in use. */
+	takes?: StudioTake[];
+	take?: number;
+	/** A seed to make the next clip with; without one every clip gets a new seed. */
+	seed?: number | null;
 }
 
 export interface StudioProject {
@@ -519,6 +541,18 @@ export interface StudioProject {
 	folder: string;
 	size: string;
 	shots: StudioShot[];
+	/** The film is exported by itself when its last shot is made. */
+	auto_export?: boolean;
+	/** Full path of a sound file that plays under the whole film, and how loud it is (0 to 1). */
+	sound?: string;
+	sound_volume?: number;
+	/** The sound file plays once (a narration) and does not repeat. */
+	sound_once?: boolean;
+	/** The film comes up from black at its start, and goes down to black at its end. */
+	fade_in?: boolean;
+	fade_out?: boolean;
+	/** How the film is written to its MP4. */
+	export?: StudioExportOptions;
 	updated_ms: number;
 }
 
@@ -530,6 +564,19 @@ export interface StudioView {
 	seconds: number;
 	/** Whether the installed video model can start a shot from a picture. */
 	can_continue?: boolean;
+	/** Where the export of this film is. */
+	export?: StudioExport;
+	/** About how many seconds of work are left: `all` for every shot that is not made, `left` for what is waiting or being made. */
+	estimate?: { all: number; left: number };
+}
+
+/** What a shot of `frames` frames takes on this machine, in seconds: plain, and continuing the shot before. */
+export interface StudioPace {
+	frames: number;
+	plain: number;
+	continuing: number;
+	/** False when no shot has been made here yet and the numbers are the usual ones. */
+	measured: boolean;
 }
 
 export interface StudioListing {
@@ -541,26 +588,59 @@ export interface StudioListing {
 	missing?: boolean;
 }
 
-export const studioList = async () => (await json<{ projects: StudioListing[] }>('GET', '/v1/studio/projects')).projects;
+/** The films, and `home`: the folder new films go into when none is chosen. */
+export const studioList = () => json<{ projects: StudioListing[]; home?: string | null; pace?: StudioPace; can_continue?: boolean }>('GET', '/v1/studio/projects');
+/** Opens the film in `folder`, or starts one there. Without a folder the service makes one named after the film. */
 export const studioOpen = (folder: string, name = '') => json<StudioView>('POST', '/v1/studio/projects', { folder, name });
 export const studioRead = (id: string) => json<StudioView>('GET', `/v1/studio/projects/${enc(id)}`);
-export const studioSave = (id: string, body: { name?: string; size?: string; shots?: { id?: string; prompt: string; frames: number; trim_start?: number; trim_end?: number; continues?: boolean }[] }) =>
-	json<StudioView>('PUT', `/v1/studio/projects/${enc(id)}`, body);
+/** `scale` 2 enlarges the picture to twice its width and height; `quality` is small, balanced or best; `name` is the file's name without its ending. */
+export interface StudioExportOptions {
+	scale?: number;
+	quality?: string;
+	name?: string;
+}
+
+export interface StudioSave {
+	name?: string;
+	size?: string;
+	auto_export?: boolean;
+	sound?: string;
+	sound_volume?: number;
+	sound_once?: boolean;
+	fade_in?: boolean;
+	fade_out?: boolean;
+	export?: StudioExportOptions;
+	shots?: { id?: string; prompt: string; frames: number; trim_start?: number; trim_end?: number; continues?: boolean; join?: string; volume?: number; mute?: boolean; seed?: number | null }[];
+}
+export const studioSave = (id: string, body: StudioSave) => json<StudioView>('PUT', `/v1/studio/projects/${enc(id)}`, body);
+/** The voice reads a text; the reading is saved in the film's folder and becomes the film's sound file. */
+export const studioNarration = (id: string, text: string) => json<StudioView>('POST', `/v1/studio/projects/${enc(id)}/narration`, { text });
 export const studioForget = (id: string) => json<unknown>('DELETE', `/v1/studio/projects/${enc(id)}`);
 export const studioRender = (id: string, shots?: string[]) => json<StudioView>('POST', `/v1/studio/projects/${enc(id)}/render`, shots ? { shots } : {});
 export const studioStop = (id: string) => json<StudioView>('DELETE', `/v1/studio/projects/${enc(id)}/render`);
 export const studioStoryboard = async (id: string, idea: string, shots: number) =>
-	(await json<{ shots: { prompt: string }[] }>('POST', `/v1/studio/projects/${enc(id)}/storyboard`, { idea, shots })).shots;
+	(await json<{ shots: { prompt: string; continues?: boolean }[] }>('POST', `/v1/studio/projects/${enc(id)}/storyboard`, { idea, shots })).shots;
 export interface StudioExport {
 	state: 'none' | 'working' | 'done' | 'failed';
 	file?: string;
 	error?: string;
 	shots?: number;
+	bytes?: number;
+	/** Seconds of film in the file. */
+	seconds?: number;
 }
-export const studioExport = (id: string, music?: string, volume?: number) =>
-	json<StudioExport>('POST', `/v1/studio/projects/${enc(id)}/export`, music ? { music, music_volume: volume ?? 0.5 } : {});
+/** Shows the exported file in the system's file manager. */
+export const studioReveal = (id: string) => json<{ shown: string }>('POST', `/v1/studio/projects/${enc(id)}/reveal`);
+export const studioExport = (id: string) => json<StudioExport>('POST', `/v1/studio/projects/${enc(id)}/export`, {});
 export const studioExportState = (id: string) => json<StudioExport>('GET', `/v1/studio/projects/${enc(id)}/export`);
 export const studioClip = async (id: string, shot: string) => (await send('GET', `/v1/studio/projects/${enc(id)}/clips/${enc(shot)}.webm`)).blob();
+/** The film's sound file, to play under it. */
+export const studioSound = async (id: string) => (await send('GET', `/v1/studio/projects/${enc(id)}/sound`)).blob();
+/** One small picture of a made shot: of the take in use, or of the take named. */
+export const studioPoster = async (id: string, shot: string, take?: number) =>
+	(await send('GET', `/v1/studio/projects/${enc(id)}/clips/${enc(shot)}${take ? `.${take}` : ''}.jpg`)).blob();
+export const studioUseTake = (id: string, shot: string, take: number) => json<StudioView>('POST', `/v1/studio/projects/${enc(id)}/shots/${enc(shot)}/take`, { take });
+export const studioDeleteTake = (id: string, shot: string, take: number) => json<StudioView>('DELETE', `/v1/studio/projects/${enc(id)}/shots/${enc(shot)}/takes/${take}`);
 
 // --- Code: tasks a model works on in a folder (the loop runs in the service) ------------------
 

@@ -101,12 +101,21 @@ impl VideoBody {
         }
     }
 
+    /// The same request with a seed of its own, so the same clip can be made again.
+    pub fn with_seed(mut self, seed: i64) -> VideoBody {
+        self.seed = Some(seed);
+        self
+    }
+
     /// The same request, starting from a picture.
     pub fn starting_from(mut self, image: Option<String>) -> VideoBody {
         self.init_image = image;
         self
     }
 }
+
+/// How long the engine may fail to answer about a clip before the clip counts as lost.
+const SILENCE: Duration = Duration::from_secs(45);
 
 const NEGATIVE: &str = "blurry, static, low quality, jpeg artifacts, deformed, extra limbs, text, subtitles, watermark";
 
@@ -237,6 +246,7 @@ async fn run(app: Shared, id: String, package: rigbrew_core::manifest::Package, 
     };
     update(&app, &id, |j| j.engine_job = Some(engine_job.clone()));
     let mut asked_to_stop = false;
+    let mut silent_since: Option<std::time::Instant> = None;
     loop {
         tokio::time::sleep(Duration::from_millis(1000)).await;
         let cancel = app.videos.lock().unwrap().get(&id).is_some_and(|j| j.cancel);
@@ -244,7 +254,11 @@ async fn run(app: Shared, id: String, package: rigbrew_core::manifest::Package, 
             server.cancel_job(&engine_job).await;
             asked_to_stop = true;
         }
-        match server.job(&engine_job).await {
+        let seen = server.job(&engine_job).await;
+        if seen.is_ok() {
+            silent_since = None;
+        }
+        match seen {
             Ok(EngineJob::Running(p)) => update(&app, &id, |j| {
                 j.stage = p.stage;
                 j.step = p.completed;
@@ -284,6 +298,8 @@ async fn run(app: Shared, id: String, package: rigbrew_core::manifest::Package, 
                 finish("failed", Some(why));
                 return;
             }
+            // A busy machine can miss an answer; the engine is gone only when it stays silent.
+            Err(_) if silent_since.get_or_insert_with(std::time::Instant::now).elapsed() < SILENCE => continue,
             Err(e) => {
                 // The engine went away (it was stopped or crashed).
                 app.record("video_failed", json!({"package": package.id, "variant": variant, "error": e.to_string()}));
