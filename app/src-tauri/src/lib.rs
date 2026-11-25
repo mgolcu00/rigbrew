@@ -8,10 +8,13 @@
 //! - saving a file the person asked to keep (`save_image`, `save_text`): a save dialog and a write;
 //! - choosing the folder a Code task works in (`pick_folder`), or a video or sound file for a film
 //!   (`pick_file`): the system's own dialogs;
-//! - signing in through the system browser: `account.rs`, only present in official builds (feature `account`).
+//! - signing in through the system browser: `account.rs`, only present in official builds (feature `account`);
+//! - looking at a page for a Code task (`look.rs`): a hidden window opens an address on this
+//!   computer and says what is on it.
 
 #[cfg(feature = "account")]
 mod account;
+mod look;
 
 use std::net::{SocketAddr, TcpStream};
 use std::path::PathBuf;
@@ -327,7 +330,7 @@ pub fn run() {
     }
     report_panics();
     let builder =
-        tauri::Builder::default().plugin(tauri_plugin_opener::init()).plugin(tauri_plugin_dialog::init()).manage(Daemon::default());
+        tauri::Builder::default().plugin(tauri_plugin_opener::init()).plugin(tauri_plugin_dialog::init()).manage(Daemon::default()).manage(look::Looking::default());
     // Sign-in lives in a module that is not part of the public source; without it the app has no accounts.
     #[cfg(feature = "account")]
     let builder = builder.manage(account::SignIn::default()).invoke_handler(tauri::generate_handler![
@@ -337,12 +340,21 @@ pub fn run() {
         save_text,
         pick_folder,
         pick_file,
+        look::look_page,
         account::signin_listen,
         account::signin_wait,
         account::signin_cancel
     ]);
     #[cfg(not(feature = "account"))]
-    let builder = builder.invoke_handler(tauri::generate_handler![daemon_info, save_image, save_video, save_text, pick_folder, pick_file]);
+    let builder = builder.invoke_handler(tauri::generate_handler![
+        daemon_info,
+        save_image,
+        save_video,
+        save_text,
+        pick_folder,
+        pick_file,
+        look::look_page
+    ]);
     builder
         .setup(|app| {
             // Start the service while the window is still loading.

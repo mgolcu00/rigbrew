@@ -338,6 +338,14 @@ pub async fn fetch(url: &reqwest::Url) -> Seen {
 /// Looks at one page: through the app's window when one is there, without a browser otherwise.
 pub async fn look(looks: &Looks, url: &reqwest::Url, size: (u32, u32), actions: Vec<Value>) -> Seen {
     let wanted = !actions.is_empty();
+    // Nothing listens there: said at once, without a window waiting for a page that never comes.
+    let listens = match url.port_or_known_default() {
+        Some(port) => super::apps::answers(port).await,
+        None => false,
+    };
+    if !listens {
+        return fetch(url).await;
+    }
     if let Some(mut seen) = looks.ask(url.as_str(), size, actions).await {
         seen.rendered = true;
         seen.errors = short(std::mem::take(&mut seen.errors));
@@ -512,6 +520,9 @@ pub mod api {
         task: Option<String>,
         #[serde(default)]
         size: Option<String>,
+        /// Clicks and typing before the look, as `look_at_page` takes them.
+        #[serde(default, rename = "do")]
+        steps: Option<Value>,
     }
 
     /// `POST /v1/agent/look`: the person looks at a page the way the model does (the preview's reload).
@@ -536,7 +547,11 @@ pub mod api {
             Ok(s) => s,
             Err(e) => return fail(StatusCode::BAD_REQUEST, e),
         };
-        let seen = look(&app.agent.looks, &url, size, Vec::new()).await;
+        let steps = match actions(&json!({"do": body.steps})) {
+            Ok(s) => s,
+            Err(e) => return fail(StatusCode::BAD_REQUEST, e),
+        };
+        let seen = look(&app.agent.looks, &url, size, steps).await;
         let Some(task) = task else {
             let mut page = serde_json::to_value(seen.page(None)).unwrap_or_default();
             page["text"] = json!(files::cap(seen.text.trim(), TEXT_CHARS));
@@ -704,18 +719,24 @@ mod tests {
             assert!(window.answer(job["id"].as_str().unwrap(), seen));
             job
         });
-        let url = web::local_url("http://localhost:5173/cart").unwrap();
+        let port = serve(&[("/cart", 200, "<h1>Cart</h1>")]).await;
+        let address = format!("http://localhost:{port}/cart");
+        let url = web::local_url(&address).unwrap();
         let seen = look(&looks, &url, (390, 844), vec![json!({"click": "Add"})]).await;
         let job = taken.await.unwrap();
         assert_eq!(
             (job["url"].as_str().unwrap(), job["width"].as_u64().unwrap(), job["actions"][0]["click"].as_str().unwrap()),
-            ("http://localhost:5173/cart", 390, "Add")
+            (address.as_str(), 390, "Add")
         );
         assert!(seen.rendered);
-        assert_eq!((seen.url.as_str(), seen.title.as_str(), seen.errors.len()), ("http://localhost:5173/cart", "Shop", 1));
+        assert_eq!((seen.url.as_str(), seen.title.as_str(), seen.errors.len()), (address.as_str(), "Shop", 1));
         assert_eq!(seen.picture.unwrap().len(), 7);
         assert!(!looks.answer("0000", Seen::default()), "an answer nobody waits for");
         assert!(looks.waiting.lock().unwrap().is_empty() && looks.queue.lock().unwrap().is_empty());
+        // Where nothing listens the window is not asked at all.
+        let dead = web::local_url(&format!("http://localhost:{}/", super::super::apps::free_port().unwrap())).unwrap();
+        let nothing = look(&looks, &dead, (1280, 800), Vec::new()).await;
+        assert!(!nothing.rendered && nothing.failed[0].contains("nothing answers there"), "{nothing:?}");
         // Something that is not a PNG is no picture.
         let window = looks.clone();
         tokio::spawn(async move {

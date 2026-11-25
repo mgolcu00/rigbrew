@@ -5,6 +5,7 @@
 
 import * as api from './api';
 import type { AgentMode, AgentSkill, AgentTask, AgentTaskRow } from './api';
+import { watchLooks } from './look';
 import { remembered } from './remember';
 
 const say = (e: unknown) => (e instanceof Error ? e.message : String(e));
@@ -141,6 +142,8 @@ class Code {
 
 	/** When the window opens: follow what is already working in the service. */
 	async wake() {
+		// The service has no browser: pages a task wants to see are opened by this window.
+		void watchLooks();
 		await this.refresh();
 		this.#watch();
 	}
