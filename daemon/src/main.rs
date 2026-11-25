@@ -45,16 +45,29 @@
 //!   GET    /v1/videos/jobs[/{id}]         progress of clips; DELETE /v1/videos/jobs/{id} stops one
 //!   GET    /v1/videos/files/{id}.webm     a saved clip; DELETE removes it
 //!   ...    /v1/studio/...                 films made of shots in a folder (see `studio.rs`)
-//!   POST   /v1/agent/tasks                Code: {"folder", "prompt", "model", "mode", "web"} starts a task on a folder
+//!   POST   /v1/agent/tasks                Code: {"folder", "prompt", "model", "mode", "web", "connectors"} starts a task on a folder
 //!   GET    /v1/agent/tasks[/{id}]         tasks (?folder=), or one with its steps; DELETE stops it (?remove=true forgets it)
 //!   POST   /v1/agent/tasks/{id}/approve   {"call", "allow", "always"}: answer a step that waits for the person
 //!   POST   /v1/agent/tasks/{id}/message   {"text"}: continue the task
 //!   GET    /v1/agent/skills               the skills a task can use (?folder=)
+//!   GET    /v1/skills                     every skill with where it is from and whether it is on (?folder=); POST {name, description, body} makes one
+//!   GET    /v1/skills/{name}              one skill with its instructions and other files; PUT changes it or switches it ({"enabled"}); DELETE removes the person's own
+//!   POST   /v1/skills/{name}/use          what the chat's use_skill answers; GET /v1/skills/{name}/file?path= reads one of its other files
+//!   POST   /v1/skills/import              {"from": "folder" | "github", "location", "save": [names]}: look at skills from outside, then save the ones named
+//!   GET    /v1/connectors                 connectors (Model Context Protocol servers) with their state, the ready-made ones, which runners are installed
+//!   POST   /v1/connectors                 add one: a program {"kind": "stdio", "command", "args", "env", "cwd"} or an address {"kind": "http", "url", "token"}
+//!   GET    /v1/connectors/{id}            one connector, never with its secrets; PUT changes it; DELETE stops and removes it
+//!   POST   /v1/connectors/{id}/start      start it (again); POST /v1/connectors/{id}/stop stops it
+//!   GET    /v1/connectors/{id}/tools      the tools of a running connector
+//!   POST   /v1/connectors/{id}/call       {"tool", "arguments"}: call one tool
+//!   POST   /v1/connectors/{id}/allow      {"tool", "always"}: let one tool run without asking the person, or ask again
+//!   POST   /v1/connectors/find            {"query"}: the three tools that fit best, across what runs
 
 mod agent;
 mod agents;
 mod cloud;
 mod community;
+mod connectors;
 mod library;
 mod speech;
 mod studio;
@@ -189,6 +202,8 @@ struct App {
     image_progress: Mutex<Option<rigbrew_core::engine::VideoProgress>>,
     /// Code tasks: the ones working now and the finished ones.
     agent: agent::Agents,
+    /// Connectors the person added, and the ones that run.
+    connectors: connectors::Connectors,
 }
 
 type Shared = Arc<App>;
@@ -1205,7 +1220,9 @@ async fn main() {
         videos: Mutex::new(HashMap::new()),
         image_progress: Mutex::new(None),
         agent: agent::Agents::load(&root),
+        connectors: connectors::Connectors::new(&root),
     });
+    connectors::wake(&app);
     tokio::spawn(cloud::sync_loop(app.clone()));
     tokio::spawn(idle_loop(app.clone()));
 
@@ -1271,6 +1288,19 @@ async fn main() {
         .route("/v1/agent/tasks/{id}/approve", post(agent::task_approve))
         .route("/v1/agent/tasks/{id}/message", post(agent::task_message))
         .route("/v1/agent/skills", get(agent::skills_list))
+        .route("/v1/skills", get(agent::skills::api::list).post(agent::skills::api::create))
+        .route("/v1/skills/import", post(agent::skills::api::import))
+        .route("/v1/skills/{name}", get(agent::skills::api::get).put(agent::skills::api::put).delete(agent::skills::api::delete))
+        .route("/v1/skills/{name}/use", post(agent::skills::api::use_skill))
+        .route("/v1/skills/{name}/file", get(agent::skills::api::file))
+        .route("/v1/connectors", get(connectors::list).post(connectors::create))
+        .route("/v1/connectors/find", post(connectors::find))
+        .route("/v1/connectors/{id}", get(connectors::get).put(connectors::put).delete(connectors::delete))
+        .route("/v1/connectors/{id}/start", post(connectors::start))
+        .route("/v1/connectors/{id}/stop", post(connectors::stop))
+        .route("/v1/connectors/{id}/tools", get(connectors::tools))
+        .route("/v1/connectors/{id}/call", post(connectors::call))
+        .route("/v1/connectors/{id}/allow", post(connectors::allow))
         .layer(middleware::from_fn_with_state(app.clone(), auth))
         // Added after the token check, so it needs none: a frame cannot send one, and the page is the same for everyone.
         .route("/v1/artifacts/frame", get(agents::artifact_frame))
@@ -1319,6 +1349,8 @@ async fn main() {
             for loaded in std::mem::take(&mut *shutdown_app.engine.lock().await) {
                 loaded.server.stop().await;
             }
+            // Programs started for connectors end with the service.
+            shutdown_app.connectors.stop_all().await;
         })
         .await
         .expect("server");

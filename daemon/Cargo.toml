@@ -21,6 +21,7 @@ tower-http = { version = "0.6", features = ["cors"] }
 regex = "1"
 similar = "2"
 url = "2"
+rmcp = { version = "3.11", default-features = false, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest", "reqwest"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
