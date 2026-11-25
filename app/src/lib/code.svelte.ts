@@ -16,10 +16,46 @@ export const modes: { id: AgentMode; name: string; does: string }[] = [
 	{ id: 'auto_edits', name: 'Auto edits', does: 'Changes files in the folder without asking. Still asks before it runs a command.' }
 ];
 
+const MAX_RECENT = 8;
+
+/** What was remembered, with the folder that is open first when the list does not have it yet. */
+function recentFolders(): string[] {
+	const kept = remembered.json<unknown>('code.folders', []);
+	const list = Array.isArray(kept) ? kept.filter((f): f is string => typeof f === 'string' && f.trim() !== '') : [];
+	const open = remembered.get('code.folder');
+	return (open && !list.includes(open) ? [open, ...list] : list).slice(0, MAX_RECENT);
+}
+
+/** What a command is for, said only when the command line leaves no doubt. */
+export function purposeOf(command: string): string {
+	const line = command.trim();
+	// Two commands in one line, a pipe or a redirect: no guessing.
+	if (/[;&|<>`\n]|\$\(/.test(line)) return '';
+	const rules: [RegExp, string][] = [
+		[/^(cargo|go) test\b/, 'This runs the tests of the project.'],
+		[/^(npm|pnpm|yarn|bun) (run )?test\b/, 'This runs the tests of the project.'],
+		[/^(python3?|py) -m (pytest|unittest)\b/, 'This runs the tests of the project.'],
+		[/^(pytest|jest|vitest( run)?|swift test|make test|\.\/gradlew test|gradle test|mvn test)( |$)/, 'This runs the tests of the project.'],
+		[/^(cargo (build|check|clippy)|go (build|vet)|swift build|tsc)( |$)/, 'This builds or checks the project.'],
+		[/^make( (build|check|all))?$/, 'This builds or checks the project.'],
+		[/^(npm|pnpm|yarn|bun) (run )?(build|check|lint|typecheck)( |$)/, 'This builds or checks the project.'],
+		[/^git (status|diff|log|show|branch)( |$)/, 'This only looks at the history and the state of the files.'],
+		[/^(ls|pwd|cat|head|tail|wc|grep|rg|find|tree|which|file)( |$)/, 'This only reads.'],
+		[/^(npm|pnpm|yarn|bun) (install|i|add)( |$)/, 'This downloads and installs packages.'],
+		[/^(pip3?|python3? -m pip|uv pip) install( |$)/, 'This downloads and installs packages.'],
+		[/^(rm|rmdir) /, 'This deletes files.']
+	];
+	// `find` and `git branch` can also change things; then nothing is said.
+	if (/^find .*-(delete|exec)/.test(line) || /^git branch .*-[dDmM]\b/.test(line)) return '';
+	return rules.find(([pattern]) => pattern.test(line))?.[1] ?? '';
+}
+
 class Code {
 	/** The folder being worked on, as the person chose it. Empty until they do. */
 	folder = $state(remembered.get('code.folder') ?? '');
 	mode = $state<AgentMode>(modes.some((m) => m.id === remembered.get('code.mode')) ? (remembered.get('code.mode') as AgentMode) : 'ask');
+	/** The folders worked on lately, newest first, at most eight. */
+	recent = $state<string[]>(recentFolders());
 	/** "Allow web search": off until the person switches it on. */
 	web = $state(remembered.get('code.web') === 'on');
 	/** Every task the service knows, newest first. */
@@ -64,7 +100,15 @@ class Code {
 		this.writing = '';
 		this.problem = '';
 		remembered.set('code.folder', folder);
+		this.recent = [folder, ...this.recent.filter((f) => f !== folder)].slice(0, MAX_RECENT);
+		remembered.setJson('code.folders', this.recent);
 		await this.refresh();
+	}
+
+	/** Takes a folder off the list of recent ones. Nothing on disk changes. */
+	forget(folder: string) {
+		this.recent = this.recent.filter((f) => f !== folder);
+		remembered.setJson('code.folders', this.recent);
 	}
 
 	async choose() {
