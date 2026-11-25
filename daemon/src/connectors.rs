@@ -578,6 +578,7 @@ pub fn result_for_model(connector: &str, tool: &str, result: &Result<String, Str
 /// The folders a program is looked for in: the PATH of this service, then the usual places
 /// programs are installed to. An app opened from the Dock has a short PATH.
 fn search_dirs() -> Vec<PathBuf> {
+    #[cfg_attr(not(unix), allow(unused_mut))]
     let mut dirs: Vec<PathBuf> = std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect()).unwrap_or_default();
     #[cfg(unix)]
     {
