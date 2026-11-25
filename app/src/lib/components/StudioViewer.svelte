@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onDestroy } from 'svelte';
+	import { cueAt, duckLevel } from '#lib/studio-edit.ts';
 	import { STATE_WORD } from '#lib/studio-look.ts';
 	import { studio } from '#lib/studio.svelte.ts';
 	import { timecode } from '#lib/studio-time.ts';
@@ -9,7 +10,8 @@
 	// The picture of the film at the playhead, as the export will hold it: every shot from its trim
 	// start to its trim end, dissolves as two pictures over each other, fades through black, the
 	// film's own fades. Two video elements take turns: while one shows a shot, the other holds the
-	// next one ready. They follow the workstation's clock; their sound goes into the mixer.
+	// next one ready. They follow the workstation's clock; their sound goes into the mixer, turned
+	// down under what is said as the export turns it down. The subtitle of the moment lies over it.
 
 	const EDGE = 0.5; // seconds of the film's own fade in and fade out
 
@@ -20,6 +22,7 @@
 	let gains: (GainNode | null)[] = [null, null];
 	let slate = $state<{ n: number; state: keyof typeof STATE_WORD; text: string } | null>(null);
 	let shown = $state(-1);
+	let caption = $state('');
 	let clock = $state<HTMLSpanElement | null>(null);
 
 	const [w, h] = $derived((studio.doc?.size ?? '640x384').split('x').map(Number));
@@ -79,6 +82,8 @@
 		const doc = studio.doc;
 		const { parts, total } = studio.plan;
 		if (clock) clock.textContent = timecode(time);
+		const words = cueAt(studio.cues, time)?.text ?? '';
+		if (words !== caption) caption = words;
 		if (!doc || parts.length === 0) {
 			for (const slot of [0, 1]) hold(slot, undefined, 'next', 0, 0, 0);
 			slate = null;
@@ -92,10 +97,12 @@
 		const mix = before ? Math.min(1, Math.max(0, (time - p.start) / p.overlap)) : 1;
 		const edges: [number, number] = [doc.fade_in ? EDGE : 0, doc.fade_out ? EDGE : 0];
 		const light = partLight(p, Math.min(time, total), total, ...edges);
-		hold(now % 2, p, 'now', time, light * (before?.made ? mix : 1), p.volume * light * mix);
+		// The shots' own sound goes down while a line is said.
+		const duck = duckLevel(studio.said, doc.duck, time);
+		hold(now % 2, p, 'now', time, light * (before?.made ? mix : 1), p.volume * light * mix * duck);
 		if (before) {
 			const under = partLight(before, time, total, ...edges);
-			hold((now + 1) % 2, before, 'out', time, under, before.volume * under * (1 - mix));
+			hold((now + 1) % 2, before, 'out', time, under, before.volume * under * (1 - mix) * duck);
 		} else hold((now + 1) % 2, parts[now + 1], 'next', time, 0, 0);
 		if (shown !== now || (slate !== null) !== !p.made) {
 			shown = now;
@@ -113,6 +120,9 @@
 		void studio.playing;
 		void studio.doc?.fade_in;
 		void studio.doc?.fade_out;
+		void studio.doc?.duck;
+		void studio.cues;
+		void studio.said;
 		void videos[0];
 		void videos[1];
 		for (const p of studio.plan.parts) void studio.shots[p.index]?.state;
@@ -141,6 +151,7 @@
 		{:else if studio.plan.parts.length === 0}
 			<div class="slate"><span class="ss">No shots yet</span></div>
 		{/if}
+		{#if caption}<p class="caption" aria-live="off">{caption}</p>{/if}
 	</div>
 	<div class="bar">
 		<button class="vb" onclick={() => studio.togglePlay()} aria-label={studio.playing ? 'Pause' : 'Play'} title="{studio.playing ? 'Pause' : 'Play'} (Space)"><StudioIcon name={studio.playing ? 'pause' : 'play'} size={11} /></button>
@@ -153,6 +164,25 @@
 </div>
 
 <style>
+	/* The subtitle of the moment, set as an export that holds its subtitles in the picture sets it. */
+	.caption {
+		position: absolute;
+		z-index: 4;
+		left: 7%;
+		right: 7%;
+		bottom: 5%;
+		margin: 0;
+		text-align: center;
+		white-space: pre-line;
+		font: 600 5.2cqh/1.3 var(--rb-text);
+		color: #fff;
+		text-shadow:
+			0 0 0.12em #000,
+			0 0 0.12em #000,
+			0 0.06em 0.2em rgba(0, 0, 0, 0.9);
+		pointer-events: none;
+	}
+
 	.viewer {
 		flex: none;
 		display: flex;
@@ -189,6 +219,8 @@
 		margin: 0 auto;
 		background: #000;
 		overflow: hidden;
+		/* The subtitle is sized by the height of the picture. */
+		container-type: size;
 	}
 
 	video {
