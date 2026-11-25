@@ -421,7 +421,8 @@
 	});
 
 	const today = $derived(app.usage?.today ?? null);
-	const showPane = $derived(app.pane && innerWidth >= 1080);
+	// The chats live in the sidebar now; this screen is only the conversation.
+	const showPane = false;
 
 	const keys: [string, string][] = [
 		[`${mod}K`, 'Search and commands'],
@@ -457,160 +458,24 @@
 		<p class="sr" aria-live="polite">{chat.announce}</p>
 		<div class="thread scroll" bind:this={scroller} {onscroll}>
 			<div class="column" class:home={!active} class:plain={!active && flags.plainStart}>
-				{#if !active && flags.plainStart}
-					<!-- Guided: one question, four ways to start, the checklist, what is installed. -->
-					<div class="first">
+				{#if !active}
+					<!-- Nothing open: one line, and a few ways to begin. The box below is the rest. -->
+					<div class="hello">
 						{#if usable}
-							<h1>What would you like to do?</h1>
-							<ul class="starts">
-								{#each starts as s (s.id)}
-									<li>
-										<button onclick={() => (app.track('starter_clicked', { starter: s.id }), s.run())} disabled={chat.busy}>
-											<span class="ico"><Icon name={s.icon} size={16} /></span>
-											<span class="st">{s.title}</span>
-											<span class="sd">{s.does}</span>
-											<Icon name="chevron" size={13} />
-										</button>
-									</li>
+							<h1>What can I help with?</h1>
+							<ul class="ideas">
+								{#each starts.slice(0, 4) as s (s.id)}
+									<li><button onclick={() => (app.track('starter_clicked', { starter: s.id }), s.run())} disabled={chat.busy}><Icon name={s.icon} size={15} />{s.title}</button></li>
 								{/each}
 							</ul>
 						{:else}
-							<h1>Install a chat model to start</h1>
+							<h1>One download, then just ask</h1>
 							<p class="lede">
-								A model is what answers you. {#if firstChat}{nameOf(firstChat, flags)} suits this {machine}{firstChat.recommendation.verdict === 'run' ? `: a ${bytes(firstChat.recommendation.disk_mb)} download` : ''}.{/if}
-								<Hint topic="models" />
+								Rigbrew runs AI on this {machine}, not on someone else’s servers.
+								{#if firstChat}The chat model that suits it is a {firstChat.recommendation.verdict === 'run' ? bytes(firstChat.recommendation.disk_mb) : ''} download.{/if}
 							</p>
-							{#if firstChat}<p class="row"><InstallControl pkg={firstChat} primary from="chat" /> <button class="btn quiet" onclick={() => app.go('models')}>See all models</button></p>{/if}
+							{#if firstChat}<p class="row"><InstallControl pkg={firstChat} primary from="chat" /> <button class="btn quiet" onclick={() => app.go('models')}>All models</button></p>{/if}
 						{/if}
-
-						{#if flags.checklist}<div class="check"><Checklist act={step} /></div>{/if}
-
-						{#if ready.length > 0}
-							<h2 class="rule label">On this {machine}</h2>
-							<ul class="owned">
-								{#each ready as pkg (pkg.id)}
-									{@const family = familyOf(pkg)}
-									<li>
-										<span class="ico"><Icon name={family.icon} size={15} /></span>
-										<button class="oname" onclick={() => app.showModel(pkg.id)} title="Show in Models">{nameOf(pkg, flags)}</button>
-										<span class="odoes">{family.runs ? plainDoes(pkg) : `${plainDoes(pkg)} Download only for now.`}</span>
-										{#if chat.engine?.package === pkg.id}<span class="tag accent" title="In memory and ready to answer at once">ready</span>{/if}
-									</li>
-								{/each}
-							</ul>
-						{/if}
-						{#if absent.length > 0}
-							<p class="addable">
-								Can be added: {#each absent as pkg, i (pkg.id)}{i > 0 ? ', ' : ''}<button class="link" onclick={() => app.showModel(pkg.id)}>{nameOf(pkg, flags)}</button>{/each}.
-								<button class="link" onclick={() => app.go('models')}>See all models</button>
-							</p>
-						{/if}
-
-						{#if chat.conversations.length > 0 && !showPane}
-							<h2 class="rule label">Recent chats</h2>
-							<ul class="recent">
-								{#each chat.conversations.slice(0, 5) as c (c.id)}
-									<li><button onclick={() => chat.open(c.id, 'recent')}><span class="say">{c.title}</span><span class="num">{ago(c.updatedAt, now)}</span></button></li>
-								{/each}
-							</ul>
-						{/if}
-
-						<p class="fine">
-							Everything runs on this {machine}. The first answer takes a few seconds longer while the model loads.
-							What you type is collected as usage data, with your consent; <button class="link" onclick={() => app.openPrivacy()}>see what is sent</button>.
-						</p>
-					</div>
-				{:else if !active}
-					<div class="start">
-						<div class="lead">
-							{#if system && budget}
-								<p class="machine num selectable">
-									{#if flags.techDetails}{system.cpu.brand} · {tierOf(system).label} · {bytes(budget.mb)} for models on the {budget.where}{:else}{system.cpu.brand} · {bytes(budget.mb)} of memory for models{/if}
-								</p>
-							{/if}
-							<h1>{headline}</h1>
-						</div>
-
-						<div class="have">
-							{#if ready.length > 0}
-								<h2 class="rule label">On this {flags.techDetails ? 'machine' : machine} now</h2>
-								<table class="roster" class:named={flags.versionNames}>
-									<tbody>
-										{#each ready as pkg (pkg.id)}
-											{@const family = familyOf(pkg)}
-											{@const build = installedVariant(pkg)}
-											{@const speed = pace(pkg)}
-											<tr>
-												<th scope="row"><button class="name" onclick={() => app.showModel(pkg.id)} title="Show {pkg.name} in Models">{pkg.name}</button></th>
-												<td class="num build">{build ? versionLabel(pkg, build.id, flags) : ''}</td>
-												<td><span class="tag">{flags.techDetails ? family.does : roleOf(pkg)}</span></td>
-												<td class="num" title="Memory it takes while loaded">{build ? bytes(build.accel_mem_mb) : ''}</td>
-												<td class="num dim" title={speed.title}>{speed.text}</td>
-												<td class="can">{family.runs ? (flags.techDetails ? family.can : plainDoes(pkg)) : 'Downloaded; running it in Rigbrew comes later'}</td>
-												<td class="state">
-													{#if chat.engine?.package === pkg.id}<span class="tag accent">{flags.techDetails ? 'in memory' : 'loaded'}</span>{:else if pkg.id === chat.model && family.runs}<span class="tag">chat model</span>{/if}
-												</td>
-											</tr>
-										{/each}
-									</tbody>
-								</table>
-							{/if}
-
-							{#if absent.length > 0}
-								<h2 class="rule label">{ready.length > 0 ? 'Can be added' : 'Install a model to start'}</h2>
-								<table class="roster" class:named={flags.versionNames}>
-									<tbody>
-										{#each absent as pkg (pkg.id)}
-											{@const family = familyOf(pkg)}
-											{@const rec = pkg.recommendation}
-											<tr>
-												<th scope="row"><button class="name" onclick={() => app.showModel(pkg.id)}>{pkg.name}</button></th>
-												<td class="num build">{'variant' in rec ? versionLabel(pkg, rec.variant, flags) : ''}</td>
-												<td><span class="tag">{flags.techDetails ? family.does : roleOf(pkg)}</span></td>
-												<td class="num">{rec.verdict === 'run' ? bytes(rec.memory_mb) : ''}</td>
-												<td class="can" colspan="2">{flags.techDetails ? family.can : plainDoes(pkg).replace(/\.$/, '')}{family.runs ? '' : ' (download only for now)'}</td>
-												<td class="state">
-													{#if rec.verdict === 'run'}<InstallControl {pkg} primary={!usable && pkg.modality === 'chat'} from="chat" />{:else}<span class="muted">does not fit</span>{/if}
-												</td>
-											</tr>
-										{/each}
-									</tbody>
-								</table>
-							{/if}
-						</div>
-
-						<div class="do">
-							{#if flags.checklist}<div class="check"><Checklist act={step} /></div>{/if}
-							{#if examples.length > 0}
-								<h2 class="rule label">{flags.techDetails ? 'Run one' : 'Try one'}</h2>
-								<ol class="examples">
-									{#each examples as example, i (example.text)}
-										<li>
-											<button onclick={() => runExample(example)} disabled={chat.busy}>
-												<span class="n num">{i + 1}</span>
-												<span class="say">{example.text}</span>
-												{#if flags.slashHints}<span class="route num">{example.mode === 'image' ? '/image' : 'chat'} → {example.route}</span>{:else if example.mode === 'image'}<span class="route">picture</span>{/if}
-												<Icon name="return" size={14} />
-											</button>
-										</li>
-									{/each}
-								</ol>
-							{/if}
-
-							{#if chat.conversations.length > 0 && !showPane}
-								<h2 class="rule label">Recent chats</h2>
-								<ul class="recent">
-									{#each chat.conversations.slice(0, 5) as c (c.id)}
-										<li><button onclick={() => chat.open(c.id, 'recent')}><span class="say">{c.title}</span><span class="num">{ago(c.updatedAt, now)}</span></button></li>
-									{/each}
-								</ul>
-							{/if}
-
-							<p class="fine">
-								Everything runs on this {flags.techDetails ? 'machine' : machine}. Prompts are logged as usage data;
-								<button class="link" onclick={() => app.openPrivacy()}>see what is queued</button>.
-							</p>
-						</div>
 					</div>
 				{:else}
 					<header class="head">
@@ -2106,5 +1971,214 @@
 		.odoes {
 			display: none;
 		}
+	}
+
+	/* --- the plain layout: one centred column, a quiet start, a round box to type in --- */
+	.chat .column,
+	.chat .column.home {
+		max-width: 780px;
+	}
+
+	.chat .column.home .composer,
+	.chat .column.home .slash {
+		max-width: none;
+	}
+
+	.thread > .column.home {
+		min-height: 100%;
+		display: grid;
+		align-content: center;
+	}
+
+	.hello {
+		display: grid;
+		justify-items: center;
+		gap: 18px;
+		padding: 24px 0 8px;
+		text-align: center;
+	}
+
+	.hello h1 {
+		font: 600 clamp(24px, 3vw, 32px) / 1.2 var(--rb-text);
+		letter-spacing: -0.02em;
+	}
+
+	.hello .lede {
+		max-width: 46ch;
+		color: var(--muted);
+		font-size: 15px;
+	}
+
+	.hello .row {
+		display: flex;
+		flex-wrap: wrap;
+		justify-content: center;
+		align-items: center;
+		gap: 8px;
+	}
+
+	.ideas {
+		margin: 0;
+		padding: 0;
+		list-style: none;
+		display: flex;
+		flex-wrap: wrap;
+		justify-content: center;
+		gap: 8px;
+	}
+
+	.ideas button {
+		display: inline-flex;
+		align-items: center;
+		gap: 8px;
+		height: 36px;
+		padding: 0 14px;
+		border: 1px solid var(--line);
+		border-radius: 999px;
+		font-size: 14px;
+		color: var(--muted);
+	}
+
+	.ideas button:hover:not(:disabled) {
+		background: var(--hover);
+		color: var(--ink);
+	}
+
+	.chat .composer {
+		border-radius: 18px;
+		padding: 4px 6px;
+		background: var(--bg);
+		box-shadow: 0 1px 2px color-mix(in srgb, var(--ink) 6%, transparent), 0 8px 24px -12px color-mix(in srgb, var(--ink) 18%, transparent);
+	}
+
+	.chat .composer textarea {
+		font-size: 15px;
+		padding: 12px 12px 6px;
+	}
+
+	.chat .tools {
+		gap: 10px;
+		padding: 2px 6px 6px 8px;
+	}
+
+	.chat .chips {
+		gap: 2px;
+		padding: 0;
+		box-shadow: none;
+	}
+
+	.chat .chips button {
+		height: 28px;
+		padding: 0 11px;
+		border-radius: 999px;
+		font: 500 13px/1 var(--rb-text);
+		text-transform: none;
+		letter-spacing: 0;
+	}
+
+	.chat .chips button:hover {
+		background: var(--hover);
+	}
+
+	.chat .chips button[aria-checked='true'] {
+		background: var(--pressed);
+		color: var(--ink);
+	}
+
+	.chat .to {
+		font-size: 12.5px;
+		color: var(--faint);
+	}
+
+	.chat .go {
+		height: 32px;
+		padding: 0 14px;
+		border-radius: 999px;
+		background: var(--ink);
+		color: var(--bg);
+		font: 600 13px/1 var(--rb-text);
+	}
+
+	.chat .go:disabled {
+		opacity: 0.3;
+	}
+
+	/* --- the conversation: what you said on the right in a soft block, the answer as plain text --- */
+	.chat .turns {
+		display: grid;
+		gap: 18px;
+	}
+
+	.chat .turn {
+		padding: 0;
+		border: 0;
+		background: none;
+	}
+
+	.chat .turn.you {
+		justify-self: end;
+		max-width: 78%;
+		padding: 10px 14px;
+		border-radius: 18px;
+		background: var(--well);
+	}
+
+	.chat .turn.you .meta {
+		display: none;
+	}
+
+	.chat .said {
+		font: 400 15px/1.5 var(--rb-text);
+	}
+
+	/* Who answered, how fast and the actions sit under the answer, quiet until the answer is pointed at. */
+	.chat .turn.model {
+		display: flex;
+		flex-direction: column;
+	}
+
+	.chat .turn.model .meta {
+		order: 2;
+		margin-top: 6px;
+		font-size: 12px;
+		color: var(--faint);
+		opacity: 0;
+		transition: opacity var(--quick);
+	}
+
+	.chat .turn.model:hover .meta,
+	.chat .turn.model:focus-within .meta,
+	.chat .turn.model:last-child .meta {
+		opacity: 1;
+	}
+
+	.chat .turn.model .meta .label {
+		font: 500 12px/1 var(--rb-text);
+		text-transform: none;
+		letter-spacing: 0;
+		color: var(--faint);
+	}
+
+	.chat :global(.prose) {
+		font-size: 15px;
+		line-height: 1.6;
+	}
+
+	.chat .head {
+		border: 0;
+		padding-top: 0;
+	}
+
+	.chat .head .title {
+		font: 600 14px/1.3 var(--rb-text);
+		letter-spacing: 0;
+		color: var(--muted);
+	}
+
+	.chat .head :global(h1),
+	.chat .head :global(button),
+	.chat .head :global(input) {
+		font-family: var(--rb-text);
+		letter-spacing: 0;
 	}
 </style>

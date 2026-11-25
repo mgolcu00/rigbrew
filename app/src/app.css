@@ -25,13 +25,14 @@
 	--rb-warn-soft: #f1e3c4;
 	--rb-fail: #a3261f;
 	--rb-fail-soft: #f3d5d2;
-	--rb-display: 'Martian Mono', ui-monospace, 'SF Mono', Menlo, monospace; /* headings, product and model names */
+	--rb-display: 'Instrument Sans', -apple-system, 'Segoe UI Variable', 'Segoe UI', sans-serif; /* headings, product and model names */
 	--rb-label: 'Departure Mono', ui-monospace, 'SF Mono', Menlo, monospace; /* labels and badges: 11px or multiples, uppercase */
 	--rb-text: 'Instrument Sans', -apple-system, 'Segoe UI Variable', 'Segoe UI', sans-serif; /* body, buttons, chat */
 	--rb-data: 'Commit Mono', ui-monospace, 'SF Mono', Menlo, monospace; /* numbers, ids, code */
 
 	/* Roles. Only mixes of the tokens above; no new colours. */
 	--bg: var(--rb-panel); /* the content ground */
+	--side: color-mix(in srgb, var(--rb-board) 45%, var(--rb-panel)); /* the sidebar */
 	--board: var(--rb-board); /* chrome: title bar, bay, wells */
 	--well: color-mix(in srgb, var(--rb-board) 55%, var(--rb-panel)); /* a quiet band inside content */
 	--ink: var(--rb-ink);

@@ -6,15 +6,11 @@
 	import { chat } from '#lib/chat.svelte.ts';
 	import { ux } from '#lib/experience.svelte.ts';
 	import { guide } from '#lib/guide.svelte.ts';
-	import Bay from '#lib/components/Bay.svelte';
 	import Help from '#lib/components/Help.svelte';
 	import LegalSheet from '#lib/components/LegalSheet.svelte';
 	import Mark from '#lib/components/Mark.svelte';
 	import Palette from '#lib/components/Palette.svelte';
-	import Suggest from '#lib/components/Suggest.svelte';
-	import Tips from '#lib/components/Tips.svelte';
-	import TitleBar from '#lib/components/TitleBar.svelte';
-	import Tour from '#lib/components/Tour.svelte';
+	import Sidebar from '#lib/components/Sidebar.svelte';
 	import UpdateNotice from '#lib/components/UpdateNotice.svelte';
 	import Chat from '#lib/screens/Chat.svelte';
 	import Device from '#lib/screens/Device.svelte';
@@ -23,10 +19,8 @@
 	import Settings from '#lib/screens/Settings.svelte';
 	import Welcome from '#lib/screens/Welcome.svelte';
 
-	// The shell: a title bar with the three places, the current screen, and the bay along the
-	// bottom. Settings and Help are sheets over it, the palette a layer over everything, and the
-	// first tour marks over the whole window. Tips sit at the bottom left, a level suggestion
-	// on top of the bay.
+	// The shell: a sidebar (new chat, the places, the chats, the account) and the current screen.
+	// Settings and Help are sheets over it, the palette a layer over everything.
 
 	onMount(() => {
 		const root = document.documentElement;
@@ -154,7 +148,9 @@
 	<Welcome />
 {:else}
 	<div class="shell">
-		<TitleBar />
+		<Sidebar />
+		<div class="stage">
+		<div class="grip" data-tauri-drag-region></div>
 		<main>
 			{#if app.screen === 'chat'}
 				<Chat />
@@ -169,8 +165,6 @@
 			{#if app.sheet}<Settings />{/if}
 			{#if guide.helpOpen}<Help />{/if}
 		</main>
-		<Tips />
-		<Suggest />
 		{#if app.notice}
 			<div class="notice" role="status">
 				<p>{app.notice}</p>
@@ -180,10 +174,9 @@
 				{/if}
 			</div>
 		{/if}
-		<Bay />
+		</div>
 	</div>
 	{#if app.palette}<Palette />{/if}
-	<Tour />
 	<LegalSheet />
 {/if}
 
@@ -191,7 +184,20 @@
 	.shell {
 		height: 100%;
 		display: flex;
+	}
+
+	.stage {
+		position: relative;
+		flex: 1;
+		min-width: 0;
+		display: flex;
 		flex-direction: column;
+	}
+
+	/* The top of the content is where the window is dragged from; nothing else lives there. */
+	.grip {
+		flex: none;
+		height: 28px;
 	}
 
 	main {
