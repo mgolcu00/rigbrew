@@ -7,7 +7,7 @@
 // service, this module forgets the connection, tells the app (`onLink`), and keeps asking for
 // a new one until the service answers again.
 
-import type { Activity, AppConfig, Consent, Job, Package, QueuedEvent, Session, System, Usage } from './types';
+import type { Activity, AppConfig, CommunityFound, Consent, Job, Package, QueuedEvent, Session, System, Usage } from './types';
 
 export const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 
@@ -199,6 +199,13 @@ export const pull = async (id: string, variant?: string, acceptTerms = false) =>
 /** Removes one installed build, or every build of the package. Files another build still needs stay. */
 export const removePackage = (id: string, variant?: string) =>
 	json<{ removed: string[]; freed_bytes: number }>('DELETE', `/v1/packages/${enc(id)}${variant ? `?variant=${enc(variant)}` : ''}`);
+
+/** Asks the service what a link to a model on Hugging Face or GitHub holds. */
+export const communityLookup = (url: string) => json<CommunityFound>('POST', '/v1/community/lookup', { url });
+/** Adds one file of a looked-up repo as a community chat model and starts its download. */
+export const communityAdd = (repo: string, file: string) => json<{ job: string; id: string; name: string }>('POST', '/v1/community', { repo, file });
+/** Removes a community model: its files and its place in the list. */
+export const communityRemove = (id: string) => json<{ removed: string; freed_bytes: number }>('DELETE', `/v1/community/${enc(id)}`);
 
 export const job = (id: string) => json<Job>('GET', `/v1/jobs/${enc(id)}`);
 /** Every download of this run of the service, running or ended. */
