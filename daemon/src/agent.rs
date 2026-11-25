@@ -9,6 +9,7 @@
 //!   GET    /v1/agent/tasks/{id}           state, steps so far, what waits for an answer
 //!   POST   /v1/agent/tasks/{id}/approve   {call, allow, always?}
 //!   POST   /v1/agent/tasks/{id}/message   {text, mode?, web?} continues the task
+//!   POST   /v1/agent/tasks/{id}/undo      takes back what the newest request changed
 //!   DELETE /v1/agent/tasks/{id}           stops it; ?remove=true also forgets it
 //!   GET    /v1/agent/skills?folder=       the skills a task there can use
 //!
@@ -19,6 +20,7 @@ mod extra;
 mod files;
 mod plan;
 mod skills;
+mod undo;
 mod web;
 
 use std::collections::HashMap;
@@ -37,6 +39,7 @@ use tokio::sync::oneshot;
 
 use crate::{fail, Shared};
 use files::Folder;
+pub use undo::task_undo;
 
 /// Model turns one request may take before the task stops and says so.
 const STEP_LIMIT: usize = 40;
@@ -261,7 +264,9 @@ impl Agents {
             let mut old: Vec<(i64, String)> = tasks.values().filter(|t| !t.active()).map(|t| (t.updated_ms, t.id.clone())).collect();
             old.sort();
             for (_, id) in old.into_iter().take(tasks.len() + 1 - MAX_KEPT) {
-                tasks.remove(&id);
+                if let Some(gone) = tasks.remove(&id) {
+                    undo::forget(&self.dir, &gone);
+                }
                 std::fs::remove_file(self.dir.join(format!("{id}.json"))).ok();
             }
         }
@@ -270,7 +275,9 @@ impl Agents {
     }
 
     fn remove(&self, id: &str) {
-        self.tasks.lock().unwrap().remove(id);
+        if let Some(gone) = self.tasks.lock().unwrap().remove(id) {
+            undo::forget(&self.dir, &gone);
+        }
         std::fs::remove_file(self.dir.join(format!("{id}.json"))).ok();
     }
 }
@@ -601,6 +608,7 @@ async fn call_tool(app: &Shared, id: &str, folder: &Folder, call: &str, name: &s
             } else {
                 agents.change(id, |t| t.set_tool(call, "running", None, Some(diff)));
             }
+            undo::before_change(app, id, folder, Some(&change.shown)).await;
             done(change.apply(folder))
         }
         "run_command" => {
@@ -615,6 +623,7 @@ async fn call_tool(app: &Shared, id: &str, folder: &Folder, call: &str, name: &s
                     agents.change(id, |t| t.always.push(command.to_string()));
                 }
             }
+            undo::before_change(app, id, folder, None).await;
             let ran = files::run(folder, command, COMMAND_TIMEOUT, task.web).await;
             (ran.text, if ran.ok { "done" } else { "failed" })
         }

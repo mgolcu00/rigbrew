@@ -592,6 +592,15 @@ export interface AgentTaskRow {
 	updated_ms: number;
 }
 
+/** A request that can be taken back. `request` counts the person's messages from 1. */
+export interface AgentUndo {
+	request: number;
+	kind: 'git' | 'copies';
+	/** Outside git: a command ran, and what it changed cannot be taken back. */
+	commands: boolean;
+	undone: boolean;
+}
+
 /** One step of the plan the model keeps while it works. */
 export interface AgentPlanStep {
 	text: string;
@@ -605,6 +614,8 @@ export interface AgentTask extends AgentTaskRow {
 	error: string | null;
 	/** Missing from a service that is older than the plan. */
 	plan?: AgentPlanStep[];
+	/** The folder before each request that changed it, oldest first. */
+	undo?: AgentUndo[];
 }
 
 export interface AgentSkill {
@@ -622,6 +633,7 @@ export const startAgentTask = (body: { folder: string; prompt: string; mode: Age
 export const tellAgentTask = (id: string, body: { text: string; mode: AgentMode; web: boolean }) => taskOf(json('POST', `/v1/agent/tasks/${enc(id)}/message`, body));
 export const answerAgentTask = (id: string, call: string, allow: boolean, always = false) =>
 	taskOf(json('POST', `/v1/agent/tasks/${enc(id)}/approve`, { call, allow, always }));
+export const undoAgentTask = (id: string) => taskOf(json('POST', `/v1/agent/tasks/${enc(id)}/undo`));
 export const stopAgentTask = (id: string) => taskOf(json('DELETE', `/v1/agent/tasks/${enc(id)}`));
 export const removeAgentTask = (id: string) => json<{ removed: string }>('DELETE', `/v1/agent/tasks/${enc(id)}?remove=true`);
 export const agentSkills = (folder: string) => optional<{ skills: AgentSkill[]; dir: string; folder_dir: string }>('GET', `/v1/agent/skills?folder=${enc(folder)}`);

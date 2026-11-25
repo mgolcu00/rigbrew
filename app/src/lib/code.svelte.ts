@@ -192,6 +192,21 @@ class Code {
 		}
 	}
 
+	/** Takes back what the newest request changed in the folder. */
+	async undo() {
+		const task = this.task;
+		if (!task || this.busy) return;
+		this.busy = true;
+		this.problem = '';
+		try {
+			this.task = await api.undoAgentTask(task.id);
+		} catch (e) {
+			this.problem = say(e);
+		} finally {
+			this.busy = false;
+		}
+	}
+
 	async remove(id: string) {
 		try {
 			await api.removeAgentTask(id);

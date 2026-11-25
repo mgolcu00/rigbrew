@@ -536,6 +536,32 @@ fn sandboxed() -> bool {
     Path::new("/usr/bin/sandbox-exec").is_file()
 }
 
+/// A program the service itself starts in the folder (git, for undo), confined the way a
+/// command of the task is: on macOS it can write only inside the folder and has no network.
+/// What it creates gets the usual permissions, not the private ones of the service.
+pub fn confined(folder: &Path, program: &str) -> std::process::Command {
+    #[cfg(target_os = "macos")]
+    let mut cmd = if sandboxed() {
+        let mut c = std::process::Command::new("/usr/bin/sandbox-exec");
+        c.arg("-p").arg(seatbelt_profile(folder, false)).arg(program);
+        c
+    } else {
+        std::process::Command::new(program)
+    };
+    #[cfg(not(target_os = "macos"))]
+    let mut cmd = std::process::Command::new(program);
+    #[cfg(unix)]
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        cmd.pre_exec(|| {
+            libc::umask(0o022);
+            Ok(())
+        });
+    }
+    cmd.current_dir(folder);
+    cmd
+}
+
 /// `run_command`: one shell command with the folder as its working directory. On macOS it runs
 /// in a sandbox: it cannot write outside the folder, and has no network unless `network` is set.
 pub async fn run(folder: &Folder, command: &str, timeout: Duration, network: bool) -> Ran {

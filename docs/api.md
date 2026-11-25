@@ -48,6 +48,7 @@ Browsers are refused unless the request comes from the app's own origin.
 | `GET /v1/agent/tasks`, `GET /v1/agent/tasks/{id}` | Tasks, newest first (`?folder=` for one folder); one task with its state, its steps so far and what waits for an answer. |
 | `POST /v1/agent/tasks/{id}/approve` | `{"call", "allow": true or false, "always": false}`: answer the step that waits. |
 | `POST /v1/agent/tasks/{id}/message` | `{"text", "mode", "web"}`: continue a task that is not working with a follow-up. |
+| `POST /v1/agent/tasks/{id}/undo` | Take back what the newest request changed in the folder; see [Undo](#undo). Answers `{"task", "restored", "removed"}`. `409` while the task works or when nothing is left to take back. |
 | `DELETE /v1/agent/tasks/{id}` | Stop a task where it is (a running command is killed). `?remove=true` also forgets it. |
 | `GET /v1/agent/skills` | The skills a task can use (`?folder=` adds the folder's own): name, description, where it comes from. |
 | `GET/DELETE /v1/chats`, `GET/PUT/DELETE /v1/chats/{id}` | Saved conversations. `PUT {title, data}`; `data` is the app's own JSON, 8 MB at most. |
@@ -105,6 +106,24 @@ A task also has a `plan`: the steps the model wrote with `update_plan`, each `{"
 `pending`, `doing` or `done`, and at most one step `doing`. The plan is sent back to the model at the end of the
 system message on every turn, so it is still there when older messages were left out to fit the context. A plan
 that is finished is cleared by the person's next message.
+
+### Undo
+
+Before the first change of each request (a write, an edit or an allowed command) the folder is recorded, and
+`POST .../undo` puts it back. A task lists these in `undo`, oldest first: `{"request", "kind", "undone", ...}`, where
+`request` counts the person's messages from 1. Each call takes back the newest request that was not taken back yet.
+
+- **In a git repository** (`kind: "git"`, the folder has its own `.git` folder) the working tree is kept as a
+  commit on the hidden ref `refs/rigbrew/<task>/<request>`, built with a temporary index file. The index, the
+  branch and the stash are not touched. Undo writes every tracked and untracked file back as it was in that commit
+  and removes the files made since, also when a command made them. What git ignores is left alone, and so is an
+  untracked file over 50 MB. The state just before the undo is kept on `refs/rigbrew/<task>/<request>-undone`.
+  Commits a command made stay on the branch. The refs go when the task is removed.
+- **Anywhere else** (`kind: "copies"`) each file is copied to `agent/undo/<task>/<request>/` in the data folder
+  before the task's own write or edit touches it. Undo puts those copies back and removes the files the task
+  created. What a command changed cannot be taken back there; `commands: true` on the entry says one ran.
+
+The task gets a `note` step that says what came back, and the model is told on its next turn.
 
 - **Files stay inside the folder.** Every path is resolved through the file system first, so `..`, an absolute
   path and a symbolic link that leads out are refused alike. Nothing inside `.git` is written. Rigbrew's own data

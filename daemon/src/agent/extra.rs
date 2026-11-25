@@ -5,7 +5,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::{plan, Mode, Task};
+use super::{plan, undo, Mode, Task};
 use crate::Shared;
 
 /// Saved with the task and shown by the API next to its other fields.
@@ -14,6 +14,9 @@ pub struct Extra {
     /// The plan the model wrote, as the person sees it.
     #[serde(default)]
     pub plan: Vec<plan::PlanStep>,
+    /// The folder before each request that changed it, oldest first.
+    #[serde(default)]
+    pub undo: Vec<undo::Snapshot>,
 }
 
 /// Tools of the harness itself. They change nothing in the folder, so every mode has them.
@@ -32,10 +35,15 @@ pub fn rules(_mode: Mode) -> Vec<String> {
 /// What goes at the end of the system message on every turn: the state the model must not lose
 /// when older messages are left out.
 pub fn context(task: &Task) -> String {
-    if task.extra.plan.is_empty() {
-        return String::new();
+    let mut out = String::new();
+    if let Some(note) = undo::context(task) {
+        out.push_str("\n\n");
+        out.push_str(note);
     }
-    format!("\n\nYour plan so far ([x] done, [>] doing now, [ ] to do):\n{}", plan::brief(&task.extra.plan))
+    if !task.extra.plan.is_empty() {
+        out.push_str(&format!("\n\nYour plan so far ([x] done, [>] doing now, [ ] to do):\n{}", plan::brief(&task.extra.plan)));
+    }
+    out
 }
 
 /// A new message from the person: a plan that was finished belongs to the request before.

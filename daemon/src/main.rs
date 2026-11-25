@@ -49,6 +49,7 @@
 //!   GET    /v1/agent/tasks[/{id}]         tasks (?folder=), or one with its steps; DELETE stops it (?remove=true forgets it)
 //!   POST   /v1/agent/tasks/{id}/approve   {"call", "allow", "always"}: answer a step that waits for the person
 //!   POST   /v1/agent/tasks/{id}/message   {"text"}: continue the task
+//!   POST   /v1/agent/tasks/{id}/undo      take back what the newest request changed in the folder
 //!   GET    /v1/agent/skills               the skills a task can use (?folder=)
 
 mod agent;
@@ -1270,6 +1271,7 @@ async fn main() {
         .route("/v1/agent/tasks/{id}", get(agent::task_get).delete(agent::task_delete))
         .route("/v1/agent/tasks/{id}/approve", post(agent::task_approve))
         .route("/v1/agent/tasks/{id}/message", post(agent::task_message))
+        .route("/v1/agent/tasks/{id}/undo", post(agent::task_undo))
         .route("/v1/agent/skills", get(agent::skills_list))
         .layer(middleware::from_fn_with_state(app.clone(), auth))
         // Added after the token check, so it needs none: a frame cannot send one, and the page is the same for everyone.
