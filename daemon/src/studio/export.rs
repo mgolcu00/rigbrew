@@ -1,12 +1,13 @@
 //! How a film is joined: the filter graph ffmpeg is given for dissolves, fades through black,
-//! per-shot volume, the film's own fades and the sound file under it. Nothing here runs anything.
+//! per-shot volume, the film's own fades, the sound file under it and the sound tracks mixed
+//! into it. Nothing here runs anything.
 //!
 //! Everything is counted in frames at 24 a second, so the pictures and the sound of every shot
 //! are exactly as long as each other and a long film does not drift.
 
 const FPS: f64 = 24.0;
-/// A dissolve lasts half a second; a fade through black takes the same half second in two halves.
-const JOIN_FRAMES: u32 = 12;
+/// Samples a second of everything that is mixed.
+const RATE: f64 = 48000.0;
 /// The film's own fade in and fade out.
 const EDGE_SECONDS: f64 = 0.5;
 const SOUND: &str = "aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo";
@@ -42,6 +43,46 @@ pub struct Piece {
     pub volume: f32,
     /// Whether the clip has a sound stream at all.
     pub has_sound: bool,
+    /// Frames the join into this piece lasts: a dissolve for all of them, a fade through black in two halves.
+    pub join_frames: u32,
+}
+
+/// One region of a sound track as it goes into the film.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Sound {
+    /// The ffmpeg input that holds its file.
+    pub input: usize,
+    /// Seconds into the file where the region starts, and how long it plays from there.
+    pub offset: f64,
+    pub length: f64,
+    /// How many times that stretch plays, one after another.
+    pub loops: u32,
+    /// Seconds into the film where it starts. Before 0, what lies before the film is left out.
+    pub start: f64,
+    /// The region's own gain times its track's volume.
+    pub gain: f64,
+    /// -1 is all left, 1 all right: the side away from it is turned down.
+    pub pan: f64,
+    pub fade_in: f64,
+    pub fade_out: f64,
+}
+
+/// Everything that is heard besides the picture's own joins: the shots' sound as one channel
+/// strip, the regions of the tracks that are heard, and the master.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Mix {
+    /// The shots' own sound as a whole: 0 when its strip is muted or another is soloed.
+    pub shots_gain: f64,
+    pub shots_pan: f64,
+    pub sounds: Vec<Sound>,
+    pub master: f64,
+}
+
+impl Mix {
+    /// Nothing to mix: the film's sound goes out as it is.
+    pub fn is_plain(&self) -> bool {
+        self.sounds.is_empty() && self.shots_gain == 1.0 && self.shots_pan == 0.0 && self.master == 1.0
+    }
 }
 
 /// What is done to the joined film as a whole.
@@ -53,6 +94,8 @@ pub struct Finish {
     pub scale: u32,
     /// The ffmpeg input that holds the sound file, and how loud it is (0 to 1).
     pub music: Option<(usize, f32)>,
+    /// The sound tracks and the master. `None` or a plain mix leaves the sound as it is.
+    pub mix: Option<Mix>,
 }
 
 /// A filter graph and where its picture and its sound come out: a label such as `[v]`, or an
@@ -80,12 +123,12 @@ fn pad(stream: &str) -> String {
 
 /// Frames two pieces are both on screen in a dissolve: never more than half of either.
 fn overlap(before: &Piece, after: &Piece) -> u32 {
-    JOIN_FRAMES.min(before.frames / 2).min(after.frames / 2)
+    after.join_frames.min(before.frames / 2).min(after.frames / 2)
 }
 
-/// Seconds a piece takes to go to black, or to come up from it.
-fn dip(piece: &Piece) -> f64 {
-    seconds((JOIN_FRAMES / 2).min(piece.frames / 2))
+/// Seconds a piece takes to go to black, or to come up from it, in a join of `join` frames.
+fn dip(piece: &Piece, join: u32) -> f64 {
+    seconds((join / 2).min(piece.frames / 2))
 }
 
 fn join_of(pieces: &[Piece], i: usize) -> Join {
@@ -115,7 +158,9 @@ pub fn joined(pieces: &[Piece]) -> Graph {
     for (i, p) in pieces.iter().enumerate() {
         let length = seconds(p.frames);
         let comes_up = join_of(pieces, i) == Join::Black;
-        let goes_down = pieces.get(i + 1).is_some_and(|next| next.join == Join::Black);
+        let after = pieces.get(i + 1).filter(|next| next.join == Join::Black);
+        let (up, down) = (dip(p, p.join_frames), after.map_or(0.0, |next| dip(p, next.join_frames)));
+        let goes_down = after.is_some();
         // Pictures: from the trim start, exactly `frames` of them (the last one held if the clip is short).
         let mut v = format!(
             "[{i}:v]trim=start={:.3},setpts=PTS-STARTPTS,fps=24,tpad=stop=-1:stop_mode=clone,trim=end_frame={},format=yuv420p,setsar=1,settb=AVTB",
@@ -129,15 +174,15 @@ pub fn joined(pieces: &[Piece]) -> Graph {
             "anullsrc=r=48000:cl=stereo".to_string()
         };
         if comes_up {
-            v.push_str(&format!(",fade=t=in:st=0:d={:.4}", dip(p)));
+            v.push_str(&format!(",fade=t=in:st=0:d={up:.4}"));
             if heard {
-                a.push_str(&format!(",afade=t=in:st=0:d={:.4}", dip(p)));
+                a.push_str(&format!(",afade=t=in:st=0:d={up:.4}"));
             }
         }
         if goes_down {
-            v.push_str(&format!(",fade=t=out:st={:.4}:d={:.4}", length - dip(p), dip(p)));
+            v.push_str(&format!(",fade=t=out:st={:.4}:d={down:.4}", length - down));
             if heard {
-                a.push_str(&format!(",afade=t=out:st={:.4}:d={:.4}", length - dip(p), dip(p)));
+                a.push_str(&format!(",afade=t=out:st={:.4}:d={down:.4}", length - down));
             }
         }
         steps.push(format!("{v}[v{i}]"));
@@ -207,26 +252,126 @@ pub fn finished(film: Graph, finish: &Finish) -> Graph {
         steps.push(format!("{}{}[v]", pad(&film.video), look.join(",")));
         out.video = "[v]".into();
     }
+    let mix = finish.mix.as_ref().filter(|m| !m.is_plain());
+    if finish.music.is_none() && mix.is_none() {
+        if !hear.is_empty() {
+            steps.push(format!("{}{}[a]", pad(&film.audio), hear.join(",")));
+            out.audio = "[a]".into();
+        }
+        out.filter = steps.join(";");
+        return out;
+    }
+    // What is mixed, the shots' own sound first: the mix is as long as it is.
+    let mut mixed = vec![pad(&film.audio)];
+    if let Some(mix) = mix {
+        if mix.shots_gain != 1.0 || mix.shots_pan != 0.0 {
+            steps.push(format!("{}{SOUND},volume={:.3}{}[sa]", pad(&film.audio), mix.shots_gain.max(0.0), balance(mix.shots_pan)));
+            mixed[0] = "[sa]".into();
+        }
+    }
     if let Some((input, volume)) = finish.music {
         // The sound file runs under the shots' own sound, as long as the film.
         steps.push(format!("[{input}:a]{SOUND},volume={volume:.2}[m]"));
-        hear.insert(0, "amix=inputs=2:duration=first:dropout_transition=0:normalize=0".into());
-        steps.push(format!("{}[m]{}[a]", pad(&film.audio), hear.join(",")));
-        out.audio = "[a]".into();
-    } else if !hear.is_empty() {
-        steps.push(format!("{}{}[a]", pad(&film.audio), hear.join(",")));
+        mixed.push("[m]".into());
+    }
+    if let Some(mix) = mix {
+        let heard: Vec<&Sound> = mix
+            .sounds
+            .iter()
+            .filter(|s| s.gain > 0.0 && s.length > 0.0 && s.start < total && s.start + s.length * s.loops.max(1) as f64 > 0.0)
+            .collect();
+        // A file that several regions play is read once and handed to each of them.
+        let mut inputs: Vec<usize> = heard.iter().map(|s| s.input).collect();
+        inputs.sort_unstable();
+        inputs.dedup();
+        let uses: Vec<usize> = inputs.iter().map(|input| heard.iter().filter(|s| s.input == *input).count()).collect();
+        for (input, uses) in inputs.iter().zip(&uses).filter(|(_, uses)| **uses > 1) {
+            let outs: String = (0..*uses).map(|n| format!("[i{input}_{n}]")).collect();
+            steps.push(format!("[{input}:a]asplit={uses}{outs}"));
+        }
+        let mut given = vec![0usize; inputs.len()];
+        for (n, s) in heard.iter().enumerate() {
+            let at = inputs.binary_search(&s.input).unwrap_or(0);
+            let from = if uses[at] > 1 { format!("[i{}_{}]", s.input, given[at]) } else { format!("[{}:a]", s.input) };
+            given[at] += 1;
+            steps.push(format!("{from}{}[s{n}]", sound_chain(s)));
+            mixed.push(format!("[s{n}]"));
+        }
+    }
+    let mut last: Vec<String> = Vec::new();
+    if mixed.len() > 1 {
+        last.push(format!("amix=inputs={}:duration=first:dropout_transition=0:normalize=0", mixed.len()));
+    }
+    last.extend(hear);
+    if let Some(mix) = mix {
+        if mix.master != 1.0 {
+            last.push(format!("volume={:.3}", mix.master.max(0.0)));
+        }
+        // Several sounds on top of each other can be louder than a file can hold: the peaks are held down.
+        last.push("alimiter=limit=0.97:level=false:latency=true".into());
+    }
+    if !last.is_empty() {
+        steps.push(format!("{}{}[a]", mixed.concat(), last.join(",")));
         out.audio = "[a]".into();
     }
     out.filter = steps.join(";");
     out
 }
 
+/// Turns down the side a sound is panned away from. Nothing in the middle.
+fn balance(pan: f64) -> String {
+    let pan = pan.clamp(-1.0, 1.0);
+    if pan == 0.0 {
+        return String::new();
+    }
+    format!(",pan=stereo|c0={:.3}*c0|c1={:.3}*c1", (1.0 - pan).min(1.0), (1.0 + pan).min(1.0))
+}
+
+/// What is done to the file of one region: its stretch of the file, repeated, faded at its ends,
+/// at its loudness and side, set at its place in the film.
+fn sound_chain(s: &Sound) -> String {
+    let loops = s.loops.max(1);
+    let span = s.length * loops as f64;
+    let from = s.offset.max(0.0);
+    let mut chain = format!(
+        "atrim=start={from:.4}:end={:.4},asetpts=PTS-STARTPTS,{SOUND},apad=whole_dur={:.4},atrim=end={:.4}",
+        from + s.length,
+        s.length,
+        s.length
+    );
+    if loops > 1 {
+        chain.push_str(&format!(",aloop=loop={}:size={},asetpts=N/SR/TB", loops - 1, (s.length * RATE).round() as u64));
+    }
+    let (fade_in, fade_out) = (s.fade_in.clamp(0.0, span), s.fade_out.clamp(0.0, span));
+    if fade_in > 0.0 {
+        chain.push_str(&format!(",afade=t=in:st=0:d={fade_in:.4}"));
+    }
+    if fade_out > 0.0 {
+        chain.push_str(&format!(",afade=t=out:st={:.4}:d={fade_out:.4}", span - fade_out));
+    }
+    // A region that starts before the film loses what lies before it.
+    if s.start < 0.0 {
+        chain.push_str(&format!(",atrim=start={:.4},asetpts=PTS-STARTPTS", -s.start));
+    }
+    if s.gain != 1.0 {
+        chain.push_str(&format!(",volume={:.3}", s.gain));
+    }
+    chain.push_str(&balance(s.pan));
+    if s.start > 0.0 {
+        chain.push_str(&format!(",adelay={}:all=1", (s.start * 1000.0).round() as u64));
+    }
+    chain
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Half a second: what a join lasts unless the shot says otherwise.
+    const JOIN_FRAMES: u32 = 12;
+
     fn piece(frames: u32, join: Join) -> Piece {
-        Piece { start: 0.0, frames, join, volume: 1.0, has_sound: true }
+        Piece { start: 0.0, frames, join, volume: 1.0, has_sound: true, join_frames: JOIN_FRAMES }
     }
 
     const PICTURE: &str = "setpts=PTS-STARTPTS,fps=24,tpad=stop=-1:stop_mode=clone";
@@ -367,7 +512,7 @@ mod tests {
     #[test]
     fn the_whole_film_fades_and_takes_the_sound_file() {
         let film = [piece(48, Join::Cut), piece(48, Join::Dissolve)];
-        let all = Finish { fade_in: true, fade_out: true, scale: 2, music: Some((2, 0.4)) };
+        let all = Finish { fade_in: true, fade_out: true, scale: 2, music: Some((2, 0.4)), mix: None };
         let g = finished(joined(&film), &all);
         let steps: Vec<&str> = g.filter.split(';').collect();
         assert_eq!(steps[6], "[xv1]scale=iw*2:ih*2:flags=lanczos,fade=t=in:st=0:d=0.5000,fade=t=out:st=3.0000:d=0.5000[v]");
@@ -389,5 +534,128 @@ mod tests {
         // A film shorter than a second fades for half of itself each way.
         let short = finished(as_it_is(12), &Finish { fade_in: true, fade_out: true, ..Finish::default() });
         assert!(short.filter.contains("fade=t=in:st=0:d=0.2500,fade=t=out:st=0.2500:d=0.2500[v]"));
+    }
+
+    #[test]
+    fn a_join_is_as_long_as_its_shot_says() {
+        let mut slow = piece(96, Join::Dissolve);
+        slow.join_frames = 48;
+        let mut dark = piece(96, Join::Black);
+        dark.join_frames = 24;
+        let film = [piece(96, Join::Cut), slow, dark];
+        let g = joined(&film);
+        // Two seconds of dissolve, then half a second down to black and half a second up.
+        assert!(g.filter.contains("xfade=transition=fade:duration=2.0000:offset=1.9980"));
+        assert!(g.filter.contains("fade=t=out:st=3.5000:d=0.5000[v1]"));
+        assert!(g.filter.contains("fade=t=in:st=0:d=0.5000[v2]"));
+        assert_eq!(g.frames, 96 * 3 - 48);
+        assert_eq!(film_frames(&film), g.frames);
+    }
+
+    fn sound(input: usize, start: f64, length: f64) -> Sound {
+        Sound { input, offset: 0.0, length, loops: 1, start, gain: 1.0, pan: 0.0, fade_in: 0.0, fade_out: 0.0 }
+    }
+
+    fn mix(sounds: Vec<Sound>) -> Mix {
+        Mix { shots_gain: 1.0, shots_pan: 0.0, sounds, master: 1.0 }
+    }
+
+    const REGION: &str = "asetpts=PTS-STARTPTS,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo";
+    const LIMIT: &str = "alimiter=limit=0.97:level=false:latency=true";
+
+    #[test]
+    fn no_tracks_leave_the_film_as_it_was() {
+        // A plain mix adds nothing: a film of cuts still needs no graph at all.
+        let plain = finished(as_it_is(96), &Finish { mix: Some(mix(vec![])), ..Finish::default() });
+        assert_eq!((plain.filter.as_str(), plain.video.as_str(), plain.audio.as_str()), ("", "0:v", "0:a"));
+        assert!(mix(vec![]).is_plain() && !mix(vec![sound(1, 0.0, 1.0)]).is_plain());
+        // A region with no loudness, or one that lies wholly outside the film, is not read at all.
+        let mut silent = sound(1, 0.0, 2.0);
+        silent.gain = 0.0;
+        let outside =
+            finished(as_it_is(96), &Finish { mix: Some(mix(vec![silent, sound(2, 4.0, 2.0), sound(3, -3.0, 2.0)])), ..Finish::default() });
+        assert_eq!(outside.filter, format!("[0:a]{LIMIT}[a]"));
+        // The master alone turns the film's own sound up or down, held under the limit.
+        let quiet = finished(as_it_is(96), &Finish { mix: Some(Mix { master: 0.5, ..mix(vec![]) }), ..Finish::default() });
+        assert_eq!(quiet.filter, format!("[0:a]volume=0.500,{LIMIT}[a]"));
+    }
+
+    #[test]
+    fn regions_are_set_at_their_place() {
+        let mut second = sound(2, 1.5, 2.0);
+        second.offset = 0.25;
+        second.gain = 0.5;
+        second.fade_in = 0.2;
+        second.fade_out = 0.4;
+        let g = finished(as_it_is(96), &Finish { mix: Some(mix(vec![sound(1, 0.0, 1.0), second])), ..Finish::default() });
+        let steps: Vec<&str> = g.filter.split(';').collect();
+        assert_eq!(steps.len(), 3);
+        assert_eq!(steps[0], format!("[1:a]atrim=start=0.0000:end=1.0000,{REGION},apad=whole_dur=1.0000,atrim=end=1.0000[s0]"));
+        assert_eq!(
+            steps[1],
+            format!(
+                "[2:a]atrim=start=0.2500:end=2.2500,{REGION},apad=whole_dur=2.0000,atrim=end=2.0000,\
+                 afade=t=in:st=0:d=0.2000,afade=t=out:st=1.6000:d=0.4000,volume=0.500,adelay=1500:all=1[s1]"
+            )
+        );
+        // Regions that overlap are simply both in the mix; the shots' sound is first and gives the length.
+        assert_eq!(steps[2], format!("[0:a][s0][s1]amix=inputs=3:duration=first:dropout_transition=0:normalize=0,{LIMIT}[a]"));
+        assert_eq!((g.video.as_str(), g.audio.as_str()), ("0:v", "[a]"));
+    }
+
+    #[test]
+    fn a_region_that_starts_before_the_film_is_cut_at_its_start() {
+        let mut early = sound(1, -0.75, 2.0);
+        early.fade_in = 0.5;
+        let g = finished(as_it_is(96), &Finish { mix: Some(mix(vec![early])), ..Finish::default() });
+        // The fade belongs to the region's own start, so it is cut with it; nothing is delayed.
+        assert!(g.filter.contains("afade=t=in:st=0:d=0.5000,atrim=start=0.7500,asetpts=PTS-STARTPTS[s0]"));
+        assert!(!g.filter.contains("adelay"));
+    }
+
+    #[test]
+    fn loops_pan_and_one_file_in_several_regions() {
+        let mut looped = sound(3, 1.0, 0.5);
+        looped.loops = 4;
+        looped.fade_out = 0.5;
+        looped.pan = -1.0;
+        let mut right = sound(3, 0.0, 0.5);
+        right.pan = 0.5;
+        let film = joined(&[piece(48, Join::Cut), piece(48, Join::Dissolve)]);
+        let shots = Mix { shots_gain: 0.8, shots_pan: 1.0, master: 1.2, sounds: vec![looped, right] };
+        let g = finished(film, &Finish { fade_out: true, music: Some((2, 0.4)), mix: Some(shots), ..Finish::default() });
+        let steps: Vec<&str> = g.filter.split(';').collect();
+        let tail = &steps[steps.len() - 7..];
+        assert_eq!(tail[0], "[xv1]fade=t=out:st=3.0000:d=0.5000[v]");
+        assert_eq!(tail[1], format!("[xa1]{SOUND},volume=0.800,pan=stereo|c0=0.000*c0|c1=1.000*c1[sa]"));
+        assert_eq!(tail[2], format!("[2:a]{SOUND},volume=0.40[m]"));
+        // The file is read once and split for the two regions that play it.
+        assert_eq!(tail[3], "[3:a]asplit=2[i3_0][i3_1]");
+        assert_eq!(
+            tail[4],
+            format!(
+                "[i3_0]atrim=start=0.0000:end=0.5000,{REGION},apad=whole_dur=0.5000,atrim=end=0.5000,aloop=loop=3:size=24000,asetpts=N/SR/TB,\
+                 afade=t=out:st=1.5000:d=0.5000,pan=stereo|c0=1.000*c0|c1=0.000*c1,adelay=1000:all=1[s0]"
+            )
+        );
+        assert!(tail[5].starts_with("[i3_1]") && tail[5].ends_with("atrim=end=0.5000,pan=stereo|c0=0.500*c0|c1=1.000*c1[s1]"));
+        assert_eq!(
+            tail[6],
+            format!("[sa][m][s0][s1]amix=inputs=4:duration=first:dropout_transition=0:normalize=0,afade=t=out:st=3.0000:d=0.5000,volume=1.200,{LIMIT}[a]")
+        );
+        assert_eq!((g.video.as_str(), g.audio.as_str(), g.frames), ("[v]", "[a]", 84));
+    }
+
+    #[test]
+    fn many_regions_on_many_tracks() {
+        // Six tracks of twenty regions each, every track with its own file.
+        let sounds: Vec<Sound> = (0..120).map(|n| sound(1 + n % 6, n as f64 * 0.5, 1.0)).collect();
+        let g = finished(as_it_is(24 * 300), &Finish { mix: Some(mix(sounds)), ..Finish::default() });
+        assert_eq!(g.filter.matches("asplit=20").count(), 6);
+        assert_eq!(g.filter.matches("adelay=").count(), 119);
+        assert!(g.filter.contains("amix=inputs=121:"));
+        for n in 0..120 {
+            assert_eq!(g.filter.matches(&format!("[s{n}]")).count(), 2);
+        }
     }
 }

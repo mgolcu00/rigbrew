@@ -50,6 +50,70 @@ pub fn part_request(idea: &str, so_far: &[Line], count: usize, total: usize) -> 
     text
 }
 
+/// What the chat model is told when it writes one description again.
+pub fn rewrite_prompt() -> String {
+    "You improve one shot description for a text-to-video model. Answer with the improved description only: one line, no numbering, no quotes, no notes. \
+     Describe one continuous shot of about five seconds in English: who or what is seen, what moves, the place, the light, the camera, and the sound. \
+     Keep what happens in the shot. Describe the same characters and places with the same words as the other shots of the film, so they look alike. \
+     No dialogue, no titles, no text on screen."
+        .to_string()
+}
+
+/// The shot to write again, with the shots around it and what the person wants different.
+pub fn rewrite_request(before: &[&str], after: Option<&str>, shot: &str, hint: &str, continues: bool) -> String {
+    let mut text = String::new();
+    if !before.is_empty() {
+        text.push_str("The shots before it in the film:\n");
+        for line in before {
+            text.push_str(&format!("- {line}\n"));
+        }
+        text.push('\n');
+    }
+    if let Some(next) = after {
+        text.push_str(&format!("The shot after it:\n- {next}\n\n"));
+    }
+    if continues {
+        text.push_str("This shot carries on from the shot before it without a cut: same place, same moment.\n\n");
+    }
+    if shot.is_empty() {
+        text.push_str("The shot has no description yet. Write one that fits between the others.");
+    } else {
+        text.push_str(&format!("The shot to improve:\n{shot}"));
+    }
+    if !hint.is_empty() {
+        text.push_str(&format!("\n\nWhat should be different: {hint}"));
+    }
+    text
+}
+
+/// The one description out of what the chat model wrote: its first real line, without a number,
+/// a marker, a label or quotes around it.
+pub fn one_description(text: &str) -> Option<String> {
+    for line in text.lines() {
+        let line = line.trim().trim_start_matches(['-', '*', '•', '#', '>']).trim();
+        let rest = line.trim_start_matches(|c: char| c.is_ascii_digit());
+        let rest = if rest.len() < line.len() { rest.trim_start_matches(['.', ')', ':']).trim() } else { line };
+        let (_, body) = marker(rest);
+        // "Improved description: ..." says nothing about the shot.
+        let body = match body.split_once(':') {
+            Some((label, said))
+                if label.len() <= 28
+                    && ["description", "shot", "improved", "rewritten", "version"]
+                        .iter()
+                        .any(|w| label.to_ascii_lowercase().contains(w)) =>
+            {
+                said
+            }
+            _ => body,
+        };
+        let body = body.trim_matches(|c: char| c.is_whitespace() || ['"', '*', '`', '\u{201c}', '\u{201d}'].contains(&c));
+        if body.chars().count() >= 12 {
+            return Some(body.chars().take(super::MAX_PROMPT).collect());
+        }
+    }
+    None
+}
+
 /// A leading "(cut)" or "(continues)", with or without brackets: what it says and the rest of the line.
 fn marker(body: &str) -> (Option<bool>, &str) {
     let body = body.trim_start_matches(['*', '"', '`', ' ']);
@@ -146,6 +210,35 @@ mod tests {
         let text = "## Scene 1: the forest\n1. A red fox trots through fresh snow.\n2. The red fox stops and looks up.\n\n**Scene 2**\n3. A paper boat floats down a stream.\n4. (cut) The forest from above at dusk.\n5. Snow falls on the dark trees below.";
         let shots = shot_lines(text, 20);
         assert_eq!(shots.iter().map(|s| s.continues).collect::<Vec<_>>(), [false, true, false, false, true]);
+    }
+
+    #[test]
+    fn one_description_is_read_from_the_answer() {
+        assert_eq!(
+            one_description("A red fox trots through fresh snow, soft light.").as_deref(),
+            Some("A red fox trots through fresh snow, soft light.")
+        );
+        assert_eq!(
+            one_description(
+                "Sure!\n\n**Improved description:** \"A red fox trots through fresh snow between birch trees.\"\n\nNotes: calm."
+            )
+            .as_deref(),
+            Some("A red fox trots through fresh snow between birch trees.")
+        );
+        assert_eq!(
+            one_description("1. (continues) The red fox stops and looks up at a branch.").as_deref(),
+            Some("The red fox stops and looks up at a branch.")
+        );
+        // A colon inside the description stays.
+        assert_eq!(
+            one_description("A wide view of the forest at dusk: snow falling, quiet wind.").as_deref(),
+            Some("A wide view of the forest at dusk: snow falling, quiet wind.")
+        );
+        assert_eq!(one_description("OK.\n\n"), None);
+        let asked = rewrite_request(&["a fox walks", "the fox stops"], Some("a boat"), "fox looks up", "closer", true);
+        assert!(asked.contains("- the fox stops\n") && asked.contains("The shot after it:\n- a boat") && asked.contains("without a cut"));
+        assert!(asked.ends_with("The shot to improve:\nfox looks up\n\nWhat should be different: closer"));
+        assert!(rewrite_request(&[], None, "", "a storm", false).starts_with("The shot has no description yet."));
     }
 
     #[test]
