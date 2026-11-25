@@ -28,6 +28,9 @@
 //!   GET    /v1/activity/recent?limit=50   recent activity in words, newest first
 //!   GET    /v1/chats                      saved chats, newest first; DELETE removes them all
 //!   GET    /v1/chats/{id}                 one chat; PUT {title, data} saves it (8 MB at most); DELETE removes it
+//!   GET    /v1/agents                     agents the person made; PUT {agents: [...]} replaces the list; DELETE removes them all
+//!   GET    /v1/agents/{id}                one agent; PUT {name, instruction, tools, starter} saves it; DELETE removes it
+//!   GET    /v1/artifacts/frame            the empty, locked-down page a chat artifact is shown in (no token: it holds nothing)
 //!   GET    /v1/images/files/{id}.png      a generated picture (saved by /v1/images/generations); DELETE removes it
 //!   POST   /v1/sync                       send queued events now
 //!   GET    /v1/app/config                 server's app config (updates, sponsors), cached for offline
@@ -43,6 +46,7 @@
 //!   GET    /v1/videos/files/{id}.webm     a saved clip; DELETE removes it
 //!   ...    /v1/studio/...                 films made of shots in a folder (see `studio.rs`)
 
+mod agents;
 mod cloud;
 mod community;
 mod library;
@@ -1197,6 +1201,8 @@ async fn main() {
                 .delete(library::chat_delete)
                 .layer(axum::extract::DefaultBodyLimit::max(rigbrew_core::chats::MAX_DATA_BYTES + 64 * 1024)),
         )
+        .route("/v1/agents", get(agents::list).put(agents::put_list).delete(agents::delete_all))
+        .route("/v1/agents/{id}", get(agents::get).put(agents::put_one).delete(agents::delete_one))
         .route("/v1/images/files/{name}", get(library::image_get).delete(library::image_delete))
         .route("/v1/activity/recent", get(library::recent))
         .route("/v1/audio/speech", post(speech::speech))
@@ -1210,6 +1216,8 @@ async fn main() {
         .route("/v1/videos/jobs/{id}", get(video::job).delete(video::cancel))
         .route("/v1/videos/files/{name}", get(video::file_get).delete(video::file_delete))
         .layer(middleware::from_fn_with_state(app.clone(), auth))
+        // Added after the token check, so it needs none: a frame cannot send one, and the page is the same for everyone.
+        .route("/v1/artifacts/frame", get(agents::artifact_frame))
         // The app's webview is a different origin. Only the app's own origins may call the API;
         // the bearer token is still required. Preflight requests carry no token and pass here.
         .layer(

@@ -1,16 +1,21 @@
 <script lang="ts">
-	import { tick } from 'svelte';
+	import { tick, untrack } from 'svelte';
 	import { app } from '#lib/state.svelte.ts';
 	import { chat, sizes, videoLengthsOf, videoSizesOf, type Message, type Mode, type SizeName } from '#lib/chat.svelte.ts';
 	import { ux } from '#lib/experience.svelte.ts';
 	import { guide, type ChecklistId } from '#lib/guide.svelte.ts';
 	import { copyText, openExternal } from '#lib/api.ts';
+	import { starterDraft } from '#lib/agents.ts';
+	import { agents } from '#lib/agents.svelte.ts';
+	import { collectArtifacts, kindName, splitMessage, type Artifact } from '#lib/artifacts.ts';
+	import { remembered } from '#lib/remember.ts';
 	import { looksEnglish, reader } from '#lib/voice.svelte.ts';
 	import { dictation } from '#lib/dictate.svelte.ts';
 	import { ago, budgetOf, count, duration, elapsed, familyOf, installedVariant, minute, seconds, size as bytes, speedOf, tierOf, variantName } from '#lib/format.ts';
 	import { renderMarkdown } from '#lib/markdown.ts';
 	import { machine, mod, nameOf, plainDoes, roleOf, speedAnywhere, speedHere, speedWord, versionLabel } from '#lib/words.ts';
 	import type { Package } from '#lib/types.ts';
+	import ArtifactPanel from '#lib/components/ArtifactPanel.svelte';
 	import Checklist from '#lib/components/Checklist.svelte';
 	import ErrorLine from '#lib/components/ErrorLine.svelte';
 	import Hint from '#lib/components/Hint.svelte';
@@ -284,6 +289,63 @@
 
 	const waitedFor = (message: Message) => (message.startedAt ? (now - message.startedAt) / 1000 : 0);
 
+	// --- artifacts: what the model wrote to be looked at or kept ------------------------------------
+	//
+	// A page, a drawing, a diagram, a document or a longer piece of code in an answer is shown as
+	// a card in the conversation and, opened, in a panel beside it (see `artifacts.ts`). They are
+	// found in the text of the answers, so nothing extra is saved with the chat.
+
+	const pieces = $derived(collectArtifacts(messages));
+	/** Which artifact is open in each chat, by chat id; remembered, so a chat opens the way it was left. */
+	let openPieces = $state<Record<string, string>>(remembered.json('artifacts.open', {}));
+	const piece = $derived(pieces.find((a) => a.id === openPieces[chat.activeId]) ?? null);
+	const pieceVersions = $derived(piece ? pieces.filter((a) => a.group === piece.group) : []);
+
+	const pieceAt = (messageId: number, index: number) => pieces.find((a) => a.messageId === messageId && a.index === index);
+	/** The card's second line: what it is, or its size when the title already says what it is. */
+	const pieceWhat = (a: Artifact) => {
+		if (a.kind === 'code') return a.lang ? `${a.lang} code` : `${a.lines} lines`;
+		if (a.title === kindName(a.kind)) return a.kind === 'diagram' ? 'Shown as code' : `${a.lines} ${a.lines === 1 ? 'line' : 'lines'}`;
+		return a.kind === 'page' ? 'Web page' : kindName(a.kind);
+	};
+
+	function rememberPieces() {
+		// The last forty chats are enough to remember.
+		const keys = Object.keys(openPieces);
+		for (const key of keys.slice(0, Math.max(0, keys.length - 40))) delete openPieces[key];
+		remembered.setJson('artifacts.open', openPieces);
+	}
+
+	function openPiece(a: Artifact, via: 'card' | 'auto' | 'version') {
+		if (!chat.activeId || openPieces[chat.activeId] === a.id) return;
+		delete openPieces[chat.activeId];
+		openPieces[chat.activeId] = a.id;
+		rememberPieces();
+		if (via !== 'version') app.track('artifact_opened', { kind: a.kind, via });
+	}
+
+	function pickPiece(id: string) {
+		const next = pieces.find((a) => a.id === id);
+		if (next) openPiece(next, 'version');
+	}
+
+	function closePiece() {
+		delete openPieces[chat.activeId];
+		rememberPieces();
+		input?.focus();
+	}
+
+	// An artifact that starts being written opens by itself when there is room beside the conversation.
+	const announced = new Set<string>();
+	$effect(() => {
+		const writing = pieces.find((a) => a.writing && !announced.has(a.id));
+		if (!writing) return;
+		announced.add(writing.id);
+		untrack(() => {
+			if (innerWidth > 1000) openPiece(writing, 'auto');
+		});
+	});
+
 	// --- the chat's own head: its name (click to rename) and Delete --------------------------------
 
 	let renaming = $state(false);
@@ -435,6 +497,20 @@
 		['Esc', 'Stop the answer']
 	];
 
+	/** The picker next to the model name: the plain chat model, one of the person's agents, or a way to make one. */
+	function pickAgent(event: Event) {
+		const select = event.currentTarget as HTMLSelectElement;
+		const value = select.value;
+		if (value === '+new' || value === '+all') {
+			select.value = chat.agentId;
+			if (value === '+new') agents.startNew('picker', (made) => chat.setAgent(made.id, 'new'));
+			else agents.open('picker');
+			return;
+		}
+		chat.setAgent(value, 'picker');
+		input?.focus();
+	}
+
 	const placeholder = $derived.by(() => {
 		if (!usable) return 'Install a chat model to start';
 		if (opening) return 'Opening the chat…';
@@ -453,7 +529,12 @@
 
 <svelte:window bind:innerWidth />
 
-<section class="chat" class:paned={showPane} class:slim={!flags.paneFigures} aria-label="Chat">
+{#snippet documentBody(text: string)}
+	<!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+	<div class="prose selectable" onclick={onanswerclick}>{@html renderMarkdown(text)}</div>
+{/snippet}
+
+<section class="chat" class:paned={showPane} class:slim={!flags.paneFigures} class:beside={piece !== null} aria-label="Chat">
 	<div class="main">
 		<p class="sr" aria-live="polite">{chat.announce}</p>
 		<div class="thread scroll" bind:this={scroller} {onscroll}>
@@ -462,12 +543,23 @@
 					<!-- Nothing open: one line, and a few ways to begin. The box below is the rest. -->
 					<div class="hello">
 						{#if usable}
-							<h1>What can I help with?</h1>
-							<ul class="ideas">
-								{#each starts.slice(0, 4) as s (s.id)}
-									<li><button onclick={() => (app.track('starter_clicked', { starter: s.id }), s.run())} disabled={chat.busy}><Icon name={s.icon} size={15} />{s.title}</button></li>
-								{/each}
-							</ul>
+							{#if chat.agent && chat.mode === 'chat' && models.length > 0}
+								<!-- A chat that will run as an agent: its name, and the first message it suggests. -->
+								<h1>{chat.agent.name}</h1>
+								{#if chat.agent.starter}
+									{@const starter = chat.agent.starter}
+									<ul class="ideas">
+										<li><button onclick={() => setDraft(starterDraft(starter))} disabled={chat.busy}><Icon name="compose" size={15} />{starter}</button></li>
+									</ul>
+								{/if}
+							{:else}
+								<h1>What can I help with?</h1>
+								<ul class="ideas">
+									{#each starts.slice(0, 4) as s (s.id)}
+										<li><button onclick={() => (app.track('starter_clicked', { starter: s.id }), s.run())} disabled={chat.busy}><Icon name={s.icon} size={15} />{s.title}</button></li>
+									{/each}
+								</ul>
+							{/if}
 						{:else}
 							<h1>One download, then just ask</h1>
 							<p class="lede">
@@ -598,8 +690,27 @@
 											{#if !flags.techDetails && !chat.engine}<Hint topic="first-answer" />{/if}
 										</p>
 									{:else if message.content}
-										<!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-										<div class="prose selectable" class:writing={message.state === 'streaming'} aria-busy={message.state === 'streaming'} onclick={onanswerclick}>{@html renderMarkdown(message.content)}</div>
+										{@const parts = splitMessage(message.content, message.state !== 'streaming')}
+										<div class="answer" aria-busy={message.state === 'streaming'}>
+											{#each parts as part, i (i)}
+												{#if part.type === 'text'}
+													<!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
+													<div class="prose selectable" class:writing={message.state === 'streaming' && i === parts.length - 1} onclick={onanswerclick}>{@html renderMarkdown(part.text)}</div>
+												{:else}
+													{@const a = pieceAt(message.id, part.index)}
+													{#if a}
+														<button class="card" class:open={piece?.id === a.id} onclick={() => openPiece(a, 'card')} title="Open “{a.title}” beside the conversation" aria-pressed={piece?.id === a.id}>
+															<span class="cico"><Icon name={a.kind === 'drawing' ? 'image' : a.kind === 'page' ? 'system' : a.kind === 'document' ? 'compose' : 'library'} size={16} /></span>
+															<span class="cname">{a.title}</span>
+															<span class="cwhat">
+																{#if a.writing}<span class="dot"></span>Writing…{:else}{pieceWhat(a)}{#if a.version > 1}, version {a.version}{/if}{#if a.kind === 'code' && a.lang}, {a.lines} lines{/if}{/if}
+															</span>
+															<span class="copen">Open</span>
+														</button>
+													{/if}
+												{/if}
+											{/each}
+										</div>
 									{/if}
 									{#if message.state === 'failed'}
 										<ErrorLine error={message.error} lead="No answer." onretry={message === last && !chat.busy ? () => chat.retry() : undefined} />
@@ -701,6 +812,18 @@
 							<button type="button" class="to pick" class:num={flags.techDetails} onclick={() => setDraft('/model ')} disabled={models.length < 2} title={models.length > 1 ? 'Pick the chat model' : 'The chat model that answers'}>
 								{#if flags.techDetails}→ {current.name}{build ? ` · ${variantName(build.id)}` : ''}{:else}{nameOf(current, flags)}{version ? ` · ${version}` : ''}{/if}
 							</button>
+							{#if agents.support === 'yes'}
+								<select class="agent" value={chat.agentId} onchange={pickAgent} disabled={chat.busy || opening} aria-label="Agent for this chat" title={chat.agent ? `This chat runs as ${chat.agent.name}` : 'Pick an agent for this chat: a saved instruction for the chat model'}>
+									<option value="">Default</option>
+									{#each agents.list as a (a.id)}
+										<option value={a.id}>{a.name}</option>
+									{/each}
+									{#if chat.agentId && !chat.agent}<option value={chat.agentId}>Deleted agent</option>{/if}
+									<hr />
+									<option value="+new">New agent…</option>
+									<option value="+all">All agents…</option>
+								</select>
+							{/if}
 						{/if}
 						<span class="grow"></span>
 						{#if app.listenPackage}
@@ -727,6 +850,10 @@
 			</div>
 		</form>
 	</div>
+
+	{#if piece}
+		<ArtifactPanel artifact={piece} versions={pieceVersions} onpick={pickPiece} onclose={closePiece} document={documentBody} />
+	{/if}
 
 	{#if showPane}
 		<aside class="pane scroll" aria-label="Chats{flags.paneFigures ? ', this chat and today' : ''}">
@@ -2180,5 +2307,128 @@
 	.chat .head :global(input) {
 		font-family: var(--rb-text);
 		letter-spacing: 0;
+	}
+
+	/* --- artifacts: a card in the answer, and the panel beside the conversation --- */
+	.chat {
+		position: relative;
+	}
+
+	.chat.beside {
+		grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+	}
+
+	@media (max-width: 1000px) {
+		.chat.beside {
+			grid-template-columns: minmax(0, 1fr);
+		}
+	}
+
+	.answer {
+		display: grid;
+		gap: 10px;
+		min-width: 0;
+	}
+
+	.card {
+		display: grid;
+		grid-template-columns: 36px minmax(0, 1fr) auto;
+		grid-template-rows: auto auto;
+		column-gap: 12px;
+		align-items: center;
+		width: min(420px, 100%);
+		padding: 10px 14px 10px 10px;
+		border: 1px solid var(--line);
+		border-radius: 12px;
+		background: var(--bg);
+		text-align: left;
+		transition:
+			background-color var(--quick),
+			border-color var(--quick);
+	}
+
+	.card:hover {
+		background: var(--hover);
+	}
+
+	.card.open {
+		border-color: var(--accent);
+	}
+
+	.cico {
+		grid-row: 1 / span 2;
+		display: grid;
+		place-items: center;
+		width: 36px;
+		height: 36px;
+		border-radius: 8px;
+		background: var(--well);
+		color: var(--muted);
+	}
+
+	.cname {
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		font: 600 14px/1.35 var(--rb-text);
+	}
+
+	.cwhat {
+		grid-column: 2;
+		grid-row: 2;
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		overflow: hidden;
+		white-space: nowrap;
+		font-size: 12.5px;
+		line-height: 1.35;
+		color: var(--faint);
+	}
+
+	.cwhat .dot {
+		flex: none;
+		width: 6px;
+		height: 6px;
+		background: var(--accent);
+		animation: blink 0.9s steps(2, jump-none) infinite;
+	}
+
+	.copen {
+		grid-column: 3;
+		grid-row: 1 / span 2;
+		font-size: 13px;
+		font-weight: 500;
+		color: var(--muted);
+	}
+
+	.card:hover .copen {
+		color: var(--ink);
+	}
+
+	/* The agent for this chat: as quiet as the model name next to it. */
+	.agent {
+		flex: 0 1 auto;
+		min-width: 0;
+		max-width: 180px;
+		height: 24px;
+		padding: 0 6px;
+		border: 0;
+		border-radius: 6px;
+		background: none;
+		appearance: none;
+		-webkit-appearance: none;
+		font-size: 12.5px;
+		color: var(--faint);
+		text-overflow: ellipsis;
+	}
+
+	.agent:hover:not(:disabled) {
+		background: var(--hover);
+		color: var(--ink);
+	}
+
+	.agent:disabled {
+		opacity: 0.6;
 	}
 </style>

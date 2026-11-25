@@ -1,4 +1,7 @@
+import { agentPrompt, allowedTools, type Agent, type ToolName } from './agents';
+import { agents } from './agents.svelte';
 import * as api from './api';
+import { artifactsPrompt, asksForPiece } from './artifacts';
 import { ux } from './experience.svelte';
 import { installedVariant } from './format';
 import { guide } from './guide.svelte';
@@ -160,6 +163,8 @@ export interface Conversation {
 	loaded: boolean;
 	/** Set when reading it from the service failed. */
 	problem?: string;
+	/** The agent this chat runs as (see `agents.ts`); none for the plain chat model. */
+	agentId?: string;
 }
 
 /** What is stored with each chat (`data` in `PUT /v1/chats/{id}`). Pictures are ids, not pixels. */
@@ -167,6 +172,8 @@ interface Stored {
 	v: 1;
 	startedAt: number;
 	messages: Message[];
+	/** The id of the agent the chat used, when it used one. */
+	agentId?: string;
 }
 
 /** What the engine is doing for the app right now, for the bay. */
@@ -226,14 +233,13 @@ const videoTool = {
 	}
 };
 
-type ToolName = 'generate_image' | 'read_aloud' | 'generate_video';
-
 /** What the chat model is told about the tools it has on this turn, and which one this message reads like. */
 function toolsPrompt(names: ToolName[], hint: ToolName | null): string {
 	const lines = ['You have these tools; pick by what the user asks for, and answer in text when none fits.'];
 	if (names.includes('generate_image')) lines.push('generate_image: only for a still picture, drawing, photo, illustration or logo.');
 	if (names.includes('read_aloud')) lines.push('read_aloud: only for sound: audio, speech, a voice, narration, saying or reading something out. Never use generate_image for sound.');
 	if (names.includes('generate_video')) lines.push('generate_video: only for a video, clip or animation. Never use generate_image for a video.');
+	lines.push('A web page, a document, a diagram, code or an SVG is text you write yourself in a code block: never call a tool for those.');
 	lines.push('After a tool returns, its result is already in front of the user: reply with one short sentence and do not describe or link it.');
 	if (hint && names.includes(hint)) lines.push(`The latest message reads like a request for ${hint === 'read_aloud' ? 'sound' : hint === 'generate_video' ? 'a video' : 'a picture'}: use ${hint}.`);
 	return lines.join(' ');
@@ -351,6 +357,28 @@ class ChatState {
 
 	active = $derived(this.conversations.find((c) => c.id === this.activeId) ?? null);
 
+	/** The agent picked for a chat that has not started yet. */
+	#nextAgent = $state('');
+	/** The id of the agent this chat runs as; '' is the plain chat model. */
+	agentId = $derived(this.active ? (this.active.agentId ?? '') : this.#nextAgent);
+	/** That agent, or null: none picked, or it was deleted since. */
+	agent = $derived(agents.byId(this.agentId));
+
+	/** Picks the agent for this chat ('' for none). `from`: picker, sheet or new (just made). */
+	setAgent(id: string, from: string) {
+		if (this.busy || id === this.agentId) return;
+		const conversation = this.active;
+		if (!conversation) {
+			this.#nextAgent = id;
+		} else {
+			if (!conversation.loaded) return;
+			conversation.agentId = id || undefined;
+			this.saveSoon(conversation, 0);
+		}
+		// The id only: never the name or the instruction.
+		if (id) app.track('agent_used', { agent: id, from });
+	}
+
 	#abort: AbortController | null = null;
 
 	/** Every model the service has in memory, the one used last at the end. */
@@ -423,6 +451,8 @@ class ChatState {
 
 	newChat() {
 		this.stop();
+		// A new chat starts as the plain chat model; one that is still empty keeps what was picked for it.
+		if (this.activeId) this.#nextAgent = '';
 		this.activeId = '';
 		this.focusRequest++;
 	}
@@ -456,6 +486,7 @@ class ChatState {
 			return;
 		}
 		this.persist = 'yes';
+		void agents.load();
 		for (const row of rows) {
 			if (this.#trash.has(row.id)) continue;
 			const known = this.conversations.find((c) => c.id === row.id);
@@ -487,6 +518,7 @@ class ChatState {
 			}
 			conversation.messages = messages;
 			conversation.startedAt = data?.startedAt ?? conversation.startedAt;
+			conversation.agentId = typeof data?.agentId === 'string' && data.agentId ? data.agentId : undefined;
 			conversation.loaded = true;
 			// A clip may still be on its way: the service makes it whether or not the app is watching.
 			for (const m of conversation.messages) if (m.video?.state === 'waiting') this.#follow(conversation, m.video);
@@ -520,7 +552,7 @@ class ChatState {
 		if (!conversation.loaded || this.#trash.has(conversation.id)) return;
 		// Pixels stay out of the saved chat: a picture is kept as the id of the file the service saved.
 		const messages = $state.snapshot(conversation.messages).map((m) => (m.image ? { ...m, image: { ...m.image, base64: undefined } } : m));
-		const data: Stored = { v: 1, startedAt: conversation.startedAt, messages };
+		const data: Stored = { v: 1, startedAt: conversation.startedAt, messages, ...(conversation.agentId ? { agentId: conversation.agentId } : {}) };
 		try {
 			await api.saveChat(conversation.id, conversation.title, data);
 			this.persist = 'yes';
@@ -651,7 +683,8 @@ class ChatState {
 		guide.count('asked');
 		// No image model yet and this reads like a request for a picture: offer the install
 		// here, in place, instead of letting the chat model say it cannot draw.
-		if (!app.imagePackage && app.imageOffer && asksForImage(prompt)) {
+		const agent = agents.byId(conversation.agentId);
+		if (!app.imagePackage && app.imageOffer && asksForImage(prompt) && (!agent || agent.tools.includes('generate_image'))) {
 			conversation.messages.push({ id: nextId++, role: 'offer', content: '', offer: { prompt, size: 'square' } });
 			this.saveSoon(conversation);
 			return;
@@ -697,7 +730,8 @@ class ChatState {
 		// A saved chat whose messages are not read yet takes nothing: saving it would lose them.
 		if (this.activeId) return this.active?.loaded ? this.active : null;
 		const now = Date.now();
-		const conversation: Conversation = { id: newChatId(), title: titleOf(prompt) || 'Untitled chat', messages: [], startedAt: now, updatedAt: now, loaded: true };
+		const conversation: Conversation = { id: newChatId(), title: titleOf(prompt) || 'Untitled chat', messages: [], startedAt: now, updatedAt: now, loaded: true, agentId: this.#nextAgent || undefined };
+		this.#nextAgent = '';
 		this.conversations.unshift(conversation);
 		this.activeId = conversation.id;
 		app.track('chat_started', { package: this.mode === 'image' ? app.imagePackage?.id : this.model, mode: this.mode });
@@ -736,11 +770,16 @@ class ChatState {
 	 * generate_image tool call with its result, whether the model asked for it or the person
 	 * used Image mode, so the model always knows what is on screen and how it got there.
 	 */
-	#history(conversation: Conversation, tools: ToolName[]) {
+	#history(conversation: Conversation, tools: ToolName[], agent: Agent | null) {
 		const withTools = tools.length > 0;
 		const out: Record<string, unknown>[] = [];
 		const last = conversation.messages.findLast((m) => m.role === 'user')?.content ?? '';
-		out.push({ role: 'system', content: withTools ? `${identityPrompt} ${toolsPrompt(tools, plainlyAsksFor(last))}` : identityPrompt });
+		// Who it is, then the agent's instruction when the chat runs as one, then how to write things to keep, then the tools.
+		const system = [identityPrompt];
+		if (agent) system.push(agentPrompt(agent));
+		system.push(artifactsPrompt);
+		if (withTools) system.push(toolsPrompt(tools, plainlyAsksFor(last)));
+		out.push({ role: 'system', content: system.join(' ') });
 		const answered = new Set<string>();
 		const result = (m: Message): string => {
 			if (m.role === 'offer') return 'No image model is installed. The user was offered the install.';
@@ -783,12 +822,19 @@ class ChatState {
 		const pkg = app.chatPackages.find((p) => p.id === this.model);
 		if (!pkg) return;
 		// The model may ask for an image when one can be made here, or at least installed.
-		const tools: ToolName[] = [];
+		const available: ToolName[] = [];
 		if (allowTools) {
-			if (app.imagePackage ?? app.imageOffer) tools.push('generate_image');
-			if (app.voicePackage) tools.push('read_aloud');
-			if (app.videoPackage) tools.push('generate_video');
+			if (app.imagePackage ?? app.imageOffer) available.push('generate_image');
+			if (app.voicePackage) available.push('read_aloud');
+			if (app.videoPackage) available.push('generate_video');
 		}
+		// A chat that runs as an agent is offered only what that agent may use.
+		const agent = agents.byId(conversation.agentId);
+		const asked = conversation.messages.findLast((m) => m.role === 'user')?.content ?? '';
+		// A page, a diagram or a document is written, not made by a tool: on a turn that asks
+		// for one and does not plainly ask for sound or a video, no tool is offered at all ("a fox as SVG" is written too).
+		const wants = plainlyAsksFor(asked);
+		const tools = asksForPiece(asked) && wants !== 'read_aloud' && wants !== 'generate_video' ? [] : allowedTools(agent, available);
 
 		for (let round = 0; round < 3; round++) {
 			conversation.messages.push({
@@ -809,7 +855,7 @@ class ChatState {
 				this.engine = null;
 				this.#switchTip(pkg);
 			}
-			const calls = await this.#stream(pkg, reply, this.#history(conversation, tools), tools, signal);
+			const calls = await this.#stream(pkg, reply, this.#history(conversation, tools, agent), tools, signal);
 			if (reply.state === 'done' && reply.content) {
 				const text = reply.content.replace(/[#*_`>|]/g, '').replace(/\s+/g, ' ').trim();
 				this.announce = `${nameOf(pkg, ux.flags)} answered: ${text.length > 600 ? `${text.slice(0, 600)}…` : text}`;

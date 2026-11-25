@@ -8,7 +8,7 @@ existing clients work against your own machine.
 
 `rigbrewd` listens on `127.0.0.1` only, on a random port, and writes the port and a random token to
 `daemon.json` in the data folder (`~/Library/Application Support/Rigbrew` on macOS) with mode `0600`.
-Every request needs `Authorization: Bearer <token>`.
+Every request needs `Authorization: Bearer <token>` (all but `/v1/artifacts/frame`, see below).
 
 ```sh
 D="$HOME/Library/Application Support/Rigbrew/daemon.json"
@@ -45,6 +45,8 @@ Browsers are refused unless the request comes from the app's own origin.
 | `POST /v1/studio/projects/{id}/storyboard` | `{idea, shots}`: the chat model writes that many shot descriptions. Nothing is saved. |
 | `GET /v1/studio/projects/{id}/clips/{shot}.webm` | A made shot. |
 | `GET/DELETE /v1/chats`, `GET/PUT/DELETE /v1/chats/{id}` | Saved conversations. `PUT {title, data}`; `data` is the app's own JSON, 8 MB at most. |
+| `GET/PUT/DELETE /v1/agents`, `GET/PUT/DELETE /v1/agents/{id}` | Agents the person made, kept in `agents.json` in the data folder. `PUT /v1/agents/{id}` takes `{name, instruction, tools, starter}`: a name of at most 60 characters, an instruction of at most 4000, `tools` from `generate_image`, `read_aloud` and `generate_video`, and an optional first message of at most 300. The id is 1 to 40 of `a-z`, `0-9` and `-`. `PUT /v1/agents` takes `{agents: [...]}` and replaces the list. |
+| `GET /v1/artifacts/frame` | The empty page the app shows a chat artifact in. It allows inline styles and scripts and nothing from anywhere else, holds no data, and is the one address that needs no token. |
 | `GET /v1/usage` | Totals for today, the last 7 days and all time, disk used per package, and what is waiting to be sent. |
 | `GET /v1/activity?days=365`, `GET /v1/activity/recent` | Day-by-day activity and a readable list of recent actions (the profile page). |
 | `GET/POST/DELETE /v1/consent` | The consent state; accept the current version; withdraw. |
