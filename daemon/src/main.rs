@@ -27,7 +27,8 @@
 //!   GET    /v1/activity?days=365          per-day activity, most used packages, totals (for the profile page)
 //!   GET    /v1/activity/recent?limit=50   recent activity in words, newest first
 //!   GET    /v1/chats                      saved chats, newest first; DELETE removes them all
-//!   GET    /v1/chats/{id}                 one chat; PUT {title, data} saves it (8 MB at most); DELETE removes it
+//!   GET    /v1/chats/{id}                 one chat; PUT {title, title_by?, data} saves it (8 MB at most); DELETE removes it
+//!   POST   /v1/title                      {text, answer?, model?, load?}: a name for a conversation, see `title.rs`
 //!   GET    /v1/agents                     agents the person made; PUT {agents: [...]} replaces the list; DELETE removes them all
 //!   GET    /v1/agents/{id}                one agent; PUT {name, instruction, tools, starter} saves it; DELETE removes it
 //!   GET    /v1/artifacts/frame            the empty, locked-down page a chat artifact is shown in (no token: it holds nothing)
@@ -73,6 +74,7 @@ mod connectors;
 mod library;
 mod speech;
 mod studio;
+mod title;
 mod video;
 
 use std::collections::HashMap;
@@ -1366,7 +1368,8 @@ async fn main() {
         .route("/v1/videos/jobs/{id}", get(video::job).delete(video::cancel))
         .route("/v1/videos/files/{name}", get(video::file_get).delete(video::file_delete))
         .route("/v1/agent/tasks", get(agent::tasks).post(agent::task_create))
-        .route("/v1/agent/tasks/{id}", get(agent::task_get).delete(agent::task_delete))
+        .route("/v1/title", post(title::post))
+        .route("/v1/agent/tasks/{id}", get(agent::task_get).put(agent::task_rename).delete(agent::task_delete))
         .route("/v1/agent/tasks/{id}/approve", post(agent::task_approve))
         .route("/v1/agent/tasks/{id}/message", post(agent::task_message))
         .route("/v1/agent/tasks/{id}/undo", post(agent::task_undo))
