@@ -4,7 +4,9 @@
 	import type { StudioListing, StudioShot, StudioView } from '#lib/api.ts';
 	import { videoLengthsOf, videoSizesOf, type SizeName } from '#lib/chat.svelte.ts';
 	import { plain } from '#lib/errors.ts';
+	import { bytes as bytesOf } from '#lib/format.ts';
 	import { app } from '#lib/state.svelte.ts';
+	import { isMac } from '#lib/words.ts';
 	import { filmPlan, filmWork, hasClip, remadeByMove, reorder, roughly, shotSeconds } from '#lib/studio.ts';
 	import Icon from '#lib/components/Icon.svelte';
 	import StudioPlayer from '#lib/components/StudioPlayer.svelte';
@@ -315,6 +317,7 @@
 				sound_once: Boolean(project.sound_once),
 				fade_in: Boolean(project.fade_in),
 				fade_out: Boolean(project.fade_out),
+				export: project.export ?? {},
 				shots: project.shots.map((s) => ({
 					id: s.id,
 					prompt: s.prompt,
@@ -406,6 +409,22 @@
 		}
 	}
 
+	// How the film is written to its file: how large, how good, under which name.
+	const [filmWidth, filmHeight] = $derived((project?.size ?? '640x384').split('x').map(Number));
+	function setExport(change: api.StudioExportOptions) {
+		if (!project) return;
+		project.export = { ...project.export, ...change };
+		saveSoon();
+	}
+	async function reveal() {
+		if (!project) return;
+		try {
+			await api.studioReveal(project.id);
+		} catch (e) {
+			problem = say(e);
+		}
+	}
+
 	// The voice reads a text, and the reading becomes the film's sound file.
 	let narration = $state('');
 	let narrating = $state(false);
@@ -435,7 +454,7 @@
 		try {
 			await saveNow();
 			await api.studioExport(project.id);
-			app.track('studio_export_clicked', { shots: plan.parts.length, sound: Boolean(project.sound?.trim()) });
+			app.track('studio_export_clicked', { shots: plan.parts.length, sound: Boolean(project.sound?.trim()), scale: project.export?.scale === 2 ? 2 : 1, quality: project.export?.quality || 'balanced' });
 			view = await api.studioRead(project.id);
 		} catch (e) {
 			problem = say(e);
@@ -575,7 +594,10 @@
 			{#if exported?.state === 'working'}
 				<p class="progress" role="status"><span class="dot"></span>Joining {exported.shots} {exported.shots === 1 ? 'shot' : 'shots'} into one file.</p>
 			{:else if exported?.state === 'done' && exported.file}
-				<p class="progress selectable" role="status">The film is saved: {tilde(exported.file)}</p>
+				<p class="progress" role="status">
+					<span class="selectable saved">The film is saved{exported.seconds ? ` (${clock(exported.seconds)}${exported.bytes ? `, ${bytesOf(exported.bytes)}` : ''})` : ''}: {tilde(exported.file)}</span>
+					<button class="btn" onclick={reveal}>{isMac ? 'Show in Finder' : 'Show in folder'}</button>
+				</p>
 			{:else if exported?.state === 'failed'}
 				<p class="problem selectable" role="alert">The film could not be exported. {exported.error ?? ''}</p>
 			{:else if project.auto_export && (view?.rendering || todo > 0)}
@@ -646,19 +668,19 @@
 								{#if shot.id && shot.prompt.trim() && video}<button class="tool" onclick={() => make([shot.id])} disabled={shot.state === 'making' || shot.state === 'queued'} title={shot.state === 'done' ? 'Makes this shot again. The clip you have now is kept as a take.' : 'Make this shot'}>{shot.state === 'done' ? 'Try again' : 'Make'}</button>{/if}
 								<button class="tool" onclick={() => removeShot(i)} title="Remove this shot" aria-label="Remove shot {i + 1}"><Icon name="trash" size={13} /></button>
 							</p>
-							<p class="row film">
+							<p class="row mix">
 								{#if i > 0 && view?.can_continue}
 									<label class="trim" title="This shot starts from the last picture of the shot before it, so the two join without a cut. It takes longer to make."><input type="checkbox" bind:checked={shot.continues} onchange={saveSoon} /> Continue the shot before</label>
 								{/if}
 								{#if i > 0 && !shot.continues}
-									<label class="trim" title="How the film goes from the shot before into this one. A dissolve lays the two over each other for half a second. A fade through black takes the same half second.">
+									<span class="trim" title="How the film goes from the shot before into this one. A dissolve lays the two over each other for half a second. A fade through black takes the same half second.">
 										Starts with
 										<select value={shot.join ?? 'cut'} onchange={(e) => ((shot.join = e.currentTarget.value as StudioShot['join']), saveSoon())} aria-label="How the film goes into shot {i + 1}">
 											<option value="cut">a cut</option>
 											<option value="dissolve">a dissolve</option>
 											<option value="black">a fade through black</option>
 										</select>
-									</label>
+									</span>
 								{/if}
 								<label class="trim" title="How loud this shot's own sound is in the film">
 									Sound
@@ -712,7 +734,6 @@
 			</ol>
 			<p class="row end">
 				<button class="btn" onclick={() => addShot()}>Add a shot</button>
-				<label class="trim" title="When the last shot is made, the film is joined into one MP4 file in its folder, also with this screen closed."><input type="checkbox" bind:checked={project.auto_export} onchange={saveSoon} /> Export when the last shot is made</label>
 			</p>
 
 			<div class="panel">
@@ -742,6 +763,35 @@
 					<label class="trim"><input type="checkbox" bind:checked={project.fade_in} onchange={saveSoon} /> Fade in at the start</label>
 					<label class="trim"><input type="checkbox" bind:checked={project.fade_out} onchange={saveSoon} /> Fade out at the end</label>
 					<span class="note">Half a second each, pictures and sound.</span>
+				</p>
+			</div>
+			<div class="panel">
+				<h2 class="sub">The exported file</h2>
+				<div class="row">
+					<span class="label">Size</span>
+					<span class="seg" role="radiogroup" aria-label="Size of the exported film">
+						<button type="button" role="radio" aria-checked={project.export?.scale !== 2} onclick={() => setExport({ scale: 0 })}>As made, {filmWidth} × {filmHeight}</button>
+						<button type="button" role="radio" aria-checked={project.export?.scale === 2} onclick={() => setExport({ scale: 2 })}>Twice as large, {filmWidth * 2} × {filmHeight * 2}</button>
+					</span>
+					<span class="label">Quality</span>
+					<span class="seg" role="radiogroup" aria-label="Quality of the exported film">
+						{#each [['small', 'Smaller file'], ['', 'Balanced'], ['best', 'Best']] as [value, label] (value)}
+							<button type="button" role="radio" aria-checked={(project.export?.quality ?? '') === value} onclick={() => setExport({ quality: value })}>{label}</button>
+						{/each}
+					</span>
+				</div>
+				{#if project.export?.scale === 2}<p class="note">Twice as large only enlarges the picture. It does not add detail, and the file is about two and a half times the size.</p>{/if}
+				<p class="row">
+					<label class="trim">
+						File name
+						<input class="fname-in" value={project.export?.name ?? ''} oninput={(e) => setExport({ name: e.currentTarget.value })} placeholder={project.name} aria-label="Name of the exported file" />
+						.mp4
+					</label>
+					<span class="note">24 pictures a second. It goes into the film's folder.</span>
+				</p>
+				<p class="row">
+					<button class="btn" onclick={exportFilm} disabled={plan.parts.length === 0 || exported?.state === 'working'}>{exported?.state === 'working' ? 'Exporting…' : 'Export the film'}</button>
+					<label class="trim" title="When the last shot is made, the film is joined into one MP4 file in its folder, also with this screen closed."><input type="checkbox" bind:checked={project.auto_export} onchange={saveSoon} /> Export by itself when the last shot is made</label>
 				</p>
 			</div>
 			{#if video?.credit}<p class="note credit">{video.credit}</p>{/if}
@@ -1269,13 +1319,21 @@
 		border-radius: 14px;
 	}
 
-	.film {
+	.mix {
 		gap: 8px 16px;
 	}
 
+	.saved {
+		flex: 1;
+		min-width: 0;
+		overflow-wrap: anywhere;
+	}
+
+	.trim .fname-in {
+		width: 220px;
+	}
+
 	.trim select {
-		flex: none;
-		width: 158px;
 		height: 26px;
 	}
 

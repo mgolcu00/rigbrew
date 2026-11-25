@@ -5,14 +5,17 @@
 //!                                                 without one, a new folder named after the film under Movies/Rigbrew)
 //!   GET    /v1/studio/projects/{id}               the film: its shots and what is being made
 //!   PUT    /v1/studio/projects/{id}               {"name", "size", "auto_export", "sound", "sound_volume", "sound_once",
-//!                                                 "fade_in", "fade_out", "shots": [{"id"?, "prompt", "frames",
+//!                                                 "fade_in", "fade_out", "export": {"scale", "quality", "name"},
+//!                                                 "shots": [{"id"?, "prompt", "frames",
 //!                                                 "continues", "trim_start", "trim_end", "join", "volume", "mute"}]}
 //!   DELETE /v1/studio/projects/{id}               forget the film (its folder stays)
 //!   POST   /v1/studio/projects/{id}/render        {"shots": [id]?, "model"?}: make the listed shots, or every shot not made yet
 //!   DELETE /v1/studio/projects/{id}/render        stop: the shot being made is stopped, the rest leave the queue
 //!   POST   /v1/studio/projects/{id}/storyboard    {"idea", "shots"}: the chat model writes the shots in scenes (not saved)
 //!   POST   /v1/studio/projects/{id}/export      join the made shots into `<folder>/<name>.mp4`, with the film's
-//!                                               sound file under them ({"music"?, "music_volume"?} for another)
+//!                                               sound file under them ({"music"?, "music_volume"?} for another;
+//!                                               {"scale"?, "quality"?, "name"?} instead of the film's own)
+//!   POST   /v1/studio/projects/{id}/reveal      show the exported file in the system's file manager
 //!   GET    /v1/studio/projects/{id}/export      where the export is: {"state", "file", "error"}
 //!   GET    /v1/studio/projects/{id}/sound       the film's sound file, to play under it in the app
 //!   POST   /v1/studio/projects/{id}/narration   {"text"}: the voice package reads it; the WAV is saved in the
@@ -269,7 +272,57 @@ pub struct Project {
     pub fade_in: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub fade_out: bool,
+    /// How the film is written to its MP4.
+    #[serde(default, skip_serializing_if = "ExportOptions::is_usual")]
+    pub export: ExportOptions,
     pub updated_ms: i64,
+}
+
+/// How a film is written to its MP4: how large, how good, under which name.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ExportOptions {
+    /// 2 enlarges the picture to twice its width and height (it adds no detail); otherwise as made.
+    #[serde(default)]
+    pub scale: u32,
+    /// "small", "balanced" or "best": how many bits a second the file may use.
+    #[serde(default)]
+    pub quality: String,
+    /// The file's name without its ending; empty for the film's name.
+    #[serde(default)]
+    pub name: String,
+}
+
+impl ExportOptions {
+    fn is_usual(&self) -> bool {
+        *self == ExportOptions::default()
+    }
+
+    /// The same options with only the values that mean something.
+    fn tidy(self) -> ExportOptions {
+        ExportOptions {
+            scale: if self.scale == 2 { 2 } else { 0 },
+            quality: match self.quality.as_str() {
+                "small" | "best" => self.quality,
+                _ => String::new(),
+            },
+            name: if self.name.trim().is_empty() { String::new() } else { file_stem(&self.name) },
+        }
+    }
+
+    /// Bits a second for the pictures and for the sound of a film of this size.
+    /// Balanced is 8 Mbit/s at 640x384; a larger shape gets as much more as it has more points.
+    /// An enlarged picture has four times the points and no more detail: it gets two and a half times.
+    fn bitrates(&self, size: &str) -> (u32, u32) {
+        let (w, h) = size.split_once('x').and_then(|(w, h)| Some((w.parse::<u64>().ok()?, h.parse::<u64>().ok()?))).unwrap_or((640, 384));
+        let points = w * h * if self.scale == 2 { 5 } else { 2 } / 2;
+        let (per_million, sound) = match self.quality.as_str() {
+            "small" => (14_000_000u64, 128_000),
+            "best" => (64_000_000, 256_000),
+            _ => (32_500_000, 192_000),
+        };
+        let video = (points * per_million / 1_000_000).clamp(1_500_000, 60_000_000);
+        ((video / 100_000 * 100_000) as u32, sound)
+    }
 }
 
 /// What is waiting to be made and what is being made now. One film renders at a time.
@@ -515,6 +568,7 @@ async fn create(State(app): State<Shared>, Json(body): Json<NewProject>) -> Resp
         sound_once: false,
         fade_in: false,
         fade_out: false,
+        export: ExportOptions::default(),
         updated_ms: 0,
     });
     project.id = id.clone();
@@ -583,6 +637,8 @@ struct Save {
     fade_in: Option<bool>,
     #[serde(default)]
     fade_out: Option<bool>,
+    #[serde(default)]
+    export: Option<ExportOptions>,
 }
 
 /// The new list of shots: a shot that keeps its id and its description keeps its clip; one whose
@@ -672,6 +728,9 @@ async fn save(State(app): State<Shared>, Path(id): Path<String>, Json(body): Jso
     p.sound_once = body.sound_once.unwrap_or(p.sound_once);
     p.fade_in = body.fade_in.unwrap_or(p.fade_in);
     p.fade_out = body.fade_out.unwrap_or(p.fade_out);
+    if let Some(options) = body.export {
+        p.export = options.tidy();
+    }
     if let Err(e) = store(&mut p) {
         return fail(StatusCode::INTERNAL_SERVER_ERROR, format!("the film could not be saved: {e}"));
     }
@@ -1244,6 +1303,19 @@ struct Export {
     /// 0 to 1; how loud the music is next to the shots' sound. Default 0.5.
     #[serde(default)]
     music_volume: Option<f32>,
+    /// For this export only, instead of the film's own options.
+    #[serde(default)]
+    scale: Option<u32>,
+    #[serde(default)]
+    quality: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+}
+
+/// Where a film is exported to: its folder, under the name chosen for the file or the film's own.
+fn export_path(p: &Project, options: &ExportOptions) -> PathBuf {
+    let name = if options.name.is_empty() { file_stem(&p.name) } else { file_stem(&options.name) };
+    FsPath::new(&p.folder).join(format!("{name}.mp4"))
 }
 
 /// A file name made of the film's name: letters, digits, spaces, dashes.
@@ -1358,15 +1430,22 @@ async fn begin_export(app: &Shared, mut p: Project, body: Export) -> Result<usiz
     let simple = export::plain(&pieces);
     let film = if simple { export::as_it_is(export::film_frames(&pieces)) } else { export::joined(&pieces) };
     let volume = body.music_volume.unwrap_or(p.sound_volume).clamp(0.0, 1.0);
+    let options = ExportOptions {
+        scale: body.scale.unwrap_or(p.export.scale),
+        quality: body.quality.clone().unwrap_or_else(|| p.export.quality.clone()),
+        name: body.name.clone().unwrap_or_else(|| p.export.name.clone()),
+    }
+    .tidy();
+    let (video_bits, sound_bits) = options.bitrates(&p.size);
     let finish = export::Finish {
         fade_in: p.fade_in,
         fade_out: p.fade_out,
-        scale: 1,
+        scale: options.scale,
         music: music.as_ref().map(|_| (if simple { 1 } else { count }, volume)),
     };
     let graph = export::finished(film, &finish);
     let folder = PathBuf::from(&p.folder);
-    let out = folder.join(format!("{}.mp4", file_stem(&p.name)));
+    let out = export_path(&p, &options);
     let list_path = folder.join(".rigbrew-export.txt");
     let graph_path = folder.join(".rigbrew-export-graph.txt");
     let written = if simple { std::fs::write(&list_path, concat_list(&p, &shots)) } else { Ok(()) }.and_then(|()| {
@@ -1415,7 +1494,7 @@ async fn begin_export(app: &Shared, mut p: Project, body: Export) -> Result<usiz
             "-c:v",
             "h264_videotoolbox",
             "-b:v",
-            "8M",
+            &video_bits.to_string(),
             "-pix_fmt",
             "yuv420p",
             "-r",
@@ -1423,7 +1502,7 @@ async fn begin_export(app: &Shared, mut p: Project, body: Export) -> Result<usiz
             "-c:a",
             "aac",
             "-b:a",
-            "192k",
+            &sound_bits.to_string(),
             "-movflags",
             "+faststart",
             "-f",
@@ -1450,7 +1529,8 @@ async fn begin_export(app: &Shared, mut p: Project, body: Export) -> Result<usiz
                 app2.record(
                     "studio_exported",
                     json!({"shots": count, "seconds": started.elapsed().as_secs_f32(), "bytes": bytes, "music": music.is_some(),
-                           "film_seconds": graph.frames as f32 / 24.0, "dissolves": joins.0, "through_black": joins.1, "plain": simple}),
+                           "film_seconds": graph.frames as f32 / 24.0, "dissolves": joins.0, "through_black": joins.1, "plain": simple,
+                           "scale": options.scale.max(1), "quality": if options.quality.is_empty() { "balanced" } else { options.quality.as_str() }}),
                 );
                 set_export(
                     &id,
@@ -1465,6 +1545,48 @@ async fn begin_export(app: &Shared, mut p: Project, body: Export) -> Result<usiz
         }
     });
     Ok(count)
+}
+
+/// Shows a file in the system's file manager: selected in its folder where the system can do
+/// that, else the folder it is in.
+async fn show_in_folder(path: &FsPath) -> bool {
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut c = tokio::process::Command::new("open");
+        c.arg("-R").arg(path);
+        c
+    };
+    #[cfg(windows)]
+    let mut command = {
+        let mut c = tokio::process::Command::new("explorer");
+        c.arg(format!("/select,{}", path.display()));
+        c
+    };
+    #[cfg(not(any(target_os = "macos", windows)))]
+    let mut command = {
+        let mut c = tokio::process::Command::new("xdg-open");
+        c.arg(if path.is_dir() { path } else { path.parent().unwrap_or(path) });
+        c
+    };
+    command.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+    // Explorer answers with a failure even when it opened the folder: starting it is what counts.
+    matches!(tokio::time::timeout(Duration::from_secs(10), command.status()).await, Ok(Ok(_)))
+}
+
+/// Shows the film's exported file where the person can pick it up; its folder when there is no file yet.
+async fn reveal(State(app): State<Shared>, Path(id): Path<String>) -> Response {
+    let Some(p) = load(&app, &id) else {
+        return fail(StatusCode::NOT_FOUND, "no such film, or its folder is gone");
+    };
+    // The file the last export of this run wrote, else the one the film's options name.
+    let last = export_of(&id)["file"].as_str().map(PathBuf::from);
+    let file = last.filter(|f| f.is_file()).unwrap_or_else(|| export_path(&p, &p.export));
+    let shown = if file.is_file() { file } else { PathBuf::from(&p.folder) };
+    if show_in_folder(&shown).await {
+        Json(json!({"shown": shown.to_string_lossy()})).into_response()
+    } else {
+        fail(StatusCode::INTERNAL_SERVER_ERROR, "the folder could not be opened")
+    }
 }
 
 #[derive(Deserialize)]
@@ -1537,6 +1659,7 @@ pub fn router() -> Router<Shared> {
         .route("/v1/studio/projects/{id}/render", post(render).delete(stop))
         .route("/v1/studio/projects/{id}/storyboard", post(storyboard))
         .route("/v1/studio/projects/{id}/export", get(export_state).post(export))
+        .route("/v1/studio/projects/{id}/reveal", post(reveal))
         .route("/v1/studio/projects/{id}/sound", get(sound))
         .route("/v1/studio/projects/{id}/narration", post(narration))
         .route("/v1/studio/projects/{id}/shots/{shot}/take", post(use_take))
@@ -1682,6 +1805,7 @@ mod tests {
             sound_once: false,
             fade_in: false,
             fade_out: false,
+            export: ExportOptions::default(),
             updated_ms: 0,
         };
         let made = exported(&p);
@@ -1868,6 +1992,7 @@ mod tests {
             sound_once: false,
             fade_in: false,
             fade_out: false,
+            export: ExportOptions::default(),
             updated_ms: 0,
         };
         assert_eq!(clip_path(&p, "a1"), FsPath::new("/films/fox/clips/a1.3.webm"));
@@ -1894,6 +2019,7 @@ mod tests {
             sound_once: false,
             fade_in: false,
             fade_out: false,
+            export: ExportOptions::default(),
             updated_ms: 0,
         };
         let seen =
@@ -1906,6 +2032,45 @@ mod tests {
         assert_eq!(time_left(&p, &seen, &[], Some(("b2", 900.0))).1, 20.0);
         // A made shot that is made again counts as left, and not as missing.
         assert_eq!(time_left(&p, &[], &["a1".into()], None), (121.0 / 24.0 * 80.0 + 49.0 / 24.0 * 25.0, 121.0 / 24.0 * 25.0));
+    }
+
+    #[test]
+    fn export_options_say_how_large_how_good_and_where() {
+        let usual = ExportOptions::default();
+        assert_eq!(usual.bitrates("640x384"), (7_900_000, 192_000));
+        let small = ExportOptions { quality: "small".into(), ..usual.clone() };
+        let best = ExportOptions { quality: "best".into(), scale: 2, ..usual.clone() };
+        assert_eq!(small.bitrates("640x384"), (3_400_000, 128_000));
+        // Twice as large gets two and a half times the bits; everything stays under what players take.
+        assert_eq!(ExportOptions { scale: 2, ..usual.clone() }.bitrates("640x384"), (19_900_000, 192_000));
+        assert_eq!(best.bitrates("640x384"), (39_300_000, 256_000));
+        assert_eq!(best.bitrates("1280x1280"), (60_000_000, 256_000));
+        assert_eq!(small.bitrates("256x256"), (1_500_000, 128_000));
+        // Anything unknown is the usual; a name is made safe for a file.
+        let odd = ExportOptions { scale: 7, quality: "ultra".into(), name: "  ../Final: cut?  ".into() }.tidy();
+        assert_eq!(odd, ExportOptions { scale: 0, quality: String::new(), name: "Final cut".into() });
+        assert!(ExportOptions { scale: 1, ..usual.clone() }.tidy().is_usual());
+        let mut p = Project {
+            id: "p".into(),
+            name: "The fox: a film".into(),
+            folder: "/films/fox".into(),
+            size: "640x384".into(),
+            shots: vec![],
+            auto_export: false,
+            sound: String::new(),
+            sound_volume: 0.5,
+            sound_once: false,
+            fade_in: false,
+            fade_out: false,
+            export: ExportOptions::default(),
+            updated_ms: 0,
+        };
+        assert_eq!(export_path(&p, &p.export), FsPath::new("/films/fox/The fox a film.mp4"));
+        p.export = odd;
+        assert_eq!(export_path(&p, &p.export), FsPath::new("/films/fox/Final cut.mp4"));
+        // A film without options is stored as before.
+        p.export = ExportOptions::default();
+        assert!(!serde_json::to_string(&p).unwrap().contains("export"));
     }
 
     #[test]

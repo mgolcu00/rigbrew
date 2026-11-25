@@ -544,6 +544,8 @@ export interface StudioProject {
 	/** The film comes up from black at its start, and goes down to black at its end. */
 	fade_in?: boolean;
 	fade_out?: boolean;
+	/** How the film is written to its MP4. */
+	export?: StudioExportOptions;
 	updated_ms: number;
 }
 
@@ -584,6 +586,13 @@ export const studioList = () => json<{ projects: StudioListing[]; home?: string 
 /** Opens the film in `folder`, or starts one there. Without a folder the service makes one named after the film. */
 export const studioOpen = (folder: string, name = '') => json<StudioView>('POST', '/v1/studio/projects', { folder, name });
 export const studioRead = (id: string) => json<StudioView>('GET', `/v1/studio/projects/${enc(id)}`);
+/** `scale` 2 enlarges the picture to twice its width and height; `quality` is small, balanced or best; `name` is the file's name without its ending. */
+export interface StudioExportOptions {
+	scale?: number;
+	quality?: string;
+	name?: string;
+}
+
 export interface StudioSave {
 	name?: string;
 	size?: string;
@@ -593,6 +602,7 @@ export interface StudioSave {
 	sound_once?: boolean;
 	fade_in?: boolean;
 	fade_out?: boolean;
+	export?: StudioExportOptions;
 	shots?: { id?: string; prompt: string; frames: number; trim_start?: number; trim_end?: number; continues?: boolean; join?: string; volume?: number; mute?: boolean; seed?: number | null }[];
 }
 export const studioSave = (id: string, body: StudioSave) => json<StudioView>('PUT', `/v1/studio/projects/${enc(id)}`, body);
@@ -608,7 +618,12 @@ export interface StudioExport {
 	file?: string;
 	error?: string;
 	shots?: number;
+	bytes?: number;
+	/** Seconds of film in the file. */
+	seconds?: number;
 }
+/** Shows the exported file in the system's file manager. */
+export const studioReveal = (id: string) => json<{ shown: string }>('POST', `/v1/studio/projects/${enc(id)}/reveal`);
 export const studioExport = (id: string) => json<StudioExport>('POST', `/v1/studio/projects/${enc(id)}/export`, {});
 export const studioExportState = (id: string) => json<StudioExport>('GET', `/v1/studio/projects/${enc(id)}/export`);
 export const studioClip = async (id: string, shot: string) => (await send('GET', `/v1/studio/projects/${enc(id)}/clips/${enc(shot)}.webm`)).blob();
