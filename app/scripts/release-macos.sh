@@ -7,6 +7,8 @@
 #   APPLE_API_ISSUER         its issuer ID                        } for notarization
 #   APPLE_API_KEY_PATH       path to the AuthKey_<id>.p8 file    /
 #
+#   RIGBREW_ACCOUNT_DIR      the private account module, for the official download (optional)
+#
 # Without the three APPLE_API_* values the app is signed but not notarized (it says so).
 # With APPLE_SIGNING_IDENTITY=- it is signed ad hoc: for this Mac only.
 set -eu
@@ -18,7 +20,16 @@ if [ "$APPLE_SIGNING_IDENTITY" != "-" ] && ! security find-identity -v -p codesi
   exit 1
 fi
 export APPLE_SIGNING_IDENTITY
-pnpm release
+# The official download has accounts: RIGBREW_ACCOUNT_DIR is the private module (app-account/ in
+# the server repository). Without it the build has no account at all, like any build from source.
+if [ -n "${RIGBREW_ACCOUNT_DIR:-}" ]; then
+  sh "$RIGBREW_ACCOUNT_DIR/link.sh" "$PWD"
+  RIGBREW_ACCOUNT=1 pnpm release --features account
+  echo "Built with accounts."
+else
+  pnpm release
+  echo "Built WITHOUT accounts: set RIGBREW_ACCOUNT_DIR for the official download."
+fi
 
 out=src-tauri/target/release/bundle
 app=$out/macos/Rigbrew.app

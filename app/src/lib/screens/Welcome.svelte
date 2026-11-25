@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import { ACCOUNTS, AccountWelcome } from '#account';
 	import { app } from '#lib/state.svelte.ts';
 	import { ux } from '#lib/experience.svelte.ts';
 	import { FAMILIES_EXPLAINED, RUNS_LATER, budgetOf, familyOf, rigFacts, size, tierOf, variantName } from '#lib/format.ts';
@@ -15,7 +16,7 @@
 	// Development only: `?welcome=scan` or `?welcome=models` opens the flow at that step, as a
 	// first launch would see it (nothing is accepted or deleted by looking).
 	const peek = import.meta.env.DEV ? new URLSearchParams(location.search).get('welcome') : null;
-	let step = $state<'consent' | 'scan' | 'packages'>(peek === 'scan' ? 'scan' : peek === 'models' ? 'packages' : 'consent');
+	let step = $state<Step>(peek === 'scan' ? 'scan' : peek === 'models' ? 'packages' : peek === 'account' && ACCOUNTS ? 'account' : 'consent');
 	// An earlier version of the text was accepted on this install: the text changed, the rest is known.
 	const again = app.consent !== null && !peek;
 	let accepting = $state(false);
@@ -38,9 +39,10 @@
 	// Chat first, then the other families Rigbrew can run today, then download-only ones.
 	const rank = (p: (typeof app.packages)[number]) => (p.modality === 'chat' ? 0 : familyOf(p).runs ? 1 : 2);
 	const runnable = $derived(app.packages.filter((p) => p.recommendation.verdict === 'run').sort((a, b) => rank(a) - rank(b)));
-	type Step = 'consent' | 'scan' | 'packages';
-	const steps: Step[] = again ? [] : ['consent', 'scan', 'packages'];
-	const stepNames = { consent: 'Terms', scan: 'This machine', packages: 'Models' };
+	// Builds with accounts ask who you are right after the terms; it can be skipped.
+	type Step = 'consent' | 'account' | 'scan' | 'packages';
+	const steps: Step[] = again ? [] : ACCOUNTS ? ['consent', 'account', 'scan', 'packages'] : ['consent', 'scan', 'packages'];
+	const stepNames = { consent: 'Terms', account: 'Account', scan: 'This machine', packages: 'Models' };
 
 	// The scan itself is instant; the reveal is paced so each reading can be seen.
 	let revealed = $state(0);
@@ -55,13 +57,21 @@
 				app.enter();
 				return;
 			}
-			step = 'scan';
-			runScan();
+			if (ACCOUNTS) {
+				step = 'account';
+				app.track('account_step_shown', {});
+			} else toScan();
 		} catch (e) {
 			problem = e instanceof Error ? e.message : String(e);
 		} finally {
 			accepting = false;
 		}
+	}
+
+	function toScan() {
+		if (step === 'account') app.track('account_step_done', {});
+		step = 'scan';
+		runScan();
 	}
 
 	let timers: ReturnType<typeof setTimeout>[] = [];
@@ -129,6 +139,10 @@
 					<button class="link" onclick={() => guide.openLegal('terms', 'consent')}>Terms of Use</button>. Rigbrew does not work without this.
 				</span>
 			</p>
+		{:else if step === 'account'}
+			<h1>Sign in, or skip for now</h1>
+			<p class="intro">An account keeps your chats and usage under one name on every computer you use, and a few models can only be downloaded with one. Chat, pictures and everything else work without it.</p>
+			<AccountWelcome ondone={toScan} />
 		{:else if step === 'scan'}
 			<h1 aria-live="polite">{scanned ? (flags.techDetails ? `${tier.label}.` : `${system.cpu.brand}: ready.`) : `Reading this ${machine}`}</h1>
 			<p class="intro">{scanned ? (flags.techDetails ? tier.line : machineLine(system)) : 'Rigbrew checks how much memory and disk space there is, to pick models that fit. Nothing is sent anywhere for this.'}</p>

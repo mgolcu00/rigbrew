@@ -7,6 +7,7 @@ import type { AccountView } from './types';
 
 export { default as AccountPanel } from './AccountPanel.svelte';
 export { default as AccountDataLine } from './AccountDataLine.svelte';
+export { default as AccountWelcome } from './AccountWelcome.svelte';
 export type { AccountUser, AccountView } from './types';
 
 /** Whether this build has accounts at all. */
