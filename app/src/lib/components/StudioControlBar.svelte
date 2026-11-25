@@ -316,6 +316,8 @@
 	}
 
 	.status {
+		flex: none;
+		overflow: hidden;
 		width: 172px;
 		display: grid;
 		gap: 3px;
@@ -409,6 +411,10 @@
 		}
 		.master {
 			width: 124px;
+		}
+		/* While something is being made its line needs the room of the zoom. */
+		.bar:has(.status) .zoom {
+			display: none;
 		}
 	}
 
