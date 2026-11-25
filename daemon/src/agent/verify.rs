@@ -128,8 +128,7 @@ pub fn claims_success(text: &str) -> bool {
 pub fn unchecked(steps: &[Step]) -> Option<&'static str> {
     let start = steps.iter().rposition(|s| matches!(s, Step::User { .. })).map_or(0, |i| i + 1);
     let request = &steps[start..];
-    let changed =
-        |s: &Step| matches!(s, Step::Tool { name, status, .. } if status == "done" && (name == "edit_file" || name == "write_file"));
+    let changed = |s: &Step| matches!(s, Step::Tool { name, status, .. } if status == "done" && (name == "edit_file" || name == "write_file" || name == "append_file"));
     let last_change = request.iter().rposition(changed)?;
     let mut ran = false;
     for step in &request[last_change + 1..] {

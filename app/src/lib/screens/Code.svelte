@@ -118,7 +118,7 @@
 		const from = task.steps.findLastIndex((s) => s.kind === 'user');
 		const files = new Map<string, Changed>();
 		for (const step of task.steps.slice(from + 1)) {
-			if (step.kind !== 'tool' || step.status !== 'done' || !step.diff || (step.name !== 'edit_file' && step.name !== 'write_file')) continue;
+			if (step.kind !== 'tool' || step.status !== 'done' || !step.diff || (step.name !== 'edit_file' && step.name !== 'write_file' && step.name !== 'append_file')) continue;
 			const path = text(step, 'path');
 			const file = files.get(path) ?? { path, plus: 0, minus: 0, created: false, diffs: [] };
 			for (const l of step.diff.split('\n')) {
@@ -157,6 +157,8 @@
 				return `${verb('Changed', 'change')} ${path}`;
 			case 'write_file':
 				return `${verb('Wrote', 'write')} ${path}`;
+			case 'append_file':
+				return `${verb('Added to', 'add to')} ${path}`;
 			case 'run_command':
 				return `${verb('Ran', 'run')} ${short(text(step, 'command'))}`;
 			case 'web_search':
@@ -434,7 +436,7 @@
 								<pre class="raw selectable">{shownArguments(asked?.kind === 'tool' ? asked.arguments.arguments : undefined)}</pre>
 								<p class="why">This tool belongs to the connector, not to Rigbrew. It works outside this folder and may reach other files, programs or the internet. Allow it only if you know what it does.</p>
 							{:else}
-								<h2>{p.tool === 'write_file' ? 'Write' : 'Change'} {p.path}?</h2>
+								<h2>{p.tool === 'write_file' ? 'Write' : p.tool === 'append_file' ? 'Add to' : 'Change'} {p.path}?</h2>
 								{#if p.diff}{@render diffView(p.diff)}{/if}
 							{/if}
 							<div class="answers">

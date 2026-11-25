@@ -53,7 +53,9 @@ const STEP_LIMIT: usize = 40;
 /// The chat engine runs with a context of 8192 tokens, and the tools, the rules and the answer
 /// need their share of it.
 const HISTORY_CHARS: usize = 12_000;
-const MAX_ANSWER_TOKENS: u32 = 2048;
+const MAX_ANSWER_TOKENS: u32 = 3072;
+/// How often one request may be told that its tool call was cut off before the task gives up.
+const MAX_CUT_OFFS: usize = 3;
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_PROMPT_CHARS: usize = 4000;
 const MAX_RUNNING: usize = 4;
@@ -327,6 +329,16 @@ fn system_prompt(folder: &Folder, mode: Mode, web: bool, skills: &[skills::Skill
     lines.join("\n")
 }
 
+/// What the model is told when its tool call did not fit in one answer.
+const CUT_OFF_HINT: &str = "Your last tool call was cut off because it was too long, so nothing was done. Do it again in smaller parts: \
+write_file with at most about 80 lines of the file, then append_file for each next part. Do not explain, just call the tool.";
+
+/// Whether an engine error says that a tool call's arguments were not complete JSON.
+fn cut_off_call(error: &str) -> bool {
+    let e = error.to_lowercase();
+    e.contains("parse tool call") || (e.contains("tool call") && e.contains("json") && e.contains("parse"))
+}
+
 fn tool(name: &str, description: &str, properties: Value, required: &[&str]) -> Value {
     json!({"type": "function", "function": {"name": name, "description": description,
         "parameters": {"type": "object", "properties": properties, "required": required}}})
@@ -365,8 +377,14 @@ fn tool_defs(mode: Mode, web: bool, with_skills: bool) -> Vec<Value> {
         ));
         out.push(tool(
             "write_file",
-            "Create a file, or replace its whole content.",
-            json!({"path": text("File to write"), "content": text("The complete new content")}),
+            "Create a file, or replace its whole content. Keep one call under about 80 lines: for a longer file write the first part here and add the rest with append_file.",
+            json!({"path": text("File to write"), "content": text("The new content, or its first part")}),
+            &["path", "content"],
+        ));
+        out.push(tool(
+            "append_file",
+            "Add text to the end of a file, to write a long file in parts of at most about 80 lines.",
+            json!({"path": text("File to add to"), "content": text("The next part")}),
             &["path", "content"],
         ));
         out.push(tool(
@@ -503,8 +521,19 @@ fn arg_usize(args: &Value, key: &str) -> Option<usize> {
     args[key].as_u64().or_else(|| args[key].as_str().and_then(|s| s.trim().parse().ok())).map(|n| n as usize)
 }
 
-const KNOWN_TOOLS: &[&str] =
-    &["list_files", "read_file", "search", "edit_file", "write_file", "run_command", "web_search", "fetch_url", "use_skill", "finish"];
+const KNOWN_TOOLS: &[&str] = &[
+    "list_files",
+    "read_file",
+    "search",
+    "edit_file",
+    "write_file",
+    "append_file",
+    "run_command",
+    "web_search",
+    "fetch_url",
+    "use_skill",
+    "finish",
+];
 
 const DENIED: &str = "The person did not allow this. Do not try it again. Go on without it, or say what you could not do.";
 const DENIED_TWICE: &str =
@@ -557,7 +586,7 @@ async fn call_tool(app: &Shared, id: &str, folder: &Folder, call: &str, name: &s
         return out;
     }
     let offered = match name {
-        "edit_file" | "write_file" | "run_command" => task.mode != Mode::ReadOnly,
+        "edit_file" | "write_file" | "append_file" | "run_command" => task.mode != Mode::ReadOnly,
         "web_search" | "fetch_url" => task.web,
         _ => KNOWN_TOOLS.contains(&name) || extra::TOOLS.contains(&name),
     };
@@ -597,11 +626,16 @@ async fn call_tool(app: &Shared, id: &str, folder: &Folder, call: &str, name: &s
             let (f, path) = (folder.clone(), arg_str(args, "path").map(str::to_string));
             done(blocking(Box::new(move || files::search(&f, &pattern, path.as_deref()))).await)
         }
-        "edit_file" | "write_file" => {
+        "edit_file" | "write_file" | "append_file" => {
             let Some(path) = arg_str(args, "path") else { return missing("path") };
             let plan = if name == "edit_file" {
                 let (Some(old), Some(new)) = (arg_str(args, "old"), arg_str(args, "new")) else { return missing("old\" and \"new") };
                 files::plan_edit(folder, path, old, new)
+            } else if name == "append_file" {
+                let Some(content) = arg_str(args, "content") else { return missing("content") };
+                // What is there now plus the new part, as one change the person can read.
+                let before = folder.existing(path).ok().and_then(|p| std::fs::read_to_string(p).ok()).unwrap_or_default();
+                files::plan_write(folder, path, &format!("{before}{content}"))
             } else {
                 let Some(content) = arg_str(args, "content") else { return missing("content") };
                 files::plan_write(folder, path, content)
@@ -688,6 +722,8 @@ async fn work(app: &Shared, id: &str) -> Ended {
     let mut budget = HISTORY_CHARS;
     // The same call with the same arguments, over and over: a small model that is stuck.
     let mut repeated: (String, usize) = (String::new(), 0);
+    // A tool call too long for one answer comes back from the engine as an error, not as a call.
+    let mut cut_offs = 0;
     loop {
         let Some(task) = agents.get(id) else { return failed("The task is gone.".into()) };
         if task.turns >= STEP_LIMIT {
@@ -721,6 +757,17 @@ async fn work(app: &Shared, id: &str) -> Ended {
             // Too much for the model's context: send less of the history, once.
             Err(e) if e.to_lowercase().contains("context") && budget > HISTORY_CHARS / 4 => {
                 budget /= 2;
+                continue;
+            }
+            // The model wrote a tool call longer than one answer may be (a whole file at once): the
+            // engine could not read it. Say so and let it try again in smaller parts.
+            Err(e) if cut_off_call(&e) && cut_offs < MAX_CUT_OFFS => {
+                cut_offs += 1;
+                app.record("agent_call_cut_off", json!({"package": package.id}));
+                agents.change(id, |t| {
+                    t.messages.push(json!({"role": "user", "content": CUT_OFF_HINT}));
+                    t.steps.push(Step::Note { text: "That was too long to write in one go. Trying again in smaller parts.".into() });
+                });
                 continue;
             }
             Err(e) => return failed(e),
@@ -1097,6 +1144,13 @@ mod tests {
 
     fn result(id: &str, content: &str) -> Value {
         json!({"role": "tool", "tool_call_id": id, "content": content})
+    }
+
+    #[test]
+    fn a_tool_call_the_engine_could_not_read_is_recognised() {
+        assert!(cut_off_call("Failed to parse tool call arguments as JSON: [json.exception.parse_error.101] parse error at line 1, column 7662: syntax error while parsing value - invalid string: missing closing quote"));
+        assert!(!cut_off_call("the request exceeds the available context size"));
+        assert!(!cut_off_call("connection refused"));
     }
 
     #[test]
