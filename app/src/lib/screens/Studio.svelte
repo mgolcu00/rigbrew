@@ -5,8 +5,9 @@
 	import { videoLengthsOf, videoSizesOf, type SizeName } from '#lib/chat.svelte.ts';
 	import { plain } from '#lib/errors.ts';
 	import { app } from '#lib/state.svelte.ts';
-	import { hasClip, remadeByMove, reorder, shotSeconds } from '#lib/studio.ts';
+	import { filmPlan, hasClip, remadeByMove, reorder, shotSeconds } from '#lib/studio.ts';
 	import Icon from '#lib/components/Icon.svelte';
+	import StudioPlayer from '#lib/components/StudioPlayer.svelte';
 	import StudioTimeline from '#lib/components/StudioTimeline.svelte';
 
 	// Studio: a film is a list of shots in a folder. Each shot is one description and one clip;
@@ -21,8 +22,6 @@
 	let idea = $state('');
 	let wanted = $state(6);
 	let writing = $state(false);
-	let playing = $state<number | null>(null);
-	let player = $state<HTMLVideoElement | null>(null);
 
 	const video = $derived(app.videoPackage);
 	const lengths = $derived(videoLengthsOf(video));
@@ -30,6 +29,8 @@
 	const project = $derived(view?.project ?? null);
 	const shape = $derived((Object.keys(shapes) as SizeName[]).find((n) => `${shapes[n].width}x${shapes[n].height}` === project?.size) ?? 'landscape');
 	const done = $derived(project?.shots.filter((s) => s.state === 'done') ?? []);
+	/** The film as it plays and as it is exported: the made shots with their trims. */
+	const plan = $derived(filmPlan(project?.shots ?? []));
 	const todo = $derived(project?.shots.filter((s) => s.state !== 'done' && s.prompt.trim()).length ?? 0);
 	const total = $derived(project ? project.shots.reduce((n, s) => n + shotSeconds(s), 0) : 0);
 	const clock = (s: number) => (s >= 60 ? `${Math.floor(s / 60)} min ${Math.round(s % 60)} s` : `${Math.round(s)} s`);
@@ -115,23 +116,37 @@
 		}
 	}
 
-	const urls = new Map<string, string>();
-	let clips = $state<Record<string, string>>({});
-	async function clipOf(shot: StudioShot) {
-		if (!project || shot.state !== 'done') return;
-		const key = `${shot.id}:${shot.seconds ?? 0}`;
-		if (urls.has(key)) return;
-		try {
-			const url = URL.createObjectURL(await api.studioClip(project.id, shot.id));
-			urls.set(key, url);
-			clips = { ...clips, [shot.id]: url };
-		} catch {
-			// The file was moved out of the folder: the row says so by having no picture.
+	// Clips are read from the service when they are played, and only the last few are kept: a long
+	// film has more of them than fit in memory at once.
+	const KEPT_CLIPS = 12;
+	const clipUrls = new Map<string, Promise<string | null>>();
+	function clipOf(id: string): Promise<string | null> {
+		const shot = project?.shots.find((s) => s.id === id);
+		if (!project || !shot) return Promise.resolve(null);
+		const key = `${id}:${shot.seconds ?? 0}`;
+		const film = project.id;
+		let url = clipUrls.get(key);
+		clipUrls.delete(key);
+		url ??= api
+			.studioClip(film, id)
+			.then((blob) => URL.createObjectURL(blob))
+			.catch(() => null);
+		clipUrls.set(key, url);
+		if (clipUrls.size > KEPT_CLIPS) {
+			const [oldest, old] = clipUrls.entries().next().value!;
+			clipUrls.delete(oldest);
+			old.then((u) => u && URL.revokeObjectURL(u));
 		}
+		return url;
 	}
-	$effect(() => {
-		for (const s of done) clipOf(s);
-	});
+
+	// One shot at a time plays in its row.
+	let rowClip = $state<{ id: string; url: string } | null>(null);
+	async function playRow(shot: StudioShot) {
+		const url = await clipOf(shot.id);
+		if (url) rowClip = { id: shot.id, url };
+		else problem = 'The clip of this shot is not in the film\'s folder any more. Make the shot again.';
+	}
 
 	// One small picture per made shot, for the timeline.
 	const pictureUrls = new Map<string, string>();
@@ -159,6 +174,35 @@
 		selected = i;
 		const id = project?.shots[i]?.id;
 		if (scroll && id) document.getElementById(`shot-${id}`)?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+		if (scroll && id) player?.seekShot(id);
+	}
+
+	// The film, played as it will be exported.
+	let showPlayer = $state(false);
+	let player = $state<StudioPlayer | null>(null);
+	let position = $state<{ shot: string; at: number } | null>(null);
+	let soundUrl = $state<string | null>(null);
+	let soundOf = '';
+	async function openPlayer() {
+		if (!project || plan.parts.length === 0) return;
+		await saveNow();
+		// The sound file is read again when another one was chosen.
+		const wanted = project.sound?.trim() ?? '';
+		if (wanted !== soundOf) {
+			if (soundUrl) URL.revokeObjectURL(soundUrl);
+			soundUrl = null;
+			soundOf = wanted;
+			if (wanted) {
+				try {
+					soundUrl = URL.createObjectURL(await api.studioSound(project.id));
+				} catch {
+					problem = 'The sound file was not found, or it is not a kind the app can play. The film plays without it.';
+				}
+			}
+		}
+		rowClip = null;
+		showPlayer = true;
+		app.track('studio_played', { shots: plan.parts.length, sound: Boolean(soundUrl) });
 	}
 
 	async function refresh() {
@@ -207,7 +251,14 @@
 		timer = undefined;
 		if (!project) return;
 		try {
-			const saved = await api.studioSave(project.id, { name: project.name, size: project.size, auto_export: Boolean(project.auto_export), shots: project.shots.map(({ id, prompt, frames, trim_start, trim_end, continues }) => ({ id, prompt, frames, trim_start: trim_start ?? 0, trim_end: trim_end ?? 0, continues: Boolean(continues) })) });
+			const saved = await api.studioSave(project.id, {
+				name: project.name,
+				size: project.size,
+				auto_export: Boolean(project.auto_export),
+				sound: project.sound ?? '',
+				sound_volume: project.sound_volume ?? 0.5,
+				shots: project.shots.map(({ id, prompt, frames, trim_start, trim_end, continues }) => ({ id, prompt, frames, trim_start: trim_start ?? 0, trim_end: trim_end ?? 0, continues: Boolean(continues) }))
+			});
 			// Keep what is being typed; take the states.
 			if (view && !timer) view = saved;
 		} catch (e) {
@@ -289,14 +340,13 @@
 	// One file out of the made shots, in the film's folder. The service says where the export is,
 	// also for a film that exports by itself.
 	const exported = $derived(view?.export ?? null);
-	let music = $state('');
 	async function exportFilm() {
 		if (!project) return;
 		problem = '';
 		try {
 			await saveNow();
-			await api.studioExport(project.id, music.trim() || undefined);
-			app.track('studio_export_clicked', { shots: done.length, music: Boolean(music.trim()) });
+			await api.studioExport(project.id);
+			app.track('studio_export_clicked', { shots: plan.parts.length, sound: Boolean(project.sound?.trim()) });
 			view = await api.studioRead(project.id);
 		} catch (e) {
 			problem = say(e);
@@ -314,24 +364,13 @@
 		}
 	}, 2000);
 
-	// The film, played shot after shot.
-	function play(from = 0) {
-		if (done.length === 0) return;
-		playing = from;
-	}
-	function next() {
-		if (playing === null) return;
-		playing = playing + 1 < done.length ? playing + 1 : null;
-	}
-	$effect(() => {
-		if (playing !== null && player) player.play().catch(() => {});
-	});
-
 	onMount(refresh);
 	onDestroy(() => {
 		clearInterval(poll);
 		clearTimeout(timer);
-		for (const url of [...urls.values(), ...pictureUrls.values()]) if (url) URL.revokeObjectURL(url);
+		for (const url of pictureUrls.values()) if (url) URL.revokeObjectURL(url);
+		for (const url of clipUrls.values()) url.then((u) => u && URL.revokeObjectURL(u));
+		if (soundUrl) URL.revokeObjectURL(soundUrl);
 	});
 
 	const stateWords: Record<StudioShot['state'], string> = { empty: 'Not made', queued: 'Waiting', making: 'Being made', done: 'Made', failed: 'Did not work', changed: 'Changed' };
@@ -409,14 +448,14 @@
 			{#if video?.credit}<p class="note credit">{video.credit}</p>{/if}
 		{:else}
 			<header class="top">
-				<button class="btn quiet" onclick={() => ((view = null), refresh())}>← Films</button>
+				<button class="btn quiet" onclick={() => ((view = null), (showPlayer = false), (rowClip = null), (selected = -1), refresh())}>← Films</button>
 				<input class="name" bind:value={project.name} oninput={saveSoon} aria-label="Name of the film" />
 				<span class="grow"></span>
 				{#if view?.rendering}
 					<button class="btn" onclick={stop}>Stop</button>
 				{:else}
-					<button class="btn" onclick={() => play(0)} disabled={done.length === 0}>Play film</button>
-					<button class="btn" onclick={exportFilm} disabled={done.length === 0 || exported?.state === 'working'} title="Joins the made shots into one MP4 file in the film's folder">{exported?.state === 'working' ? 'Exporting…' : 'Export'}</button>
+					<button class="btn" onclick={openPlayer} disabled={plan.parts.length === 0} title="Plays the made shots one after another, as the exported film will be">Play film</button>
+					<button class="btn" onclick={exportFilm} disabled={plan.parts.length === 0 || exported?.state === 'working'} title="Joins the made shots into one MP4 file in the film's folder">{exported?.state === 'working' ? 'Exporting…' : 'Export'}</button>
 					<button class="btn primary" onclick={() => make()} disabled={todo === 0 || !video} title={video ? '' : 'Add Video under Models first'}>Make {todo > 0 ? `${todo} ${todo === 1 ? 'shot' : 'shots'}` : 'film'}</button>
 				{/if}
 			</header>
@@ -448,17 +487,23 @@
 			{/if}
 			{#if problem}<p class="problem selectable" role="alert">{problem}</p>{/if}
 
-			{#if playing !== null && done[playing]}
-				<div class="stage">
-					<!-- svelte-ignore a11y_media_has_caption -->
-					<video bind:this={player} src={clips[done[playing].id]} controls autoplay onended={next}></video>
-					<p class="caption">Shot {project.shots.indexOf(done[playing]) + 1}: {done[playing].prompt}</p>
-					<button class="btn quiet" onclick={() => (playing = null)}>Close</button>
-				</div>
+			{#if showPlayer && plan.parts.length > 0}
+				<StudioPlayer
+					bind:this={player}
+					parts={plan.parts}
+					total={plan.total}
+					shape={project.size}
+					{clipOf}
+					sound={soundUrl}
+					soundVolume={project.sound_volume ?? 0.5}
+					caption={(part) => `Shot ${part.index + 1}: ${project.shots[part.index]?.prompt ?? ''}`}
+					onposition={(at) => (position = at)}
+					onclose={() => (showPlayer = false)}
+				/>
 			{/if}
 
 			{#if project.shots.length > 0}
-				<StudioTimeline shots={project.shots} {posters} {selected} onselect={select} onmove={move} />
+				<StudioTimeline shots={project.shots} {posters} {selected} playhead={showPlayer ? position : null} onselect={select} onmove={move} />
 			{/if}
 			{#if pendingMove}
 				{@const n = pendingMove.remade.length}
@@ -481,7 +526,7 @@
 				</p>
 			</div>
 
-			<ol class="shots">
+			<ol class="shots" style:--shape="{project.size.replace('x', ' / ')}">
 				{#each project.shots as shot, i (shot.id || i)}
 					<li class="shot" class:making={shot.state === 'making'} class:on={i === selected} id="shot-{shot.id}" onfocusin={() => select(i, false)}>
 						<span class="n">{i + 1}</span>
@@ -507,9 +552,13 @@
 							</p>
 						</div>
 						<div class="clip">
-							{#if clips[shot.id]}
+							{#if rowClip?.id === shot.id}
 								<!-- svelte-ignore a11y_media_has_caption -->
-								<video src={clips[shot.id]} controls preload="metadata" class:stale={shot.state === 'changed'}></video>
+								<video src={rowClip.url} controls autoplay class:stale={shot.state === 'changed'}></video>
+							{:else if hasClip(shot) && shot.id}
+								<button class="poster" class:stale={shot.state === 'changed'} style:background-image={posters[shot.id] ? `url(${posters[shot.id]})` : undefined} onclick={() => playRow(shot)} aria-label="Play shot {i + 1}" title="Play this shot">
+									<span class="go" aria-hidden="true"></span>
+								</button>
 							{:else}
 								<span class="blank" aria-hidden="true"><Icon name="video" size={18} /></span>
 							{/if}
@@ -520,9 +569,21 @@
 			<p class="row end">
 				<button class="btn" onclick={() => addShot()}>Add a shot</button>
 				<label class="trim" title="When the last shot is made, the film is joined into one MP4 file in its folder, also with this screen closed."><input type="checkbox" bind:checked={project.auto_export} onchange={saveSoon} /> Export when the last shot is made</label>
-				<input class="field music" bind:value={music} placeholder="Music or narration for the export: full path to a sound file (optional)" aria-label="Sound file to lay under the exported film" />
-				{#if video?.credit}<span class="note">{video.credit}</span>{/if}
 			</p>
+
+			<div class="panel">
+				<h2 class="sub">Sound under the film</h2>
+				<p class="row">
+					<input class="field music" bind:value={project.sound} oninput={saveSoon} placeholder="Full path to a sound file: music or narration (optional)" aria-label="Sound file that plays under the whole film" />
+					<label class="trim" title="How loud the sound file is next to the shots' own sound">
+						Volume
+						<input type="range" min="0" max="1" step="0.05" bind:value={project.sound_volume} oninput={saveSoon} aria-label="Volume of the sound file" />
+						<span class="pct">{Math.round((project.sound_volume ?? 0.5) * 100)}%</span>
+					</label>
+				</p>
+				<p class="note">It starts with the film, repeats when it is shorter, and ends with the film. You hear it in Play film and in the exported file.</p>
+			</div>
+			{#if video?.credit}<p class="note credit">{video.credit}</p>{/if}
 		{/if}
 	</div>
 </section>
@@ -795,26 +856,6 @@
 		font-size: 13px;
 	}
 
-	.stage {
-		display: grid;
-		gap: 8px;
-		justify-items: start;
-		padding: 12px;
-		border-radius: 14px;
-		background: var(--well);
-	}
-
-	.stage video {
-		width: 100%;
-		border-radius: 8px;
-		background: #000;
-	}
-
-	.caption {
-		font-size: 13px;
-		color: var(--muted);
-	}
-
 	.idea {
 		display: grid;
 		gap: 8px;
@@ -955,11 +996,73 @@
 	}
 
 	.clip video,
+	.poster,
 	.blank {
 		width: 100%;
-		aspect-ratio: 5 / 3;
+		aspect-ratio: var(--shape, 5 / 3);
+		max-height: 220px;
 		border-radius: 8px;
 		background: var(--well);
+	}
+
+	.clip {
+		display: grid;
+		justify-items: center;
+	}
+
+	.poster {
+		position: relative;
+		display: grid;
+		place-items: center;
+		background: #000 center / cover no-repeat;
+	}
+
+	.poster.stale {
+		opacity: 0.45;
+	}
+
+	/* A small play mark, shown stronger under the pointer. */
+	.go {
+		width: 34px;
+		height: 34px;
+		border-radius: 50%;
+		background: color-mix(in srgb, var(--rb-panel) 82%, transparent);
+		opacity: 0.75;
+		transition: opacity var(--quick);
+	}
+
+	.go::after {
+		content: '';
+		display: block;
+		margin: 10px 0 0 13px;
+		border-left: 11px solid var(--rb-ink);
+		border-top: 7px solid transparent;
+		border-bottom: 7px solid transparent;
+	}
+
+	.poster:hover .go,
+	.poster:focus-visible .go {
+		opacity: 1;
+	}
+
+	.panel {
+		display: grid;
+		gap: 8px;
+		padding: 12px;
+		border: 1px solid var(--line-soft);
+		border-radius: 14px;
+	}
+
+	.trim input[type='range'] {
+		width: 110px;
+		padding: 0;
+		border: 0;
+		accent-color: var(--accent);
+	}
+
+	.pct {
+		min-width: 4ch;
+		font-family: var(--rb-data);
 	}
 
 	.clip video {

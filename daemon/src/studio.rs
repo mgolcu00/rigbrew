@@ -4,13 +4,16 @@
 //!   POST   /v1/studio/projects                    {"folder"?, "name"}: start a film in a folder (created if missing;
 //!                                                 without one, a new folder named after the film under Movies/Rigbrew)
 //!   GET    /v1/studio/projects/{id}               the film: its shots and what is being made
-//!   PUT    /v1/studio/projects/{id}               {"name", "size", "auto_export", "shots": [{"id"?, "prompt", "frames"}]}
+//!   PUT    /v1/studio/projects/{id}               {"name", "size", "auto_export", "sound", "sound_volume",
+//!                                                 "shots": [{"id"?, "prompt", "frames"}]}
 //!   DELETE /v1/studio/projects/{id}               forget the film (its folder stays)
 //!   POST   /v1/studio/projects/{id}/render        {"shots": [id]?, "model"?}: make the listed shots, or every shot not made yet
 //!   DELETE /v1/studio/projects/{id}/render        stop: the shot being made is stopped, the rest leave the queue
 //!   POST   /v1/studio/projects/{id}/storyboard    {"idea", "shots"}: the chat model writes the shots in scenes (not saved)
-//!   POST   /v1/studio/projects/{id}/export      {"music"?, "music_volume"?}: join the made shots into `<folder>/<name>.mp4`
+//!   POST   /v1/studio/projects/{id}/export      join the made shots into `<folder>/<name>.mp4`, with the film's
+//!                                               sound file under them ({"music"?, "music_volume"?} for another)
 //!   GET    /v1/studio/projects/{id}/export      where the export is: {"state", "file", "error"}
+//!   GET    /v1/studio/projects/{id}/sound       the film's sound file, to play under it in the app
 //!   GET    /v1/studio/projects/{id}/clips/{shot}.webm
 //!   GET    /v1/studio/projects/{id}/clips/{shot}.jpg   one small picture of the shot, for the timeline
 //!
@@ -82,6 +85,10 @@ fn is_zero(v: &f32) -> bool {
     *v == 0.0
 }
 
+fn half() -> f32 {
+    0.5
+}
+
 fn empty() -> String {
     "empty".into()
 }
@@ -97,6 +104,12 @@ pub struct Project {
     /// Export the film by itself when its last shot is made.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub auto_export: bool,
+    /// A sound file (its full path) that plays under the whole film: music or narration.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub sound: String,
+    /// 0 to 1: how loud the sound file is next to the shots' own sound.
+    #[serde(default = "half")]
+    pub sound_volume: f32,
     pub updated_ms: i64,
 }
 
@@ -265,6 +278,8 @@ async fn create(State(app): State<Shared>, Json(body): Json<NewProject>) -> Resp
         size: "640x384".into(),
         shots: vec![],
         auto_export: false,
+        sound: String::new(),
+        sound_volume: half(),
         updated_ms: 0,
     });
     project.id = id.clone();
@@ -315,6 +330,10 @@ struct Save {
     shots: Option<Vec<ShotIn>>,
     #[serde(default)]
     auto_export: Option<bool>,
+    #[serde(default)]
+    sound: Option<String>,
+    #[serde(default)]
+    sound_volume: Option<f32>,
 }
 
 /// The new list of shots: a shot that keeps its id and its description keeps its clip; one whose
@@ -382,6 +401,16 @@ async fn save(State(app): State<Shared>, Path(id): Path<String>, Json(body): Jso
     }
     if let Some(auto) = body.auto_export {
         p.auto_export = auto;
+    }
+    if let Some(sound) = body.sound {
+        let sound = sound.trim();
+        if !sound.is_empty() && (!FsPath::new(sound).is_absolute() || sound.len() > 1024) {
+            return fail(StatusCode::BAD_REQUEST, "give the sound file by its full path");
+        }
+        p.sound = sound.to_string();
+    }
+    if let Some(volume) = body.sound_volume.filter(|v| v.is_finite()) {
+        p.sound_volume = volume.clamp(0.0, 1.0);
     }
     if let Err(e) = store(&mut p) {
         return fail(StatusCode::INTERNAL_SERVER_ERROR, format!("the film could not be saved: {e}"));
@@ -697,6 +726,37 @@ async fn clip(State(app): State<Shared>, Path((id, name)): Path<(String, String)
     }
 }
 
+/// The kinds of sound file the app plays under a film, by the end of their name.
+fn sound_kind(path: &FsPath) -> Option<&'static str> {
+    Some(match path.extension()?.to_str()?.to_ascii_lowercase().as_str() {
+        "wav" => "audio/wav",
+        "mp3" => "audio/mpeg",
+        "m4a" | "aac" | "mp4" => "audio/mp4",
+        "flac" => "audio/flac",
+        "ogg" | "oga" | "opus" => "audio/ogg",
+        "aif" | "aiff" => "audio/aiff",
+        _ => return None,
+    })
+}
+
+async fn sound(State(app): State<Shared>, Path(id): Path<String>) -> Response {
+    let Some(p) = load(&app, &id) else {
+        return fail(StatusCode::NOT_FOUND, "no such film");
+    };
+    let path = PathBuf::from(&p.sound);
+    let Some(kind) = sound_kind(&path).filter(|_| path.is_absolute()) else {
+        return fail(StatusCode::NOT_FOUND, "this film has no sound file the app can play");
+    };
+    match tokio::fs::read(&path).await {
+        Ok(bytes) => Response::builder()
+            .header(header::CONTENT_TYPE, kind)
+            .header(header::CACHE_CONTROL, "no-store")
+            .body(Body::from(bytes))
+            .unwrap(),
+        Err(_) => fail(StatusCode::NOT_FOUND, "the sound file was not found"),
+    }
+}
+
 #[derive(Deserialize)]
 struct Idea {
     idea: String,
@@ -853,7 +913,8 @@ async fn begin_export(app: &Shared, p: Project, body: Export) -> Result<usize, (
     if count == 0 {
         return Err((StatusCode::CONFLICT, "No shot is made yet. Make the shots first.".into()));
     }
-    let music = match body.music.as_deref().map(str::trim).filter(|m| !m.is_empty()) {
+    // The film's own sound file, unless the request names another.
+    let music = match body.music.as_deref().or(Some(p.sound.as_str())).map(str::trim).filter(|m| !m.is_empty()) {
         Some(m) if FsPath::new(m).is_absolute() && FsPath::new(m).is_file() => Some(m.to_string()),
         Some(_) => return Err((StatusCode::BAD_REQUEST, "the sound file was not found: give its full path".into())),
         None => None,
@@ -870,7 +931,7 @@ async fn begin_export(app: &Shared, p: Project, body: Export) -> Result<usize, (
     std::fs::write(&list_path, list)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("the film's folder cannot be written to: {e}")))?;
     set_export(&id, json!({"state": "working", "shots": count}));
-    let volume = body.music_volume.unwrap_or(0.5).clamp(0.0, 1.0);
+    let volume = body.music_volume.unwrap_or(p.sound_volume).clamp(0.0, 1.0);
     let app2 = app.clone();
     tokio::spawn(async move {
         let started = std::time::Instant::now();
@@ -950,6 +1011,7 @@ pub fn router() -> Router<Shared> {
         .route("/v1/studio/projects/{id}/render", post(render).delete(stop))
         .route("/v1/studio/projects/{id}/storyboard", post(storyboard))
         .route("/v1/studio/projects/{id}/export", get(export_state).post(export))
+        .route("/v1/studio/projects/{id}/sound", get(sound))
         .route("/v1/studio/projects/{id}/clips/{name}", get(clip))
 }
 
@@ -1051,6 +1113,8 @@ mod tests {
             size: "640x384".into(),
             shots: vec![shot("a1", "fox", "done"), shot("b2", "not made", "empty"), second],
             auto_export: false,
+            sound: String::new(),
+            sound_volume: 0.5,
             updated_ms: 0,
         };
         let (list, count) = concat_list(&p);
@@ -1119,6 +1183,14 @@ mod tests {
         assert_eq!(frames_read("frame=121 fps=30"), Some(121));
         assert_eq!(frames_read("clip.webm: Invalid data found when processing input"), None);
         assert_eq!(frames_read(""), None);
+    }
+
+    #[test]
+    fn only_sound_files_are_played_under_a_film() {
+        assert_eq!(sound_kind(FsPath::new("/music/Theme.MP3")), Some("audio/mpeg"));
+        assert_eq!(sound_kind(FsPath::new("/film/narration.wav")), Some("audio/wav"));
+        assert_eq!(sound_kind(FsPath::new("/home/me/.ssh/id_ed25519")), None);
+        assert_eq!(sound_kind(FsPath::new("/home/me/notes.txt")), None);
     }
 
     #[test]

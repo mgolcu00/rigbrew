@@ -2,7 +2,7 @@
 // Run with: node --test src/lib/*.test.mjs  (Node 22.18 or newer reads the .ts files as they are)
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { remadeByMove, reorder, shotSeconds, stamp } from './studio.ts';
+import { filmPlan, partAt, remadeByMove, reorder, shotSeconds, stamp } from './studio.ts';
 
 const shot = (id, over = {}) => ({ id, prompt: id, frames: 49, state: 'done', ...over });
 
@@ -33,4 +33,31 @@ test('a move sends continuing shots back to be made again', () => {
 	// A continuing shot becomes the first.
 	assert.deepEqual(remadeByMove(film, 1, 0), [0]);
 	assert.deepEqual(remadeByMove(film, 4, 4), []);
+});
+
+test('the film plan follows trims and joins', () => {
+	const film = [
+		shot('a', { made_frames: 48 }),
+		shot('b', { made_frames: 48, trim_start: 0.5, trim_end: 0.25, join: 'dissolve' }),
+		shot('x', { state: 'empty' }),
+		shot('c', { made_frames: 48, join: 'black', volume: 1.2 }),
+		shot('d', { made_frames: 48, continues: true, join: 'dissolve', mute: true })
+	];
+	const { parts, total } = filmPlan(film);
+	assert.deepEqual(parts.map((p) => p.shot), ['a', 'b', 'c', 'd']);
+	assert.deepEqual(parts.map((p) => [p.from, p.to]), [[0, 2], [0.5, 1.75], [0, 2], [0, 2]]);
+	// The dissolve starts half a second before the first shot ends; black and continue do not overlap.
+	assert.deepEqual(parts.map((p) => p.start), [0, 1.5, 2.75, 4.75]);
+	assert.deepEqual(parts.map((p) => p.overlap), [0, 0.5, 0, 0]);
+	assert.deepEqual(parts.map((p) => [p.fadeIn, p.fadeOut]), [[0, 0], [0, 0.25], [0.25, 0], [0, 0]]);
+	assert.deepEqual(parts.map((p) => p.volume), [1, 1, 1.2, 0]);
+	assert.equal(total, 6.75);
+	assert.deepEqual(partAt(parts, 0.4), { part: 0, at: 0.4 });
+	assert.deepEqual(partAt(parts, 1.75), { part: 1, at: 0.75 });
+	assert.deepEqual(partAt(parts, 99), { part: 3, at: 2 });
+	assert.equal(partAt([], 1), null);
+	// A join is never longer than half of the shorter shot.
+	const short = filmPlan([shot('a', { made_frames: 48 }), shot('b', { made_frames: 12, join: 'dissolve' })]);
+	assert.equal(short.parts[1].overlap, 0.25);
+	assert.equal(short.total, 2.25);
 });
