@@ -61,6 +61,17 @@ pub struct Snapshot {
     /// The person took this request back.
     #[serde(default)]
     pub undone: bool,
+    /// The request the task was at when that happened (0 when it did not).
+    #[serde(default)]
+    pub undone_at: usize,
+}
+
+impl Snapshot {
+    /// Whether there is something to take back. Outside git, a request in which only commands
+    /// ran has nothing saved.
+    pub fn open(&self) -> bool {
+        !self.undone && (self.kind == "git" || !self.files.is_empty())
+    }
 }
 
 /// What an undo did.
@@ -302,7 +313,7 @@ pub async fn before_change(app: &Shared, id: &str, folder: &Folder, path: Option
                 Some((commit, skipped)) => ("git", Some(commit), skipped),
                 None => ("copies", None, Vec::new()),
             };
-            Snapshot { request, kind: kind.into(), commit, skipped, files: Vec::new(), commands: false, undone: false }
+            Snapshot { request, kind: kind.into(), commit, skipped, files: Vec::new(), commands: false, undone: false, undone_at: 0 }
         });
         let before = (snapshot.files.len(), snapshot.commands);
         if snapshot.kind == "copies" {
@@ -326,9 +337,10 @@ pub async fn before_change(app: &Shared, id: &str, folder: &Folder, path: Option
     }
 }
 
-/// What the model is told after an undo, until the next change is made.
+/// What the model is told during the request that follows an undo.
 pub fn context(task: &Task) -> Option<&'static str> {
-    task.extra.undo.last().filter(|s| s.undone).map(|_| {
+    let request = request_of(task);
+    task.extra.undo.iter().find(|s| s.undone && s.undone_at + 1 == request).map(|_| {
         "The person took back the changes of the last request. The files are as they were before it. Read a file again before you change it."
     })
 }
@@ -355,7 +367,7 @@ pub async fn task_undo(State(app): State<Shared>, UrlPath(id): UrlPath<String>) 
     if task.active() {
         return fail(StatusCode::CONFLICT, "This task is still working. Wait for it, or stop it first.");
     }
-    let Some(snapshot) = task.extra.undo.iter().rev().find(|s| !s.undone).cloned() else {
+    let Some(snapshot) = task.extra.undo.iter().rev().find(|s| s.open()).cloned() else {
         return fail(StatusCode::CONFLICT, "There is nothing to take back in this task.");
     };
     let folder = match Folder::open(&task.folder) {
@@ -377,8 +389,10 @@ pub async fn task_undo(State(app): State<Shared>, UrlPath(id): UrlPath<String>) 
     app.record("agent_undo", json!({"kind": snapshot.kind, "restored": done.restored, "removed": done.removed}));
     // Checked again and changed in one step: the task may have been given new work meanwhile.
     app.agent.change(&id, |t| {
+        let at = request_of(t);
         if let Some(s) = t.extra.undo.iter_mut().find(|s| s.request == snapshot.request) {
             s.undone = true;
+            s.undone_at = at;
         }
         t.steps.push(Step::Note { text: text.clone() });
     });
@@ -443,7 +457,7 @@ mod tests {
 
     fn snapshot_of(root: &Path, task: &str, request: usize) -> Snapshot {
         let (commit, skipped) = git_snapshot(root, task, request).unwrap();
-        Snapshot { request, kind: "git".into(), commit: Some(commit), skipped, files: vec![], commands: false, undone: false }
+        Snapshot { request, kind: "git".into(), commit: Some(commit), skipped, files: vec![], commands: false, undone: false, undone_at: 0 }
     }
 
     #[test]
@@ -567,13 +581,26 @@ mod tests {
 
     #[test]
     fn the_person_is_told_what_came_back() {
-        let mut snap =
-            Snapshot { request: 1, kind: "git".into(), commit: None, skipped: vec![], files: vec![], commands: false, undone: false };
+        let mut snap = Snapshot {
+            request: 1,
+            kind: "git".into(),
+            commit: None,
+            skipped: vec![],
+            files: vec![],
+            commands: false,
+            undone: false,
+            undone_at: 0,
+        };
         assert_eq!(said(&Restored { restored: 2, removed: 1 }, &snap), "Took this request back: 2 files put back, 1 new file removed.");
         assert_eq!(said(&Restored { restored: 1, removed: 0 }, &snap), "Took this request back: 1 file put back.");
         assert_eq!(said(&Restored::default(), &snap), "Nothing had changed since this request began.");
         snap.kind = "copies".into();
         snap.commands = true;
         assert!(said(&Restored { restored: 0, removed: 3 }, &snap).ends_with(NOT_BY_COMMANDS));
+        assert!(!snap.open(), "outside git, a request in which only commands ran has nothing to take back");
+        snap.files.push(Saved { path: "a.txt".into(), existed: true });
+        assert!(snap.open());
+        snap.undone = true;
+        assert!(!snap.open());
     }
 }

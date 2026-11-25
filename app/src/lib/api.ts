@@ -596,6 +596,8 @@ export interface AgentTaskRow {
 export interface AgentUndo {
 	request: number;
 	kind: 'git' | 'copies';
+	/** Outside git: the files that were saved before the task touched them. */
+	files: { path: string; existed: boolean }[];
 	/** Outside git: a command ran, and what it changed cannot be taken back. */
 	commands: boolean;
 	undone: boolean;
