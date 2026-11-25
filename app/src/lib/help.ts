@@ -149,8 +149,9 @@ export const articles: Article[] = [
 		title: 'Studio: a film made of shots',
 		body: [
 			'Say what the film is about and how long it should be, then press “Make the film”. The chat model writes the shots, the video model makes them one after another with sound, and the film is saved as one MP4 file in a folder of yours. It keeps going while you do something else.',
-			'A film is a list of shots. Open it to change any shot, drag the pictures on the timeline to reorder them, or try a shot again and keep the take you like. “Continue the shot before” starts a shot from the last picture of the one before it, so the two join without a cut.',
-			'Between shots you can choose a cut, a dissolve or a fade through black. You can cut seconds from the start or the end of a shot, set how loud each shot is, lay music or a narration under the whole film, and export it larger or smaller.'
+			'An open film is a workstation. The shots stand on the film track in order: drag one to move it, drag its edges to trim it, drag the small handle between two shots for a dissolve or a fade through black. Select a shot to change its description in the Inspector, let the chat model rewrite it, or try it again and keep the take you like.',
+			'Under the film you add sound tracks for music, narration and effects. Drag a sound file from the Library onto a track, move it, trim its edges, fade its corners, split it at the playhead. Each track has mute, solo, a volume fader and pan; the Mixer shows them all with the master.',
+			'Space plays the film as the export will hold it. Everything can be undone. Press ? in Studio for the list of keys.'
 		]
 	},
 	{

@@ -4,22 +4,34 @@
 //!   POST   /v1/studio/projects                    {"folder"?, "name"}: start a film in a folder (created if missing;
 //!                                                 without one, a new folder named after the film under Movies/Rigbrew)
 //!   GET    /v1/studio/projects/{id}               the film: its shots and what is being made
-//!   PUT    /v1/studio/projects/{id}               {"name", "size", "auto_export", "sound", "sound_volume", "sound_once",
-//!                                                 "fade_in", "fade_out", "export": {"scale", "quality", "name"},
-//!                                                 "shots": [{"id"?, "prompt", "frames",
-//!                                                 "continues", "trim_start", "trim_end", "join", "volume", "mute"}]}
+//!   PUT    /v1/studio/projects/{id}               {"name", "size", "auto_export", "fade_in", "fade_out", "master",
+//!                                                 "export": {"scale", "quality", "name"},
+//!                                                 "shots": [{"id"?, "prompt", "frames", "continues", "trim_start",
+//!                                                 "trim_end", "join", "join_seconds", "volume", "mute"}],
+//!                                                 "shot_track": {"volume", "pan", "mute", "solo"},
+//!                                                 "tracks": [{"id"?, "name", "color", "volume", "pan", "mute", "solo",
+//!                                                 "regions": [{"id"?, "file", "start", "offset", "length", "gain",
+//!                                                 "fade_in", "fade_out", "loops"}]}]}
 //!   DELETE /v1/studio/projects/{id}               forget the film (its folder stays)
 //!   POST   /v1/studio/projects/{id}/render        {"shots": [id]?, "model"?}: make the listed shots, or every shot not made yet
 //!   DELETE /v1/studio/projects/{id}/render        stop: the shot being made is stopped, the rest leave the queue
 //!   POST   /v1/studio/projects/{id}/storyboard    {"idea", "shots"}: the chat model writes the shots in scenes (not saved)
 //!   POST   /v1/studio/projects/{id}/export      join the made shots into `<folder>/<name>.mp4`, with the film's
-//!                                               sound file under them ({"music"?, "music_volume"?} for another;
-//!                                               {"scale"?, "quality"?, "name"?} instead of the film's own)
+//!                                               sound tracks mixed in ({"music"?, "music_volume"?} lays one more
+//!                                               file under all of it; {"scale"?, "quality"?, "name"?} instead of
+//!                                               the film's own)
 //!   POST   /v1/studio/projects/{id}/reveal      show the exported file in the system's file manager
 //!   GET    /v1/studio/projects/{id}/export      where the export is: {"state", "file", "error"}
-//!   GET    /v1/studio/projects/{id}/sound       the film's sound file, to play under it in the app
-//!   POST   /v1/studio/projects/{id}/narration   {"text"}: the voice package reads it; the WAV is saved in the
-//!                                               film's folder and becomes the film's sound file
+//!   GET    /v1/studio/projects/{id}/sound?file=  a sound file of the film, to play in the app (up to 200 MB)
+//!   GET    /v1/studio/projects/{id}/sounds      the sound files in the film's folder and the ones added to it
+//!   POST   /v1/studio/projects/{id}/sounds      {"path"}: add a sound file, or every sound file in a folder
+//!   DELETE /v1/studio/projects/{id}/sounds?file=  take an added file out of the list (the file stays)
+//!   GET    /v1/studio/projects/{id}/peaks?shot= | ?file=   the small picture of a sound: 50 lowest and highest
+//!                                               values a second, kept next to the clips as `.peaks.json`
+//!   POST   /v1/studio/projects/{id}/narration   {"text", "at"?, "track"?}: the voice package reads it; the WAV is
+//!                                               saved in the film's folder and set on a narration track at `at`
+//!   POST   /v1/studio/projects/{id}/shots/{shot}/rewrite       {"hint"?, "prompt"?}: the chat model writes the
+//!                                               description of one shot again, in the words of the film (not saved)
 //!   POST   /v1/studio/projects/{id}/shots/{shot}/take          {"take": n}: use that take of the shot
 //!   DELETE /v1/studio/projects/{id}/shots/{shot}/takes/{n}     delete a take and its clip
 //!   GET    /v1/studio/projects/{id}/clips/{shot}.webm          the take in use; `{shot}.{n}.webm` for one take
@@ -38,7 +50,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use axum::body::Body;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -53,6 +65,9 @@ use crate::{fail, video, App, Shared};
 mod board;
 mod export;
 mod pace;
+mod sound;
+
+use sound::{Region, Strip, Track};
 
 const FILE: &str = "rigbrew-film.json";
 const MAX_SHOTS: usize = 200;
@@ -61,6 +76,10 @@ const MAX_PROMPT: usize = 1200;
 const MAX_NARRATION: usize = 6000;
 /// The most shots one storyboard has: five minutes of five-second shots.
 const MAX_STORYBOARD: usize = 60;
+/// Shots taken out of a film are kept this many deep, so putting one back gives it its clip again.
+const MAX_REMOVED: usize = 40;
+/// The largest sound file the app is handed to play.
+const MAX_SOUND_BYTES: u64 = 200 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Shot {
@@ -90,6 +109,9 @@ pub struct Shot {
     /// Not looked at when the shot continues the one before.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub join: String,
+    /// Seconds a dissolve or a fade through black into this shot lasts: 0.25 to 2.
+    #[serde(default = "half", skip_serializing_if = "is_half")]
+    pub join_seconds: f32,
     /// How loud the shot's own sound is in the film: 1.0 as made, up to 1.5.
     #[serde(default = "one", skip_serializing_if = "is_one")]
     pub volume: f32,
@@ -103,6 +125,10 @@ pub struct Shot {
     /// A seed the person wants the next clip made with; without one every clip gets a new seed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seed: Option<i64>,
+    /// What the clip in use was made from (see `made_key`), kept once the shot is changed: a
+    /// shot that is changed back is made again without making it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub made_from: Option<String>,
 }
 
 fn is_none_yet(n: &u32) -> bool {
@@ -124,11 +150,13 @@ impl Default for Shot {
             trim_end: 0.0,
             continues: false,
             join: String::new(),
+            join_seconds: 0.5,
             volume: 1.0,
             mute: false,
             takes: Vec::new(),
             take: 0,
             seed: None,
+            made_from: None,
         }
     }
 }
@@ -235,6 +263,10 @@ fn half() -> f32 {
     0.5
 }
 
+fn is_half(v: &f32) -> bool {
+    *v == 0.5
+}
+
 fn one() -> f32 {
     1.0
 }
@@ -258,7 +290,8 @@ pub struct Project {
     /// Export the film by itself when its last shot is made.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub auto_export: bool,
-    /// A sound file (its full path) that plays under the whole film: music or narration.
+    /// From before sound tracks: a sound file (its full path) that plays under the whole film.
+    /// A film that has one gets a track named "Music" with one region when it is opened.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub sound: String,
     /// 0 to 1: how loud the sound file is next to the shots' own sound.
@@ -275,7 +308,48 @@ pub struct Project {
     /// How the film is written to its MP4.
     #[serde(default, skip_serializing_if = "ExportOptions::is_usual")]
     pub export: ExportOptions,
+    /// The sound tracks: music, narration, effects, each with its regions.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tracks: Vec<Track>,
+    /// The channel strip of the shots' own sound as a whole.
+    #[serde(default, skip_serializing_if = "Strip::is_usual")]
+    pub shot_track: Strip,
+    /// How loud the whole film is: 1.0 as mixed, up to 2.
+    #[serde(default = "one", skip_serializing_if = "is_one")]
+    pub master: f32,
+    /// Sound files from outside the film's folder that the person added to its library.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sounds: Vec<String>,
+    /// Shots that were taken out of the film and had a clip: one that is put back has it again.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub removed: Vec<Shot>,
     pub updated_ms: i64,
+}
+
+impl Default for Project {
+    /// An empty film in the usual shape.
+    fn default() -> Project {
+        Project {
+            id: String::new(),
+            name: String::new(),
+            folder: String::new(),
+            size: "640x384".into(),
+            shots: Vec::new(),
+            auto_export: false,
+            sound: String::new(),
+            sound_volume: half(),
+            sound_once: false,
+            fade_in: false,
+            fade_out: false,
+            export: ExportOptions::default(),
+            tracks: Vec::new(),
+            shot_track: Strip::default(),
+            master: 1.0,
+            sounds: Vec::new(),
+            removed: Vec::new(),
+            updated_ms: 0,
+        }
+    }
 }
 
 /// How a film is written to its MP4: how large, how good, under which name.
@@ -503,6 +577,8 @@ fn view(app: &App, mut p: Project) -> Value {
     let export = export_of(&p.id);
     let mine = now.as_ref().filter(|(pid, _, _)| *pid == p.id).map(|(_, sid, _)| (sid.as_str(), elapsed.unwrap_or(0.0)));
     let (all, left) = time_left(&p, &paces_for(app, &p), &waiting, mine);
+    // The shots that were taken out are the service's own business.
+    p.removed.clear();
     json!({"project": p, "progress": progress, "rendering": mine.is_some() || !waiting.is_empty(), "made": made, "seconds": seconds,
            "can_continue": continues, "export": export, "estimate": {"all": all, "left": left}})
 }
@@ -556,21 +632,7 @@ async fn create(State(app): State<Shared>, Json(body): Json<NewProject>) -> Resp
         .map(|(i, _)| i.clone())
         .or_else(|| existing.as_ref().map(|p| p.id.clone()).filter(|i| valid_id(i)))
         .unwrap_or_else(new_id);
-    let mut project = existing.unwrap_or_else(|| Project {
-        id: id.clone(),
-        name: String::new(),
-        folder: folder_text.clone(),
-        size: "640x384".into(),
-        shots: vec![],
-        auto_export: false,
-        sound: String::new(),
-        sound_volume: half(),
-        sound_once: false,
-        fade_in: false,
-        fade_out: false,
-        export: ExportOptions::default(),
-        updated_ms: 0,
-    });
+    let mut project = existing.unwrap_or_default();
     project.id = id.clone();
     project.folder = folder_text.clone();
     if project.name.is_empty() {
@@ -584,14 +646,64 @@ async fn create(State(app): State<Shared>, Json(body): Json<NewProject>) -> Resp
     list.insert(0, (id, folder_text));
     write_index(&app, &list).ok();
     app.record("studio_project_opened", json!({"shots": project.shots.len()}));
+    let project = with_tracks(&app, project).await;
     Json(view(&app, project)).into_response()
 }
 
 async fn read(State(app): State<Shared>, Path(id): Path<String>) -> Response {
     match load(&app, &id) {
-        Some(p) => Json(view(&app, p)).into_response(),
+        Some(p) => Json(view(&app, with_tracks(&app, p).await)).into_response(),
         None => fail(StatusCode::NOT_FOUND, "no such film, or its folder is gone"),
     }
+}
+
+/// A film from before sound tracks has one sound file under all of it. It becomes one region on
+/// a track named "Music": as long as the file, repeated to the end of the film unless it played
+/// once. A file that cannot be read stays as it was, and the export says so as before.
+async fn with_tracks(app: &Shared, mut p: Project) -> Project {
+    let file = p.sound.trim().to_string();
+    if file.is_empty() {
+        return p;
+    }
+    let path = PathBuf::from(&file);
+    if !path.is_absolute() || !sound::is_sound(&path) || !path.is_file() {
+        return p;
+    }
+    let Some(seconds) = peaks_of(app, &p, &path, None).await.map(|(_, seconds)| seconds).filter(|s| *s >= 0.05) else {
+        return p;
+    };
+    let film: f32 = p.shots.iter().map(Shot::length).sum();
+    let loops = if p.sound_once { 1 } else { ((film / seconds).ceil() as u32).clamp(1, 1000) };
+    let region = Region {
+        id: new_id(),
+        file,
+        start: 0.0,
+        offset: 0.0,
+        length: seconds,
+        gain: p.sound_volume.clamp(0.0, 2.0),
+        fade_in: 0.0,
+        fade_out: 0.0,
+        loops,
+    };
+    p.tracks.insert(
+        0,
+        Track {
+            id: new_id(),
+            name: "Music".into(),
+            kind: "sound".into(),
+            color: sound::next_color(0),
+            volume: 1.0,
+            pan: 0.0,
+            mute: false,
+            solo: false,
+            regions: vec![region],
+        },
+    );
+    p.sound.clear();
+    p.sound_once = false;
+    p.sound_volume = half();
+    store(&mut p).ok();
+    p
 }
 
 #[derive(Deserialize, Default)]
@@ -609,6 +721,8 @@ struct ShotIn {
     continues: bool,
     #[serde(default)]
     join: String,
+    #[serde(default)]
+    join_seconds: Option<f32>,
     #[serde(default)]
     volume: Option<f32>,
     #[serde(default)]
@@ -639,14 +753,51 @@ struct Save {
     fade_out: Option<bool>,
     #[serde(default)]
     export: Option<ExportOptions>,
+    #[serde(default)]
+    tracks: Option<Vec<sound::TrackIn>>,
+    #[serde(default)]
+    shot_track: Option<Strip>,
+    #[serde(default)]
+    master: Option<f32>,
+}
+
+/// What a clip was made from, as one short word: the film's shape, the description, the length,
+/// and for a shot that continues another the shot it stood behind. FNV-1a, the same in every build.
+fn made_key(size: &str, prompt: &str, frames: u32, before: Option<&str>) -> String {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    let frames = frames.to_string();
+    for part in [size, prompt, &frames, before.unwrap_or("")] {
+        for b in part.bytes().chain([0]) {
+            hash = (hash ^ b as u64).wrapping_mul(0x100000001b3);
+        }
+    }
+    format!("{hash:016x}")
+}
+
+/// Whether a shot has a clip in the folder to keep.
+fn has_clip(shot: &Shot) -> bool {
+    shot.state == "done" || shot.state == "changed" || !shot.takes.is_empty()
 }
 
 /// The new list of shots: a shot that keeps its id and its description keeps its clip; one whose
 /// description or length changed is marked "changed" until it is made again.
-fn merge_shots(old: &[Shot], new: Vec<ShotIn>, size_changed: bool) -> Result<Vec<Shot>, String> {
+/// It also answers with the shots that are out of the film now and had a clip (`bin`, newest
+/// last): a shot that comes back by its id, after an undo, has its clip and its takes again.
+fn merge(old: &[Shot], bin: &[Shot], new: Vec<ShotIn>, sizes: (&str, &str)) -> Result<(Vec<Shot>, Vec<Shot>), String> {
     if new.len() > MAX_SHOTS {
         return Err(format!("a film has at most {MAX_SHOTS} shots"));
     }
+    let size_changed = sizes.0 != sizes.1;
+    // What the clip of a shot in the film was made from: for a made shot, the shot as it stands.
+    let was_key = |at: usize| {
+        let o = &old[at];
+        if o.state == "done" {
+            let before = at.checked_sub(1).filter(|_| o.continues).map(|i| old[i].id.as_str());
+            Some(made_key(sizes.0, &o.prompt, o.frames, before))
+        } else {
+            o.made_from.clone()
+        }
+    };
     let mut out: Vec<Shot> = Vec::with_capacity(new.len());
     for s in new {
         let prompt: String = s.prompt.trim().chars().take(MAX_PROMPT).collect();
@@ -657,34 +808,58 @@ fn merge_shots(old: &[Shot], new: Vec<ShotIn>, size_changed: bool) -> Result<Vec
         let id = s.id.filter(|i| valid_id(i) && !out.iter().any(|o| o.id == *i)).unwrap_or_else(new_id);
         // The first shot has nothing to continue.
         let continues = s.continues && !out.is_empty();
-        let mut shot = match old.iter().position(|o| o.id == id) {
-            Some(at) => {
+        let key = made_key(sizes.1, &prompt, frames, out.last().filter(|_| continues).map(|l| l.id.as_str()));
+        let again = |made_from: &Option<String>| if made_from.as_deref() == Some(key.as_str()) { "done" } else { "changed" };
+        let mut shot = match (old.iter().position(|o| o.id == id), bin.iter().find(|o| o.id == id)) {
+            (Some(at), _) => {
                 let o = &old[at];
                 // A shot that continues another was made from that shot's last picture: after a
                 // move it stands behind a different one and has to be made again.
                 let before = |list: &[Shot], at: usize| at.checked_sub(1).map(|i| list[i].id.clone());
                 let moved = continues && before(old, at) != out.last().map(|l| l.id.clone());
                 let same = o.prompt == prompt && o.frames == frames && o.continues == continues && !size_changed && !moved;
-                let state = if same || o.state == "empty" { o.state.clone() } else { "changed".into() };
-                Shot { prompt, frames, state, error: if same { o.error.clone() } else { None }, continues, ..o.clone() }
+                let made_from = was_key(at);
+                let state = if same {
+                    o.state.clone()
+                } else if o.state == "empty" || o.state == "failed" {
+                    empty()
+                } else {
+                    // Changed back to what its clip was made from: it is made.
+                    again(&made_from).to_string()
+                };
+                Shot { prompt, frames, state, error: if same { o.error.clone() } else { None }, continues, made_from, ..o.clone() }
             }
-            None => Shot { id, prompt, frames, state: empty(), continues, ..Shot::default() },
+            // Back in the film after it was taken out.
+            (None, Some(o)) => Shot { prompt, frames, state: again(&o.made_from).into(), error: None, continues, ..o.clone() },
+            (None, None) => Shot { id, prompt, frames, state: empty(), continues, ..Shot::default() },
         };
         // How a shot joins the film and how loud it is change nothing about its clip.
         shot.join = match s.join.as_str() {
             "dissolve" | "black" => s.join,
             _ => String::new(),
         };
+        shot.join_seconds = s.join_seconds.filter(|v| v.is_finite()).unwrap_or(0.5).clamp(0.25, 2.0);
         shot.volume = s.volume.filter(|v| v.is_finite()).unwrap_or(1.0).clamp(0.0, 1.5);
         shot.mute = s.mute;
         shot.seed = s.seed.filter(|seed| (0..=u32::MAX as i64).contains(seed));
         // Trims leave at least half a second of the shot.
         let length = shot.length();
-        shot.trim_start = s.trim_start.clamp(0.0, (length - 0.5).max(0.0));
-        shot.trim_end = s.trim_end.clamp(0.0, (length - 0.5 - shot.trim_start).max(0.0));
+        shot.trim_start = if s.trim_start.is_finite() { s.trim_start } else { 0.0 }.clamp(0.0, (length - 0.5).max(0.0));
+        shot.trim_end = if s.trim_end.is_finite() { s.trim_end } else { 0.0 }.clamp(0.0, (length - 0.5 - shot.trim_start).max(0.0));
         out.push(shot);
     }
-    Ok(out)
+    let mut kept: Vec<Shot> = bin.iter().filter(|b| !out.iter().any(|o| o.id == b.id)).cloned().collect();
+    for (at, o) in old.iter().enumerate().filter(|(_, o)| has_clip(o) && !out.iter().any(|n| n.id == o.id)) {
+        kept.push(Shot { made_from: was_key(at), error: None, ..o.clone() });
+    }
+    let extra = kept.len().saturating_sub(MAX_REMOVED);
+    kept.drain(..extra);
+    Ok((out, kept))
+}
+
+#[cfg(test)]
+fn merge_shots(old: &[Shot], new: Vec<ShotIn>, size_changed: bool) -> Result<Vec<Shot>, String> {
+    merge(old, &[], new, ("640x384", if size_changed { "384x640" } else { "640x384" })).map(|(shots, _)| shots)
 }
 
 async fn save(State(app): State<Shared>, Path(id): Path<String>, Json(body): Json<Save>) -> Response {
@@ -694,23 +869,53 @@ async fn save(State(app): State<Shared>, Path(id): Path<String>, Json(body): Jso
     if let Some(name) = body.name.map(|n| n.trim().chars().take(80).collect::<String>()).filter(|n| !n.is_empty()) {
         p.name = name;
     }
-    let mut size_changed = false;
+    let was = p.size.clone();
     if let Some(size) = body.size {
         if !valid_size(&size) {
             return fail(StatusCode::BAD_REQUEST, "size must be WIDTHxHEIGHT, each 256 to 1280 and a multiple of 32");
         }
-        size_changed = size != p.size;
         p.size = size;
     }
-    if let Some(shots) = body.shots {
-        match merge_shots(&p.shots, shots, size_changed) {
-            Ok(list) => p.shots = list,
+    // Without a list of shots the film keeps the ones it has, in a shape that may be new.
+    let shots = body.shots.unwrap_or_else(|| {
+        let as_it_is = |s: &Shot| ShotIn {
+            id: Some(s.id.clone()),
+            prompt: s.prompt.clone(),
+            frames: Some(s.frames),
+            trim_start: s.trim_start,
+            trim_end: s.trim_end,
+            continues: s.continues,
+            join: s.join.clone(),
+            join_seconds: Some(s.join_seconds),
+            volume: Some(s.volume),
+            mute: s.mute,
+            seed: s.seed,
+        };
+        p.shots.iter().map(as_it_is).collect()
+    });
+    match merge(&p.shots, &p.removed, shots, (&was, &p.size)) {
+        Ok((list, removed)) => (p.shots, p.removed) = (list, removed),
+        Err(e) => return fail(StatusCode::BAD_REQUEST, e),
+    }
+    if let Some(tracks) = body.tracks {
+        let (before, regions_before) = (p.tracks.len(), p.tracks.iter().map(|t| t.regions.len()).sum::<usize>());
+        match sound::merge_tracks(FsPath::new(&p.folder), &p.tracks, tracks, new_id, &p.sounds) {
+            Ok(list) => p.tracks = list,
             Err(e) => return fail(StatusCode::BAD_REQUEST, e),
         }
-    } else if size_changed {
-        for s in p.shots.iter_mut().filter(|s| s.state == "done") {
-            s.state = "changed".into();
+        let regions = p.tracks.iter().map(|t| t.regions.len()).sum::<usize>();
+        if p.tracks.len() > before {
+            app.record("studio_track_added", json!({"tracks": p.tracks.len()}));
         }
+        if regions > regions_before {
+            app.record("studio_region_added", json!({"kind": "sound", "regions": regions}));
+        }
+    }
+    if let Some(strip) = body.shot_track {
+        p.shot_track = strip.tidy();
+    }
+    if let Some(master) = body.master.filter(|v| v.is_finite()) {
+        p.master = master.clamp(0.0, 2.0);
     }
     if let Some(auto) = body.auto_export {
         p.auto_export = auto;
@@ -1177,14 +1382,47 @@ fn sound_kind(path: &FsPath) -> Option<&'static str> {
     })
 }
 
-async fn sound(State(app): State<Shared>, Path(id): Path<String>) -> Response {
+#[derive(Deserialize)]
+struct SoundQuery {
+    #[serde(default)]
+    file: Option<String>,
+    #[serde(default)]
+    shot: Option<String>,
+}
+
+/// The file behind a name the app asks for: a sound file in the film's folder, one the person
+/// added to the film, or one a region plays. Nothing else is read for a film.
+fn sound_of(p: &Project, file: &str) -> Option<PathBuf> {
+    let file = file.trim();
+    let folder = FsPath::new(&p.folder);
+    let path = sound::place(folder, file)?;
+    let inside = path.starts_with(folder) && path.components().all(|c| !matches!(c, std::path::Component::ParentDir));
+    let known = p.sounds.iter().any(|s| s == file) || p.tracks.iter().any(|t| t.regions.iter().any(|r| r.file == file));
+    (inside || known).then_some(path)
+}
+
+async fn sound(State(app): State<Shared>, Path(id): Path<String>, Query(q): Query<SoundQuery>) -> Response {
     let Some(p) = load(&app, &id) else {
         return fail(StatusCode::NOT_FOUND, "no such film");
     };
-    let path = PathBuf::from(&p.sound);
-    let Some(kind) = sound_kind(&path).filter(|_| path.is_absolute()) else {
-        return fail(StatusCode::NOT_FOUND, "this film has no sound file the app can play");
+    // Without a name: the one sound file of a film from before sound tracks.
+    let path = match q.file.as_deref() {
+        Some(file) => sound_of(&p, file),
+        None => Some(PathBuf::from(&p.sound)).filter(|path| path.is_absolute()),
     };
+    let Some((path, kind)) = path.and_then(|path| sound_kind(&path).map(|kind| (path, kind))) else {
+        return fail(StatusCode::NOT_FOUND, "this film has no such sound file");
+    };
+    match tokio::fs::metadata(&path).await {
+        Ok(meta) if meta.len() > MAX_SOUND_BYTES => {
+            return fail(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "This sound file is larger than 200 MB. It is in the exported film, but the app does not play it.",
+            )
+        }
+        Ok(_) => {}
+        Err(_) => return fail(StatusCode::NOT_FOUND, "the sound file was not found"),
+    }
     match tokio::fs::read(&path).await {
         Ok(bytes) => Response::builder()
             .header(header::CONTENT_TYPE, kind)
@@ -1192,6 +1430,182 @@ async fn sound(State(app): State<Shared>, Path(id): Path<String>) -> Response {
             .body(Body::from(bytes))
             .unwrap(),
         Err(_) => fail(StatusCode::NOT_FOUND, "the sound file was not found"),
+    }
+}
+
+/// The sound files directly in a folder, by name.
+fn sound_files_in(dir: &FsPath) -> Vec<PathBuf> {
+    let mut found: Vec<PathBuf> = std::fs::read_dir(dir).map(|entries| entries.flatten().map(|e| e.path()).collect()).unwrap_or_default();
+    found.retain(|path| sound::is_sound(path) && path.is_file() && !path.file_name().is_some_and(|n| n.to_string_lossy().starts_with('.')));
+    found.sort();
+    found
+}
+
+/// The film's library of sounds: the files in its folder (and one folder down, the clips aside),
+/// the ones added from elsewhere, and any other file a region plays.
+fn library(p: &Project) -> Value {
+    let folder = FsPath::new(&p.folder);
+    let mut files: Vec<(PathBuf, &str)> = sound_files_in(folder).into_iter().map(|f| (f, "folder")).collect();
+    let mut inner: Vec<PathBuf> = std::fs::read_dir(folder).map(|e| e.flatten().map(|e| e.path()).collect()).unwrap_or_default();
+    inner.retain(|d| d.is_dir() && !d.file_name().is_some_and(|n| n == "clips" || n.to_string_lossy().starts_with('.')));
+    inner.sort();
+    for dir in inner.iter().take(24) {
+        files.extend(sound_files_in(dir).into_iter().map(|f| (f, "folder")));
+    }
+    for file in p.sounds.iter().chain(p.tracks.iter().flat_map(|t| t.regions.iter().map(|r| &r.file))) {
+        if let Some(path) = sound::place(folder, file).filter(|path| !files.iter().any(|(f, _)| f == path)) {
+            files.push((path, if p.sounds.contains(file) { "added" } else { "used" }));
+        }
+    }
+    let list: Vec<Value> = files
+        .into_iter()
+        .take(1000)
+        .map(|(path, place)| {
+            let bytes = std::fs::metadata(&path).map(|m| m.len()).ok();
+            json!({"file": path.to_string_lossy(), "name": path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
+                   "bytes": bytes.unwrap_or(0), "from": place, "missing": bytes.is_none()})
+        })
+        .collect();
+    json!({"sounds": list})
+}
+
+async fn sounds(State(app): State<Shared>, Path(id): Path<String>) -> Response {
+    match load(&app, &id) {
+        Some(p) => Json(library(&p)).into_response(),
+        None => fail(StatusCode::NOT_FOUND, "no such film, or its folder is gone"),
+    }
+}
+
+#[derive(Deserialize)]
+struct AddSound {
+    path: String,
+}
+
+/// Adds a sound file to the film's library, or every sound file directly in a folder.
+async fn add_sound(State(app): State<Shared>, Path(id): Path<String>, Json(body): Json<AddSound>) -> Response {
+    let Some(mut p) = load(&app, &id) else {
+        return fail(StatusCode::NOT_FOUND, "no such film, or its folder is gone");
+    };
+    let path = PathBuf::from(body.path.trim());
+    if !path.is_absolute() || body.path.len() > 1024 {
+        return fail(StatusCode::BAD_REQUEST, "Give the sound file by its full path.");
+    }
+    let found = if path.is_dir() {
+        sound_files_in(&path)
+    } else if path.is_file() && sound::is_sound(&path) {
+        vec![path]
+    } else if path.is_file() {
+        return fail(StatusCode::BAD_REQUEST, "That is not a sound file Studio can use. Use wav, mp3, m4a, aac, flac, ogg, opus or aiff.");
+    } else {
+        return fail(StatusCode::NOT_FOUND, "Nothing was found at that path.");
+    };
+    if found.is_empty() {
+        return fail(StatusCode::NOT_FOUND, "There are no sound files in that folder.");
+    }
+    let folder = PathBuf::from(&p.folder);
+    let mut added = Vec::new();
+    for file in found {
+        let text = file.to_string_lossy().to_string();
+        // A file in the film's own folder is in the library already.
+        if !file.starts_with(&folder) && !p.sounds.contains(&text) && p.sounds.len() < sound::MAX_SOUNDS {
+            p.sounds.push(text.clone());
+        }
+        added.push(text);
+    }
+    if let Err(e) = store(&mut p) {
+        return fail(StatusCode::INTERNAL_SERVER_ERROR, format!("the film could not be saved: {e}"));
+    }
+    app.record("studio_sound_added", json!({"files": added.len()}));
+    let mut answer = library(&p);
+    answer["added"] = json!(added);
+    Json(answer).into_response()
+}
+
+async fn remove_sound(State(app): State<Shared>, Path(id): Path<String>, Query(q): Query<SoundQuery>) -> Response {
+    let Some(mut p) = load(&app, &id) else {
+        return fail(StatusCode::NOT_FOUND, "no such film, or its folder is gone");
+    };
+    let file = q.file.unwrap_or_default();
+    p.sounds.retain(|s| *s != file);
+    if let Err(e) = store(&mut p) {
+        return fail(StatusCode::INTERNAL_SERVER_ERROR, format!("the film could not be saved: {e}"));
+    }
+    Json(library(&p)).into_response()
+}
+
+/// Reads the sound of a file once, as ffmpeg decodes it, into its peaks and its length.
+/// A file without sound has no peaks and no length; `None` when the tool is missing or cannot start.
+async fn read_peaks(app: &Shared, file: &FsPath) -> Option<(Vec<i8>, f32)> {
+    use tokio::io::AsyncReadExt;
+    let ffmpeg = crate::engine_tool(app, crate::EngineKind::Ffmpeg, "ffmpeg").await.ok()?;
+    let mut child = tokio::process::Command::new(ffmpeg)
+        .args(["-hide_banner", "-loglevel", "error", "-t", "21600", "-i"])
+        .arg(file)
+        .args(["-vn", "-map", "0:a:0?", "-ac", "1", "-ar", &sound::READ_RATE.to_string(), "-f", "s16le", "-"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .ok()?;
+    let mut out = child.stdout.take()?;
+    let mut peaks = sound::Peaks::default();
+    let mut piece = vec![0u8; 64 * 1024];
+    loop {
+        match out.read(&mut piece).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => peaks.feed(&piece[..n]),
+        }
+    }
+    child.wait().await.ok();
+    Some(peaks.done())
+}
+
+/// The peaks of a clip's sound (`shot`) or of a sound file, read once and then kept next to the clips.
+async fn peaks_of(app: &Shared, p: &Project, file: &FsPath, shot: Option<&str>) -> Option<(Vec<i8>, f32)> {
+    let dir = FsPath::new(&p.folder).join("clips");
+    let name = match shot {
+        Some(shot) => format!("{}.peaks.json", clip_stem(p, shot)),
+        None => {
+            let meta = std::fs::metadata(file).ok()?;
+            let modified = meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_millis());
+            sound::peaks_name(file, meta.len(), modified)
+        }
+    };
+    let kept = dir.join(name);
+    let read = std::fs::read_to_string(&kept).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()).and_then(|v| {
+        let pairs: Vec<i8> = v["peaks"].as_array()?.iter().filter_map(|n| n.as_i64().map(|n| n as i8)).collect();
+        Some((pairs, v["seconds"].as_f64()? as f32))
+    });
+    if read.is_some() {
+        return read;
+    }
+    if !file.is_file() {
+        return None;
+    }
+    let (pairs, seconds) = read_peaks(app, file).await?;
+    std::fs::create_dir_all(&dir).ok();
+    std::fs::write(kept, json!({"rate": sound::PEAK_RATE, "seconds": seconds, "peaks": pairs}).to_string()).ok();
+    Some((pairs, seconds))
+}
+
+async fn peaks(State(app): State<Shared>, Path(id): Path<String>, Query(q): Query<SoundQuery>) -> Response {
+    let Some(p) = load(&app, &id) else {
+        return fail(StatusCode::NOT_FOUND, "no such film, or its folder is gone");
+    };
+    let found = match (q.shot.as_deref(), q.file.as_deref()) {
+        (Some(shot), _) if valid_id(shot) && p.shots.iter().any(|s| s.id == shot) => {
+            peaks_of(&app, &p, &clip_path(&p, shot), Some(shot)).await
+        }
+        (None, Some(file)) => match sound_of(&p, file) {
+            Some(path) => peaks_of(&app, &p, &path, None).await,
+            None => return fail(StatusCode::NOT_FOUND, "this film has no such sound file"),
+        },
+        _ => return fail(StatusCode::BAD_REQUEST, "say which sound: \"shot\" or \"file\""),
+    };
+    match found {
+        Some((pairs, seconds)) => Json(json!({"rate": sound::PEAK_RATE, "seconds": seconds, "peaks": pairs})).into_response(),
+        None => fail(StatusCode::NOT_FOUND, "that sound was not found, or it could not be read"),
     }
 }
 
@@ -1282,6 +1696,79 @@ async fn storyboard(State(app): State<Shared>, Path(_id): Path<String>, Json(bod
         .into_response()
 }
 
+#[derive(Deserialize, Default)]
+struct Rewrite {
+    /// What the person wants different: "closer", "at night".
+    #[serde(default)]
+    hint: String,
+    /// The description as it stands on the screen, when it is not saved yet.
+    #[serde(default)]
+    prompt: Option<String>,
+}
+
+/// The chat model writes the description of one shot again, in the words of the shots around it.
+async fn rewrite(State(app): State<Shared>, Path((id, shot)): Path<(String, String)>, body: Option<Json<Rewrite>>) -> Response {
+    let Some(p) = load(&app, &id) else {
+        return fail(StatusCode::NOT_FOUND, "no such film, or its folder is gone");
+    };
+    let Some(at) = p.shots.iter().position(|s| s.id == shot) else {
+        return fail(StatusCode::NOT_FOUND, "no such shot");
+    };
+    let body = body.map(|b| b.0).unwrap_or_default();
+    let now: String = body.prompt.unwrap_or_else(|| p.shots[at].prompt.clone()).trim().chars().take(MAX_PROMPT).collect();
+    let hint: String = body.hint.trim().chars().take(400).collect();
+    if now.is_empty() && hint.is_empty() {
+        return fail(StatusCode::BAD_REQUEST, "Write a few words about the shot first.");
+    }
+    let Some(chat) = app.manifest.packages.iter().find(|p| p.modality == Modality::Chat && !app.installed(p).is_empty()) else {
+        return fail(StatusCode::CONFLICT, "No chat model is installed. Add Chat under Models first.");
+    };
+    let Some(port) = own_port(&app) else {
+        return fail(StatusCode::INTERNAL_SERVER_ERROR, "the service does not know its own address");
+    };
+    // The shots around it say who and where: up to three before it and one after.
+    let before: Vec<&str> = p.shots[at.saturating_sub(3)..at].iter().map(|s| s.prompt.as_str()).filter(|t| !t.is_empty()).collect();
+    let after = p.shots.get(at + 1).map(|s| s.prompt.as_str()).filter(|t| !t.is_empty());
+    let request = json!({
+        "model": chat.id,
+        "messages": [
+            {"role": "system", "content": board::rewrite_prompt()},
+            {"role": "user", "content": board::rewrite_request(&before, after, &now, &hint, p.shots[at].continues && at > 0)},
+        ],
+        "max_tokens": 320,
+        "temperature": 0.6,
+        "chat_template_kwargs": {"enable_thinking": false},
+    });
+    let answer = app
+        .http
+        .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
+        .bearer_auth(&app.token)
+        .json(&request)
+        .timeout(Duration::from_secs(180))
+        .send()
+        .await;
+    let text = match answer {
+        Ok(r) if r.status().is_success() => r
+            .json::<Value>()
+            .await
+            .ok()
+            .and_then(|v| v["choices"][0]["message"]["content"].as_str().map(str::to_string))
+            .unwrap_or_default(),
+        Ok(r) => {
+            let v: Value = r.json().await.unwrap_or(Value::Null);
+            return fail(StatusCode::BAD_GATEWAY, v["error"]["message"].as_str().unwrap_or("the chat model could not answer").to_string());
+        }
+        Err(e) => return fail(StatusCode::BAD_GATEWAY, e.to_string()),
+    };
+    match board::one_description(&text) {
+        Some(prompt) => {
+            app.record("studio_shot_rewritten", json!({"hint": !hint.is_empty(), "chars": prompt.chars().count()}));
+            Json(json!({"prompt": prompt})).into_response()
+        }
+        None => fail(StatusCode::BAD_GATEWAY, "The chat model did not write a description. Try again."),
+    }
+}
+
 /// The export of each film: "working", "done" or "failed", with the file or what went wrong.
 static EXPORTS: Mutex<Vec<(String, Value)>> = Mutex::new(Vec::new());
 
@@ -1366,6 +1853,7 @@ fn pieces(shots: &[&Shot], sounds: &[bool]) -> Vec<export::Piece> {
                 join: if i == 0 || s.continues { export::Join::Cut } else { export::Join::named(&s.join) },
                 volume: if s.mute { 0.0 } else { s.volume.clamp(0.0, 1.5) },
                 has_sound: sounds.get(i).copied().unwrap_or(true),
+                join_frames: ((s.join_seconds.clamp(0.25, 2.0) * 24.0).round() as u32).max(2),
             }
         })
         .collect()
@@ -1389,7 +1877,8 @@ async fn export(State(app): State<Shared>, Path(id): Path<String>, body: Option<
 }
 
 /// Starts joining the made shots of a film into its MP4; answers with how many shots go in.
-async fn begin_export(app: &Shared, mut p: Project, body: Export) -> Result<usize, (StatusCode, String)> {
+async fn begin_export(app: &Shared, p: Project, body: Export) -> Result<usize, (StatusCode, String)> {
+    let mut p = with_tracks(app, p).await;
     let id = p.id.clone();
     if exported(&p).is_empty() {
         return Err((StatusCode::CONFLICT, "No shot is made yet. Make the shots first.".into()));
@@ -1437,11 +1926,34 @@ async fn begin_export(app: &Shared, mut p: Project, body: Export) -> Result<usiz
     }
     .tidy();
     let (video_bits, sound_bits) = options.bitrates(&p.size);
+    // The files the sound tracks play come after the clips (and the one sound file, when there is one).
+    let first_sound = if simple { 1 } else { count } + usize::from(music.is_some());
+    let mut sound_files: Vec<PathBuf> = Vec::new();
+    let mut missing: Option<String> = None;
+    let mix = sound::heard(&p.shot_track, &p.tracks, p.master, |file| {
+        let path = sound::place(FsPath::new(&p.folder), file).filter(|path| path.is_file());
+        let Some(path) = path else {
+            missing.get_or_insert_with(|| file.rsplit(['/', '\\']).next().unwrap_or(file).to_string());
+            return None;
+        };
+        let at = sound_files.iter().position(|f| *f == path).unwrap_or_else(|| {
+            sound_files.push(path);
+            sound_files.len() - 1
+        });
+        Some(first_sound + at)
+    });
+    if let Some(name) = missing {
+        let why = format!("The sound file {name} was not found. Put it back where it was, or delete its regions from the film.");
+        set_export(&id, json!({"state": "failed", "error": why}));
+        return Err((StatusCode::BAD_REQUEST, why));
+    }
+    let (track_count, region_count) = (p.tracks.len(), mix.sounds.len());
     let finish = export::Finish {
         fade_in: p.fade_in,
         fade_out: p.fade_out,
         scale: options.scale,
         music: music.as_ref().map(|_| (if simple { 1 } else { count }, volume)),
+        mix: Some(mix),
     };
     let graph = export::finished(film, &finish);
     let folder = PathBuf::from(&p.folder);
@@ -1483,6 +1995,9 @@ async fn begin_export(app: &Shared, mut p: Project, body: Export) -> Result<usiz
                 cmd.args(["-stream_loop", "-1"]);
             }
             cmd.arg("-i").arg(m);
+        }
+        for file in &sound_files {
+            cmd.arg("-i").arg(file);
         }
         if !graph.filter.is_empty() {
             // The graph of a long film is longer than a command line may be: it is read from a file.
@@ -1530,6 +2045,7 @@ async fn begin_export(app: &Shared, mut p: Project, body: Export) -> Result<usiz
                     "studio_exported",
                     json!({"shots": count, "seconds": started.elapsed().as_secs_f32(), "bytes": bytes, "music": music.is_some(),
                            "film_seconds": graph.frames as f32 / 24.0, "dissolves": joins.0, "through_black": joins.1, "plain": simple,
+                           "tracks": track_count, "regions": region_count,
                            "scale": options.scale.max(1), "quality": if options.quality.is_empty() { "balanced" } else { options.quality.as_str() }}),
                 );
                 set_export(
@@ -1592,9 +2108,24 @@ async fn reveal(State(app): State<Shared>, Path(id): Path<String>) -> Response {
 #[derive(Deserialize)]
 struct Narration {
     text: String,
+    /// Seconds into the film where the reading starts; its start without one.
+    #[serde(default)]
+    at: Option<f32>,
+    /// The track it goes on; without one, the track named "Narration", made when there is none.
+    #[serde(default)]
+    track: Option<String>,
 }
 
-/// The voice package reads a text; the reading is saved in the film's folder and becomes its sound file.
+/// The first of "narration.wav", "narration 2.wav", ... that is not in the folder yet.
+fn narration_file(folder: &FsPath) -> PathBuf {
+    (1..)
+        .map(|n| folder.join(if n == 1 { "narration.wav".to_string() } else { format!("narration {n}.wav") }))
+        .find(|file| !file.exists())
+        .unwrap_or_else(|| folder.join("narration.wav"))
+}
+
+/// The voice package reads a text; the reading is saved in the film's folder and set on a
+/// narration track as one region. Answers with the film, and which region it is.
 async fn narration(State(app): State<Shared>, Path(id): Path<String>, Json(body): Json<Narration>) -> Response {
     let Some(mut p) = load(&app, &id) else {
         return fail(StatusCode::NOT_FOUND, "no such film, or its folder is gone");
@@ -1631,21 +2162,62 @@ async fn narration(State(app): State<Shared>, Path(id): Path<String>, Json(body)
         }
         Err(e) => return fail(StatusCode::BAD_GATEWAY, e.to_string()),
     };
-    let file = FsPath::new(&p.folder).join("narration.wav");
+    let file = narration_file(FsPath::new(&p.folder));
     if let Err(e) = std::fs::write(&file, &wav) {
         return fail(StatusCode::INTERNAL_SERVER_ERROR, format!("the narration could not be saved in the film's folder: {e}"));
     }
+    let Some(seconds) = peaks_of(&app, &p, &file, None).await.map(|(_, seconds)| seconds).filter(|s| *s > 0.0) else {
+        return fail(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "The reading was saved in the film's folder, but it could not be measured. Add it from the Library.",
+        );
+    };
     // The film was open while the voice read: take it as it is now.
     if let Some(now) = load(&app, &id) {
         p = now;
     }
-    p.sound = file.to_string_lossy().to_string();
-    p.sound_once = true;
+    let wanted = body.track.as_deref().and_then(|t| p.tracks.iter().position(|x| x.id == t));
+    let at = match wanted.or_else(|| p.tracks.iter().position(|t| t.name.eq_ignore_ascii_case("narration"))) {
+        Some(at) => at,
+        None if p.tracks.len() >= sound::MAX_TRACKS => {
+            return fail(StatusCode::CONFLICT, "This film has as many sound tracks as it can hold.")
+        }
+        None => {
+            p.tracks.push(Track {
+                id: new_id(),
+                name: "Narration".into(),
+                kind: "sound".into(),
+                color: sound::next_color(p.tracks.len()),
+                volume: 1.0,
+                pan: 0.0,
+                mute: false,
+                solo: false,
+                regions: Vec::new(),
+            });
+            p.tracks.len() - 1
+        }
+    };
+    let region = Region {
+        id: new_id(),
+        file: file.to_string_lossy().to_string(),
+        start: body.at.filter(|v| v.is_finite()).unwrap_or(0.0).clamp(0.0, 6.0 * 3600.0),
+        offset: 0.0,
+        length: seconds,
+        gain: 1.0,
+        fade_in: 0.0,
+        fade_out: 0.0,
+        loops: 1,
+    };
+    let placed = json!({"track": p.tracks[at].id, "id": region.id, "seconds": seconds});
+    p.tracks[at].regions.push(region);
     if let Err(e) = store(&mut p) {
         return fail(StatusCode::INTERNAL_SERVER_ERROR, format!("the film could not be saved: {e}"));
     }
     app.record("studio_narration_made", json!({"package": voice.id, "chars": text.chars().count(), "bytes": wav.len()}));
-    Json(view(&app, p)).into_response()
+    app.record("studio_region_added", json!({"kind": "narration", "regions": p.tracks.iter().map(|t| t.regions.len()).sum::<usize>()}));
+    let mut answer = view(&app, p);
+    answer["region"] = placed;
+    Json(answer).into_response()
 }
 
 async fn export_state(Path(id): Path<String>) -> Json<Value> {
@@ -1661,6 +2233,9 @@ pub fn router() -> Router<Shared> {
         .route("/v1/studio/projects/{id}/export", get(export_state).post(export))
         .route("/v1/studio/projects/{id}/reveal", post(reveal))
         .route("/v1/studio/projects/{id}/sound", get(sound))
+        .route("/v1/studio/projects/{id}/sounds", get(sounds).post(add_sound).delete(remove_sound))
+        .route("/v1/studio/projects/{id}/peaks", get(peaks))
+        .route("/v1/studio/projects/{id}/shots/{shot}/rewrite", post(rewrite))
         .route("/v1/studio/projects/{id}/narration", post(narration))
         .route("/v1/studio/projects/{id}/shots/{shot}/take", post(use_take))
         .route("/v1/studio/projects/{id}/shots/{shot}/takes/{n}", axum::routing::delete(delete_take))
@@ -1799,14 +2374,7 @@ mod tests {
             folder: dir.to_string_lossy().into(),
             size: "640x384".into(),
             shots: vec![shot("a1", "fox", "done"), shot("b2", "not made", "empty"), second],
-            auto_export: false,
-            sound: String::new(),
-            sound_volume: 0.5,
-            sound_once: false,
-            fade_in: false,
-            fade_out: false,
-            export: ExportOptions::default(),
-            updated_ms: 0,
+            ..Project::default()
         };
         let made = exported(&p);
         assert_eq!(made.len(), 2);
@@ -1986,14 +2554,7 @@ mod tests {
             folder: "/films/fox".into(),
             size: "640x384".into(),
             shots: vec![with, shot("b2", "boat", "done")],
-            auto_export: false,
-            sound: String::new(),
-            sound_volume: 0.5,
-            sound_once: false,
-            fade_in: false,
-            fade_out: false,
-            export: ExportOptions::default(),
-            updated_ms: 0,
+            ..Project::default()
         };
         assert_eq!(clip_path(&p, "a1"), FsPath::new("/films/fox/clips/a1.3.webm"));
         assert_eq!(poster_path(&p, "a1"), FsPath::new("/films/fox/clips/a1.3.jpg"));
@@ -2013,14 +2574,7 @@ mod tests {
             folder: "/films/fox".into(),
             size: "640x384".into(),
             shots: vec![shot("a1", "a fox", "done"), second, third, shot("d4", "", "empty")],
-            auto_export: false,
-            sound: String::new(),
-            sound_volume: 0.5,
-            sound_once: false,
-            fade_in: false,
-            fade_out: false,
-            export: ExportOptions::default(),
-            updated_ms: 0,
+            ..Project::default()
         };
         let seen =
             [pace::Sample { frames: 121, continued: true, seconds: 400.0 }, pace::Sample { frames: 49, continued: false, seconds: 90.0 }];
@@ -2056,14 +2610,7 @@ mod tests {
             folder: "/films/fox".into(),
             size: "640x384".into(),
             shots: vec![],
-            auto_export: false,
-            sound: String::new(),
-            sound_volume: 0.5,
-            sound_once: false,
-            fade_in: false,
-            fade_out: false,
-            export: ExportOptions::default(),
-            updated_ms: 0,
+            ..Project::default()
         };
         assert_eq!(export_path(&p, &p.export), FsPath::new("/films/fox/The fox a film.mp4"));
         p.export = odd;
@@ -2079,6 +2626,117 @@ mod tests {
         assert_eq!(sound_kind(FsPath::new("/film/narration.wav")), Some("audio/wav"));
         assert_eq!(sound_kind(FsPath::new("/home/me/.ssh/id_ed25519")), None);
         assert_eq!(sound_kind(FsPath::new("/home/me/notes.txt")), None);
+    }
+
+    #[test]
+    fn a_shot_changed_back_is_made_again_without_making_it() {
+        let size = ("640x384", "640x384");
+        let mut b = shot("b2", "the fox stops", "done");
+        b.continues = true;
+        let old = vec![shot("a1", "a fox", "done"), b, shot("c3", "a boat", "failed")];
+        let ask = |a: &str, b: &str| vec![asked("a1", a, false), asked("b2", b, true), asked("c3", "a boat at sea", false)];
+        // The description changes: the clip is kept, the shot is marked, and what it was made from is remembered.
+        let (changed, bin) = merge(&old, &[], ask("a fox in rain", "the fox stops"), size).unwrap();
+        assert_eq!(changed.iter().map(|s| s.state.as_str()).collect::<Vec<_>>(), ["changed", "done", "empty"]);
+        assert!(changed[0].made_from.is_some() && bin.is_empty());
+        // Undo: the description is the one the clip was made from, so the shot is made.
+        let (back, _) = merge(&changed, &[], ask("a fox", "the fox stops"), size).unwrap();
+        assert_eq!(back.iter().map(|s| s.state.as_str()).collect::<Vec<_>>(), ["done", "done", "empty"]);
+        // Another shape and back again: the same.
+        let (tall, _) = merge(&old, &[], ask("a fox", "the fox stops"), ("640x384", "384x640")).unwrap();
+        assert_eq!(tall.iter().map(|s| s.state.as_str()).collect::<Vec<_>>(), ["changed", "changed", "empty"]);
+        let (wide, _) = merge(&tall, &[], ask("a fox", "the fox stops"), ("384x640", "640x384")).unwrap();
+        assert_eq!(wide.iter().map(|s| s.state.as_str()).collect::<Vec<_>>(), ["done", "done", "empty"]);
+        // A film from before this was kept does not know what its changed shots were made from.
+        let legacy = vec![shot("a1", "a fox in rain", "changed")];
+        let (still, _) = merge(&legacy, &[], vec![asked("a1", "a fox", false)], size).unwrap();
+        assert_eq!(still[0].state, "changed");
+    }
+
+    #[test]
+    fn a_shot_taken_out_of_the_film_comes_back_with_its_clip() {
+        let size = ("640x384", "640x384");
+        let mut b = shot("b2", "the fox stops", "done");
+        b.continues = true;
+        b.takes = vec![take(1, 49), take(2, 49)];
+        b.take = 2;
+        let old = vec![shot("a1", "a fox", "done"), b, shot("c3", "", "empty")];
+        // Two shots are deleted: the one with a clip is kept aside, the empty one is gone.
+        let (left, bin) = merge(&old, &[], vec![asked("a1", "a fox", false)], size).unwrap();
+        assert_eq!((left.len(), bin.iter().map(|s| s.id.as_str()).collect::<Vec<_>>()), (1, vec!["b2"]));
+        // Undo puts it back where it was: made, with its takes.
+        let (back, bin) = merge(&left, &bin, vec![asked("a1", "a fox", false), asked("b2", "the fox stops", true)], size).unwrap();
+        assert_eq!((back[1].state.as_str(), back[1].take, back[1].takes.len()), ("done", 2, 2));
+        assert!(bin.is_empty());
+        // Put back somewhere else, a shot that continued another has to be made again; its clip is still its clip.
+        let (left, bin) = merge(&back, &bin, vec![asked("a1", "a fox", false)], size).unwrap();
+        let (moved, _) = merge(&left, &bin, vec![asked("b2", "the fox stops", false), asked("a1", "a fox", false)], size).unwrap();
+        assert_eq!((moved[0].state.as_str(), moved[0].takes.len()), ("changed", 2));
+        // Only so many are kept aside, the newest ones.
+        let many: Vec<Shot> = (0..MAX_REMOVED + 5).map(|i| shot(&format!("s{i}"), "x", "done")).collect();
+        let (_, bin) = merge(&many, &[], vec![], size).unwrap();
+        assert_eq!((bin.len(), bin[0].id.as_str()), (MAX_REMOVED, "s5"));
+    }
+
+    #[test]
+    fn a_join_has_a_length_and_a_film_has_tracks() {
+        let made = merge_shots(
+            &[],
+            vec![
+                ShotIn { join: "dissolve".into(), join_seconds: Some(9.0), ..asked("a1", "fox", false) },
+                ShotIn { join: "black".into(), join_seconds: Some(0.0), ..asked("b2", "boat", false) },
+                ShotIn { join_seconds: Some(f32::NAN), trim_start: f32::NAN, ..asked("c3", "sea", false) },
+            ],
+            false,
+        )
+        .unwrap();
+        assert_eq!(made.iter().map(|s| s.join_seconds).collect::<Vec<_>>(), [2.0, 0.25, 0.5]);
+        assert_eq!(made[2].trim_start, 0.0);
+        let mut slow = shot("b2", "boat", "done");
+        slow.made_frames = Some(96);
+        slow.join = "dissolve".into();
+        slow.join_seconds = 1.25;
+        assert_eq!(pieces(&[&shot("a1", "fox", "done"), &slow], &[true, true])[1].join_frames, 30);
+        // A film without tracks is stored as before, and one from before tracks is read as it is.
+        let p = Project { id: "p".into(), name: "Film".into(), folder: "/films/fox".into(), ..Project::default() };
+        let text = serde_json::to_string(&p).unwrap();
+        assert!(!text.contains("tracks") && !text.contains("master") && !text.contains("shot_track") && !text.contains("removed"));
+        let old: Project =
+            serde_json::from_str(r#"{"id":"p","name":"Film","folder":"/f","size":"640x384","shots":[],"sound":"/m/a.wav","updated_ms":1}"#)
+                .unwrap();
+        assert_eq!(
+            (old.master, old.tracks.len(), old.shot_track.volume, old.sound.as_str(), old.sound_volume),
+            (1.0, 0, 1.0, "/m/a.wav", 0.5)
+        );
+        assert_eq!(narration_file(FsPath::new("/nowhere/at/all")), FsPath::new("/nowhere/at/all/narration.wav"));
+    }
+
+    #[test]
+    fn only_the_sounds_of_a_film_are_read_for_it() {
+        let mut p = Project { id: "p".into(), folder: "/films/fox".into(), sounds: vec!["/music/theme.mp3".into()], ..Project::default() };
+        p.tracks = sound::merge_tracks(
+            FsPath::new("/films/fox"),
+            &[],
+            vec![sound::TrackIn {
+                regions: vec![sound::RegionIn { file: "/fx/rain.flac".into(), length: 2.0, ..sound::RegionIn::default() }],
+                ..sound::TrackIn::default()
+            }],
+            new_id,
+            &["/fx/rain.flac".to_string()],
+        )
+        .unwrap();
+        assert_eq!(sound_of(&p, "/films/fox/narration.wav"), Some(PathBuf::from("/films/fox/narration.wav")));
+        assert_eq!(sound_of(&p, "narration 2.wav"), Some(PathBuf::from("/films/fox/narration 2.wav")));
+        assert_eq!(sound_of(&p, "/music/theme.mp3"), Some(PathBuf::from("/music/theme.mp3")));
+        assert_eq!(sound_of(&p, "/fx/rain.flac"), Some(PathBuf::from("/fx/rain.flac")));
+        for other in
+            ["/music/other.mp3", "/films/fox/../../music/other.mp3", "/films/fox/rigbrew-film.json", "/home/me/.ssh/id_ed25519", ""]
+        {
+            assert_eq!(sound_of(&p, other), None, "{other}");
+        }
+        assert_eq!(made_key("640x384", "a fox", 121, None), made_key("640x384", "a fox", 121, None));
+        assert_ne!(made_key("640x384", "a fox", 121, None), made_key("640x384", "a fox", 121, Some("a1")));
+        assert_ne!(made_key("640x384", "a fox1", 21, None), made_key("640x384", "a fox", 121, None));
     }
 
     #[test]
