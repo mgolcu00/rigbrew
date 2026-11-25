@@ -423,8 +423,11 @@
 								<h2>Run this command?</h2>
 								<pre class="raw selectable">{p.command}</pre>
 								{#if purposeOf(p.command)}<p class="purpose">{purposeOf(p.command)}</p>{/if}
-								{#if isMac}<p class="fine">It can change files only inside this folder{code.web ? '' : ', and it has no internet'}.</p>{/if}
-								<p class="why">It runs in {folderName} with your own rights, so it can do anything you can do in a terminal. Allow it only if you know what it does.</p>
+								{#if isMac}
+									<p class="why">It runs in {folderName}. It can read what you can, change files only inside this folder{code.web ? '' : ', and it has no internet'}. Allow it only if you know what it does.</p>
+								{:else}
+									<p class="why">It runs in {folderName} with your own rights, so it can do anything you can do in a terminal. Allow it only if you know what it does.</p>
+								{/if}
 							{:else if p.tool === 'call_tool'}
 								<h2>Use {asked?.kind === 'tool' ? String(asked.arguments.tool ?? 'a tool') : 'a tool'} from the connector {p.path}?</h2>
 								<p class="cap">With these arguments</p>
