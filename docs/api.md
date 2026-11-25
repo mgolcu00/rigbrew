@@ -64,6 +64,11 @@ Browsers are refused unless the request comes from the app's own origin.
 | `POST /v1/agent/tasks/{id}/message` | `{"text", "mode", "web", "connectors"}`: continue a task that is not working with a follow-up. |
 | `POST /v1/agent/tasks/{id}/undo` | Take back what the newest request changed in the folder; see [Undo](#undo). Answers `{"task", "restored", "removed"}`. `409` while the task works or when nothing is left to take back. |
 | `DELETE /v1/agent/tasks/{id}` | Stop a task where it is (a running command is killed). `?remove=true` also forgets it. |
+| `DELETE /v1/agent/tasks/{id}/app` | Stop the app the task started with `start_app`; see [Run, look, check](#run-look-check). Answers `{"task"}`. |
+| `POST /v1/agent/look` | `{"task"?, "url"?, "size"?, "do"?}`: look at a page on this computer the way `look_at_page` does. With `task` the address defaults to the task's running app and what was seen is kept as the task's `page`; without one the answer also has the `text` and the `picture` (PNG, base64). Any other address is `400`. Answers `{"page"}`. |
+| `POST /v1/agent/tasks/{id}/device` | Take a new picture of the phone's screen (the booted simulator, or the Android device `adb` sees) and keep it as the task's `device`. `409` when there is none. Answers `{"task"}`. |
+| `GET /v1/agent/tasks/{id}/shots/{name}.png` | A picture the task took: the `image` of a step, the `shot` of its `page` or `device`. |
+| `GET /v1/agent/looks/next`, `POST /v1/agent/looks/{id}` | For the app, not for people: it waits here (up to 20 seconds) for a page the service wants opened, `{"look": {"id", "url", "width", "height", "actions"}}` or `{"look": null}`, and hands back `{url, title, text, errors, failed, picture?, note}`. |
 | `GET /v1/agent/skills` | The skills a task can use (`?folder=` adds the folder's own): name, description, where it comes from. |
 | `GET /v1/skills`, `POST /v1/skills` | Every skill with `source` (`built-in`, `yours`, `folder`), `enabled` and `where` (`any`, `code`, `chat`); `?folder=` adds a project's own. `POST {name, description, body, copy_of?}` makes one of the person's own; see [Skills](#skills). |
 | `GET/PUT/DELETE /v1/skills/{name}` | One skill with its whole instructions, its licence line and its other files. `PUT {"enabled": false}` switches it off; `PUT {name, description, body}` changes it (a built-in one becomes the person's own version under the same name). `DELETE` removes the person's own. |
@@ -112,8 +117,8 @@ curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
 A task has a `state` (`running`, `waiting`, `asking`, `done`, `failed`, `stopped`, `interrupted`), `steps` and,
 while it waits for a yes or no to one step, `pending`. A step is one of `{"kind": "user", "text"}`,
 `{"kind": "model", "text"}`, `{"kind": "note", "text"}`, `{"kind": "question", "text"}` (see
-[Pace](#pace)) or `{"kind": "tool", "call", "name", "arguments", "status", "result", "diff"}` with the
-status `running`, `waiting`, `done`, `failed`, `denied` or `stopped`. `pending` is `{"call", "tool", "path",
+[Pace](#pace)) or `{"kind": "tool", "call", "name", "arguments", "status", "result", "diff", "image"}` with the
+status `running`, `waiting`, `done`, `failed`, `denied` or `stopped`; `image` names the picture a step took. `pending` is `{"call", "tool", "path",
 "command", "diff"}`; answer it with `POST .../approve` and the same `call`.
 
 | Mode | What it means |
@@ -126,7 +131,8 @@ status `running`, `waiting`, `done`, `failed`, `denied` or `stopped`. `pending` 
 the task to `auto_edits`. A call the person said no to is not asked again until their next message, and after two refusals of one tool that tool is not asked for again until then.
 
 The tools: `list_files`, `read_file`, `search`, `edit_file`, `write_file`, `run_command`, `update_plan`,
-`outline`, `use_skill`, `finish`, `read_skill_file` when a skill has other files, `web_search` and `fetch_url` when
+`outline`, `use_skill`, `finish`, `start_app`, `look_at_page`, `check_project` and `simulator` (see
+[Run, look, check](#run-look-check)), `read_skill_file` when a skill has other files, `web_search` and `fetch_url` when
 the task was started with `"web": true`, and `find_tool` and `call_tool` when it was started with
 `"connectors": true` and a connector is running. A `call_tool` that waits shows as `pending` with
 `tool: "call_tool"` and the connector's name in `path`; the tool and its arguments are in the step.
@@ -145,13 +151,85 @@ methods one level in), or the top-level ones of each source file in a folder. It
 expressions per language, not a parser, for Rust, Python, JavaScript, TypeScript, Go, Swift, Kotlin, Java, C, C++
 and Svelte.
 
-After a change to a file went in, the result the model reads ends with the command that checks this project
+After a change to a file went in, the result the model reads ends with how to check it: `check_project` when the
+project has checks that can run here, otherwise the command that checks this project
 (`cargo test`, the `test`, `check` or `build` script of `package.json` with the package manager of the lock file,
 `python3 -m pytest` or `python3 -m unittest`, `go test ./...`, the `test`, `check` or `build` target of a
 `Makefile`). When the final answer says that something works, passes or is fixed, and no command ended well
 after the last change of that request, the task gets a `note` step under the answer: "Not checked: no test or
-build ran after the last change." The first of those commands is also named at the end of the system message, and the
-model is told that commands already run inside the folder.
+build ran after the last change." What `check_project` would run is also named at the end of the system message, and
+the model is told that commands already run inside the folder. A `check_project` that passed counts like a command
+that ended well.
+
+### Run, look, check
+
+Four tools let a task see its own work (`daemon/src/agent/see.rs`).
+
+**`start_app {command?}`** starts the project's app as a background process the task owns and waits, up to 90
+seconds, until it answers on this computer or dies. Without `command` the service reads the folder: the `dev`,
+`start`, `serve` or `preview` script of `package.json` (with the port passed the way that tool takes it),
+`manage.py`, a Flutter web app, `cargo run`, `go run .`, or `python3 -m http.server` for a folder with an
+`index.html`. The service picks a free port: `{port}` in the command is replaced by it and `PORT` is set. A server
+that chose another port and printed `http://localhost:<port>` is found by that line. The result is the address and
+the last lines of output; a process that ended, or never answered, is a failed step with its output. One task has
+one app. It is stopped when the task is stopped, fails or is removed, from the preview (`DELETE .../app`), when
+`start_app` runs again, and when the service stops; a request that finished keeps it, so the person can look. At
+most four run at once, and the oldest of a task that is not working makes room. `GET /v1/agent/tasks/{id}` shows
+it as `app: {url, port, command, alive, started_ms, lines}`, or `null`. Not offered in `read_only`; in `ask` and
+`auto_edits` the command waits for the person like `run_command`. On macOS it runs in the command sandbox, which
+lets it listen on this computer's own address and nothing more; the task's other commands may then talk to that
+one port.
+
+**`look_at_page {url, size?, do?}`** opens a page of the running app and gives its title, the text on it, the
+errors its scripts wrote (`console.error`, errors nothing caught, rejected promises), the requests that failed, and a
+picture. Only `http://localhost`, a name under `localhost`, `127.0.0.0/8` and `[::1]` are opened; anything else is
+refused before anything is sent. `size` is `desktop` (1280 wide), `tablet` (820) or `phone` (390). `do` is up to ten
+steps done before the look, `{"click": "text or CSS selector"}` or `{"type": "CSS selector or label", "text"}`.
+The service has no browser, so the app lends its own: it waits at `GET /v1/agent/looks/next`, opens the address in
+a hidden window that is named in no capability (the page in it can call nothing of the app, may only go to
+addresses on this computer, and keeps no storage between looks), and posts what it saw. The picture is taken on
+macOS; on Windows and Linux the result has the text and the errors and says that there is no picture. When no app
+window is waiting, the HTML is fetched and read instead and the result says "not rendered". The picture is kept
+under `agent/shots/<task>/` (the newest 30), named in the step's `image`, and, when the task's model has a vision
+part, sent to the model for its next three turns as a message after the tool result:
+`{"role": "user", "content": [{"type": "text", ...}, {"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}}]}`.
+The task's `page` is the last look: `{url, title, errors, failed, rendered, shot, note, at_ms}`. Every mode has this
+tool, and it never asks.
+
+**`check_project {what?}`** runs the project's own checks one after the other and answers in a few lines: what ran,
+what passed, and the first eight failures of each with file and line, never the whole log. `what` is `fast` (the
+default: the type check or build, the linter, the unit tests), `ui` (tests that drive the app) or `all`.
+
+| The folder has | fast | ui |
+|---|---|---|
+| `Cargo.toml` | `cargo check --all-targets --message-format short`, `cargo test` | |
+| `go.mod` | `go vet ./...`, `go test ./...` | |
+| `package.json` | the `typecheck`, `type-check`, `check` or `tsc` script, else `tsc --noEmit` with a `tsconfig.json`; the `lint` script; the `test` script, else `node --test` | the `test:e2e`, `e2e`, `test:ui`, `test:playwright` or `test:cypress` script, else Playwright or Cypress when their config file is there |
+| Python | `ruff check` and `mypy .` when they are configured; `pytest` or `unittest` | |
+| `Package.swift` | `swift build`, `swift test` | |
+| `pubspec.yaml` | `flutter analyze` and `flutter test` (or `dart`) | `flutter test integration_test` |
+| an Xcode project | | named, and not run: the scheme and the device are the model's to give, with `run_command` |
+| only a `Makefile` | `make check`, `make test` | |
+
+Nothing is ever installed. A check whose program or packages are missing is "not run", with what is missing. The
+first line is `Checks: 14 passed, 2 failed` (tests where the runner counts them, one per check otherwise). The
+permissions are those of `run_command`, asked once for the whole list.
+
+**`simulator {action, device?, app?}`** is offered when the folder holds a phone app and this computer has Xcode's
+simulator (macOS) or `adb` on its PATH. `list` names the booted simulators and connected devices, `screenshot`
+takes a picture of one, `logs` gives its last log lines (those of `app` when named, the errors otherwise). These
+are fixed commands the service runs itself (`xcrun simctl list devices booted -j`, `simctl io <udid> screenshot`,
+`simctl spawn <udid> log show --last 1m`, `adb devices -l`, `adb exec-out screencap -p`, `adb logcat -d -t 200`):
+the device must be one of those listed and an app's name holds only letters, digits, dots, dashes and underscores.
+They only read, so every mode has them and none asks. Building and starting the app is the model's own work
+through `run_command`. The task's `device` is the last picture: `{shot, name, at_ms}`.
+
+**Checking is not left to the model.** When a request changed files, the project has fast checks that can run
+here, and no `check_project` or command ended well after the last change, the first `finish` is answered with
+"call check_project now" (or, after a check that failed, "fix what it reported") instead of ending the request.
+This is the same single answer as the last look of [a long task](#a-task-runs-until-it-is-done): the two are one
+message, given once. A check the person said no to is not asked for again. Failing checks that come back the same
+are a sign of being stuck like any other ([Pace](#pace)).
 
 While the model writes, `GET /v1/agent/tasks/{id}` has the text so far in `writing` (the engine streams to the
 service; the text becomes a `model` step when the turn ends, and `writing` is empty again). To follow it, ask with
@@ -162,7 +240,11 @@ service; the text becomes a `model` step when the turn ends, and `writing` is em
 
 The Code screen reads like a terminal agent (`app/src/lib/code-view.ts`): one compact line per thing done. A change
 is a line with the file and the lines added and removed, a command is a line with the command; both open to the
-diff or the output. A run of look-ups (`list_files`, `read_file`, `search`, `outline`, `web_search`, `fetch_url`,
+diff or the output. An app that was started, a page that was looked at and the checks are one line each ("Started
+the app on :5173", "Looked at /", "Checks 14 passed, 2 failed"), with the picture inside the opened step. When the
+task has a running app or a picture of a phone's screen, a preview stands to the right of the work: the app in a
+sandboxed frame at a phone's, a tablet's or a desktop's width with reload, open in the browser and stop, the
+errors of the last look under it, and the phone's screen with a button for a new picture. A run of look-ups (`list_files`, `read_file`, `search`, `outline`, `web_search`, `fetch_url`,
 the skill tools) is a single line, "Searching…" while it goes and "Read 4 files · Searched 2 times" afterwards,
 without the words that were searched for; it opens to the steps. A change, a command, a question or an answer ends
 the run. `update_plan` is no line: the plan is a checklist above the work. While the task is `running`, one line
@@ -215,7 +297,8 @@ There is no limit on the steps of a task. What keeps a long one going (`daemon/s
   model is told so and the work goes on, at most twice in a row. `finish` with steps of the plan undone is
   answered with what is left, at most twice.
 - **A last look.** After ten turns or more in which files were changed, the first `finish` is answered once with
-  the request word for word and with the files it names that are not in the folder.
+  the request word for word and with the files it names that are not in the folder. Work that was not checked is
+  said in the same answer, after short work too; see [Run, look, check](#run-look-check).
 - **An engine error is tried again.** The model may be loading again or the engine busy: the request is repeated
   after 2, 6 and 20 seconds before the task fails. A task that failed, was stopped or was cut off keeps its whole
   conversation, so the next message ("go on") continues from where it was.
@@ -253,7 +336,15 @@ The task gets a `note` step that says what came back, and the model is told on i
 - **Commands wait for a yes, and on macOS run in a sandbox.** `run_command` runs a shell command with the folder as
   its working directory, for two minutes at most. On macOS it runs under the system's sandbox: it can read what the
   person can, write only inside the folder and the temporary folders, and reach the network only when the task was
-  given the web. On Windows and Linux it is not confined yet and can do whatever the person's account can.
+  given the web. `start_app` and `check_project` run their commands the same way; an app started with `start_app`
+  may also listen on this computer's own address, and the task's commands may talk to that one port. The usual
+  places programs are installed to are added to the command's `PATH`, and Go gets a build cache of its own in the
+  temporary folder (its usual one cannot be written). Tools that insist on writing elsewhere in the home folder
+  (Xcode's and Gradle's caches, a package manager's store while it installs) are refused there and say "Operation
+  not permitted". On Windows and Linux a command is not confined yet and can do whatever the person's account can.
+- **Looking opens this computer only.** `look_at_page` refuses every address that is not `localhost`, a name
+  under it or a loopback address, in the service and again in the app; the hidden window it uses can call nothing
+  of the app and cannot leave this computer. `simulator` runs fixed commands with checked arguments.
 - **Everything is capped.** A tool result is at most about 4,000 characters and says when it was cut; a task stops
   after 40 model turns for one request and says so.
 - **Web tools leave the machine.** `web_search` sends the query to Rigbrew's server (`GET /v1/search`), which asks a search service (Brave Search) and stores nothing; `fetch_url` gets one
