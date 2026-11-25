@@ -2,7 +2,7 @@
 // Run with: node --test src/lib/*.test.mjs  (Node 22.18 or newer reads the .ts files as they are)
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { filmPlan, partAt, remadeByMove, reorder, shotSeconds, stamp } from './studio.ts';
+import { filmPlan, filmWork, partAt, remadeByMove, reorder, roughly, shotSeconds, stamp } from './studio.ts';
 
 const shot = (id, over = {}) => ({ id, prompt: id, frames: 49, state: 'done', ...over });
 
@@ -14,6 +14,22 @@ test('a shot is as long as its clip', () => {
 	assert.equal(shotSeconds(shot('a', { made_frames: 56, state: 'making' })), 56 / 24);
 	assert.equal(stamp(7.4), '0:07');
 	assert.equal(stamp(150), '2:30');
+});
+
+test('times are said roughly', () => {
+	assert.equal(roughly(20), 'less than a minute');
+	assert.equal(roughly(70), 'about a minute');
+	assert.equal(roughly(125), 'about 2 minutes');
+	assert.equal(roughly(50 * 60), 'about 50 minutes');
+	assert.equal(roughly(60 * 60), 'about 60 minutes');
+	assert.equal(roughly(100 * 60), 'about 1.5 hours');
+	assert.equal(roughly(125 * 60), 'about 2 hours');
+	assert.equal(roughly(3600 * 1.2 - 1), 'about 72 minutes');
+	// Six shots of five seconds: two start a scene, four continue; a model that cannot continue makes six plain ones.
+	const pace = { frames: 121, plain: 120, continuing: 400 };
+	assert.equal(filmWork(6, 121, pace, true), 2 * 120 + 4 * 400);
+	assert.equal(filmWork(6, 121, pace, false), 6 * 120);
+	assert.equal(filmWork(1, 242, pace, true), 240);
 });
 
 test('reorder', () => {

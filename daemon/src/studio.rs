@@ -26,7 +26,8 @@
 //! from before takes has `<shot>.webm`, which becomes take 1 when the shot is made again); the list of folders is
 //! `<data dir>/studio.json`. Shots are made one after another by the installed video package through
 //! the same path as `/v1/videos/generations`, so a long film renders unattended, shot by shot. A film
-//! with `auto_export` is exported by the same worker when its last shot is made.
+//! with `auto_export` is exported by the same worker when its last shot is made. How long each shot
+//! took is kept in `<data dir>/studio-pace.json`, and a film says from it how long it will still take.
 
 use std::collections::VecDeque;
 use std::path::{Path as FsPath, PathBuf};
@@ -48,6 +49,7 @@ use crate::{fail, video, App, Shared};
 
 mod board;
 mod export;
+mod pace;
 
 const FILE: &str = "rigbrew-film.json";
 const MAX_SHOTS: usize = 200;
@@ -293,6 +295,50 @@ fn index_path(app: &App) -> PathBuf {
     app.root.join("studio.json")
 }
 
+/// How long shots took on this machine, newest last.
+fn paces(app: &App) -> Vec<pace::Sample> {
+    std::fs::read_to_string(app.root.join("studio-pace.json")).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
+}
+
+/// The measurements a film's times are read from: this machine's, or the film's own takes when
+/// this machine has made nothing since measurements are kept.
+fn paces_for(app: &App, p: &Project) -> Vec<pace::Sample> {
+    let seen = paces(app);
+    if !seen.is_empty() {
+        return seen;
+    }
+    let mut own = Vec::new();
+    for s in &p.shots {
+        for t in &s.takes {
+            pace::remember(&mut own, pace::Sample { frames: t.frames, continued: t.continued, seconds: t.seconds.unwrap_or(0.0) });
+        }
+        if s.takes.is_empty() {
+            pace::remember(&mut own, pace::Sample { frames: s.frames, continued: s.continues, seconds: s.seconds.unwrap_or(0.0) });
+        }
+    }
+    own
+}
+
+/// About how long the film still needs: `all` for every described shot that is not made, `left`
+/// for the shots that wait or are being made now (less the time the one being made has had).
+fn time_left(p: &Project, seen: &[pace::Sample], waiting: &[String], now: Option<(&str, f32)>) -> (f32, f32) {
+    let (mut all, mut left) = (0.0, 0.0);
+    for (i, s) in p.shots.iter().enumerate() {
+        let needs = pace::estimate(seen, s.frames, s.continues && i > 0);
+        let making = now.filter(|(id, _)| *id == s.id);
+        if s.state != "done" && !s.prompt.is_empty() {
+            all += needs;
+        }
+        if let Some((_, elapsed)) = making {
+            // A shot that runs longer than shots like it did is still not done: a little is always left.
+            left += (needs - elapsed).max(needs * 0.05);
+        } else if waiting.contains(&s.id) {
+            left += needs;
+        }
+    }
+    (all, left)
+}
+
 /// id -> folder
 fn index(app: &App) -> Vec<(String, String)> {
     std::fs::read_to_string(index_path(app)).ok().and_then(|t| serde_json::from_str::<Vec<(String, String)>>(&t).ok()).unwrap_or_default()
@@ -370,17 +416,28 @@ fn new_id() -> String {
     uuid::Uuid::new_v4().simple().to_string()[..12].to_string()
 }
 
+/// Whether the installed video model can start a shot from a picture.
+fn can_continue(app: &App) -> bool {
+    app.manifest
+        .packages
+        .iter()
+        .filter(|pk| pk.modality == Modality::Video)
+        .any(|pk| app.installed(pk).iter().any(|v| v.files.iter().any(|f| f.role == "mmproj")))
+}
+
 /// The film as the app sees it: the stored film plus what the queue says right now.
 fn view(app: &App, mut p: Project) -> Value {
     let (now, waiting) =
         with_queue(|q| (q.now.clone(), q.waiting.iter().filter(|(pid, _)| *pid == p.id).map(|(_, s)| s.clone()).collect::<Vec<_>>()));
     let mut progress = Value::Null;
+    let mut elapsed = None;
     for shot in &mut p.shots {
         if now.as_ref().is_some_and(|(pid, sid, _)| *pid == p.id && *sid == shot.id) {
             shot.state = "making".into();
             if let Some((_, _, job)) = &now {
                 if let Some(j) = app.videos.lock().unwrap().get(job) {
                     progress = json!({"shot": shot.id, "stage": j.stage, "step": j.step, "steps": j.steps, "elapsed_ms": j.elapsed_ms});
+                    elapsed = Some(j.elapsed_ms as f32 / 1000.0);
                 }
             }
         } else if waiting.contains(&shot.id) {
@@ -389,14 +446,12 @@ fn view(app: &App, mut p: Project) -> Value {
     }
     let made = p.shots.iter().filter(|s| s.state == "done").count();
     let seconds: f32 = p.shots.iter().map(Shot::length).sum();
-    let continues = app
-        .manifest
-        .packages
-        .iter()
-        .filter(|pk| pk.modality == Modality::Video)
-        .any(|pk| app.installed(pk).iter().any(|v| v.files.iter().any(|f| f.role == "mmproj")));
+    let continues = can_continue(app);
     let export = export_of(&p.id);
-    json!({"project": p, "progress": progress, "rendering": now.is_some() || !waiting.is_empty(), "made": made, "seconds": seconds, "can_continue": continues, "export": export})
+    let mine = now.as_ref().filter(|(pid, _, _)| *pid == p.id).map(|(_, sid, _)| (sid.as_str(), elapsed.unwrap_or(0.0)));
+    let (all, left) = time_left(&p, &paces_for(app, &p), &waiting, mine);
+    json!({"project": p, "progress": progress, "rendering": mine.is_some() || !waiting.is_empty(), "made": made, "seconds": seconds,
+           "can_continue": continues, "export": export, "estimate": {"all": all, "left": left}})
 }
 
 async fn list(State(app): State<Shared>) -> Json<Value> {
@@ -407,7 +462,12 @@ async fn list(State(app): State<Shared>) -> Json<Value> {
             None => json!({"id": id, "name": "", "folder": folder, "missing": true}),
         })
         .collect();
-    Json(json!({"projects": films, "home": films_home().map(|h| h.to_string_lossy().to_string())}))
+    // What a five-second shot takes here, for the start screen to say how long a film will take.
+    let seen = paces(&app);
+    let pace = json!({"frames": 121, "plain": pace::estimate(&seen, 121, false), "continuing": pace::estimate(&seen, 121, true), "measured": !seen.is_empty()});
+    Json(
+        json!({"projects": films, "home": films_home().map(|h| h.to_string_lossy().to_string()), "pace": pace, "can_continue": can_continue(&app)}),
+    )
 }
 
 #[derive(Deserialize)]
@@ -831,6 +891,9 @@ async fn work(app: Shared) {
         }
         if made {
             app.record("studio_shot_made", json!({"frames": s.frames, "seconds": seconds, "continues": s.continues}));
+            let mut seen = paces(&app);
+            pace::remember(&mut seen, pace::Sample { frames: s.frames, continued: first.is_some(), seconds });
+            std::fs::write(app.root.join("studio-pace.json"), serde_json::to_string(&seen).unwrap_or_default()).ok();
             stale_after(&app, &project, &shot);
         }
         // The last waiting shot of a film that exports by itself: join it now, with the screen open or not.
@@ -1811,6 +1874,38 @@ mod tests {
         assert_eq!(poster_path(&p, "a1"), FsPath::new("/films/fox/clips/a1.3.jpg"));
         assert_eq!(clip_path(&p, "b2"), FsPath::new("/films/fox/clips/b2.webm"));
         assert_eq!(take_files(&p, "b2", 2).0, FsPath::new("/films/fox/clips/b2.2.webm"));
+    }
+
+    #[test]
+    fn a_film_says_how_long_it_still_needs() {
+        let mut second = shot("b2", "the fox stops", "empty");
+        second.continues = true;
+        let mut third = shot("c3", "a boat", "changed");
+        third.frames = 49;
+        let p = Project {
+            id: "p".into(),
+            name: "Film".into(),
+            folder: "/films/fox".into(),
+            size: "640x384".into(),
+            shots: vec![shot("a1", "a fox", "done"), second, third, shot("d4", "", "empty")],
+            auto_export: false,
+            sound: String::new(),
+            sound_volume: 0.5,
+            sound_once: false,
+            fade_in: false,
+            fade_out: false,
+            updated_ms: 0,
+        };
+        let seen =
+            [pace::Sample { frames: 121, continued: true, seconds: 400.0 }, pace::Sample { frames: 49, continued: false, seconds: 90.0 }];
+        // Nothing is waiting: the two shots that are not made, and not the one without a description.
+        assert_eq!(time_left(&p, &seen, &[], None), (490.0, 0.0));
+        // The second is being made for 100 seconds and the third waits.
+        assert_eq!(time_left(&p, &seen, &["c3".into()], Some(("b2", 100.0))), (490.0, 390.0));
+        // A shot that takes longer than expected still has a little left.
+        assert_eq!(time_left(&p, &seen, &[], Some(("b2", 900.0))).1, 20.0);
+        // A made shot that is made again counts as left, and not as missing.
+        assert_eq!(time_left(&p, &[], &["a1".into()], None), (121.0 / 24.0 * 80.0 + 49.0 / 24.0 * 25.0, 121.0 / 24.0 * 25.0));
     }
 
     #[test]

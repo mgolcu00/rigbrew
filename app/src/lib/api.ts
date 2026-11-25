@@ -557,6 +557,17 @@ export interface StudioView {
 	can_continue?: boolean;
 	/** Where the export of this film is. */
 	export?: StudioExport;
+	/** About how many seconds of work are left: `all` for every shot that is not made, `left` for what is waiting or being made. */
+	estimate?: { all: number; left: number };
+}
+
+/** What a shot of `frames` frames takes on this machine, in seconds: plain, and continuing the shot before. */
+export interface StudioPace {
+	frames: number;
+	plain: number;
+	continuing: number;
+	/** False when no shot has been made here yet and the numbers are the usual ones. */
+	measured: boolean;
 }
 
 export interface StudioListing {
@@ -569,7 +580,7 @@ export interface StudioListing {
 }
 
 /** The films, and `home`: the folder new films go into when none is chosen. */
-export const studioList = () => json<{ projects: StudioListing[]; home?: string | null }>('GET', '/v1/studio/projects');
+export const studioList = () => json<{ projects: StudioListing[]; home?: string | null; pace?: StudioPace; can_continue?: boolean }>('GET', '/v1/studio/projects');
 /** Opens the film in `folder`, or starts one there. Without a folder the service makes one named after the film. */
 export const studioOpen = (folder: string, name = '') => json<StudioView>('POST', '/v1/studio/projects', { folder, name });
 export const studioRead = (id: string) => json<StudioView>('GET', `/v1/studio/projects/${enc(id)}`);

@@ -5,7 +5,7 @@
 	import { videoLengthsOf, videoSizesOf, type SizeName } from '#lib/chat.svelte.ts';
 	import { plain } from '#lib/errors.ts';
 	import { app } from '#lib/state.svelte.ts';
-	import { filmPlan, hasClip, remadeByMove, reorder, shotSeconds } from '#lib/studio.ts';
+	import { filmPlan, filmWork, hasClip, remadeByMove, reorder, roughly, shotSeconds } from '#lib/studio.ts';
 	import Icon from '#lib/components/Icon.svelte';
 	import StudioPlayer from '#lib/components/StudioPlayer.svelte';
 	import StudioTimeline from '#lib/components/StudioTimeline.svelte';
@@ -35,6 +35,8 @@
 	const total = $derived(project ? project.shots.reduce((n, s) => n + shotSeconds(s), 0) : 0);
 	const clock = (s: number) => (s >= 60 ? `${Math.floor(s / 60)} min ${Math.round(s % 60)} s` : `${Math.round(s)} s`);
 	const say = (e: unknown) => plain(e).text;
+	const capital = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
+	const waitingShots = $derived(project?.shots.filter((s) => s.state === 'making' || s.state === 'queued').length ?? 0);
 	const tilde = (path: string) => path.replace(/^\/Users\/[^/]+/, '~');
 
 	// One sentence to a finished film.
@@ -51,11 +53,15 @@
 	let aboutFolder = $state('');
 	let askFolder = $state(false);
 	let home = $state('');
+	/** What a shot takes on this machine, and whether shots can continue each other, as the service last said. */
+	let pace = $state<api.StudioPace | null>(null);
+	let carries = $state(false);
 	/** What the one-sentence film is doing: '' when idle. */
 	let quick = $state<'' | 'folder' | 'writing' | 'starting'>('');
 	/** The shot length closest to five seconds. */
 	const five = $derived(lengths.reduce((best, l) => (Math.abs(l.frames - 121) < Math.abs(best.frames - 121) ? l : best), lengths[0]).frames);
 	const quickShots = $derived(Math.max(1, Math.round(aboutSeconds / (five / 24))));
+	const quickWork = $derived(pace ? filmWork(quickShots, five, pace, carries) : 0);
 
 	/** A name for the film out of its first words. */
 	function titleOf(text: string) {
@@ -257,6 +263,8 @@
 			const all = await api.studioList();
 			films = all.projects;
 			home = all.home ?? '';
+			pace = all.pace ?? null;
+			carries = Boolean(all.can_continue);
 		} catch (e) {
 			problem = say(e);
 		}
@@ -487,7 +495,11 @@
 					{#if quick === 'writing'}
 						<span class="note" role="status">The chat model is writing {quickShots} {quickShots === 1 ? 'shot' : 'shots'}. This can take a minute or two.</span>
 					{:else}
-						<span class="note">{quickShots} {quickShots === 1 ? 'shot' : 'shots'} of {Math.round(five / 24)} s. You can change every shot afterwards.</span>
+						<span class="note">
+							{quickShots} {quickShots === 1 ? 'shot' : 'shots'} of {Math.round(five / 24)} s.
+							{#if video && quickWork > 0}This film will take {roughly(quickWork)} to make on this machine{pace?.measured ? '' : ', as a first guess'}.{/if}
+							You can change every shot afterwards.
+						</span>
 					{/if}
 				</p>
 				<p class="note">
@@ -543,6 +555,7 @@
 			<p class="facts">
 				<span>{project.shots.length} {project.shots.length === 1 ? 'shot' : 'shots'}, {clock(total)}</span>
 				<span>{done.length} made</span>
+				{#if !view?.rendering && todo > 0 && video && view?.estimate}<span>Making the {todo === 1 ? 'shot that is left' : `${todo} shots that are left`} takes {roughly(view.estimate.all)}</span>{/if}
 				<span class="chips" role="radiogroup" aria-label="Shape of the film">
 					{#each Object.entries(shapes) as [name, s] (name)}
 						<button type="button" role="radio" aria-checked={shape === name} onclick={() => setShape(name as SizeName)} disabled={view?.rendering} title={s.label} aria-label={s.label}><span class="shape" style:aspect-ratio="{s.width} / {s.height}"></span></button>
@@ -554,7 +567,9 @@
 				{@const p = view.progress}
 				<p class="progress" role="status">
 					<span class="dot"></span>
-					Making shot {project.shots.findIndex((s) => s.id === p.shot) + 1} of {project.shots.length}{p.step !== null && p.steps ? `, step ${p.step} of ${p.steps}` : ''}, {clock(p.elapsed_ms / 1000)} so far. It keeps going if you leave this screen.
+					Making shot {project.shots.findIndex((s) => s.id === p.shot) + 1} of {project.shots.length}{p.step !== null && p.steps ? `, step ${p.step} of ${p.steps}` : ''}, {clock(p.elapsed_ms / 1000)} so far.
+					{#if view.estimate && view.estimate.left > 0}{capital(roughly(view.estimate.left))} left{waitingShots > 1 ? ` for the ${waitingShots} shots` : ''}.{/if}
+					It keeps going if you leave this screen.
 				</p>
 			{/if}
 			{#if exported?.state === 'working'}

@@ -16,6 +16,26 @@ export function stamp(seconds: number) {
 	return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
 }
 
+/** A length of time in plain words: "about a minute", "about 25 minutes", "about 2 hours". */
+export function roughly(seconds: number) {
+	if (seconds < 45) return 'less than a minute';
+	if (seconds < 90) return 'about a minute';
+	const minutes = Math.round(seconds / 60);
+	if (minutes < 90) return `about ${minutes} minutes`;
+	const hours = Math.round(seconds / 1800) / 2;
+	return `about ${hours} ${hours === 1 ? 'hour' : 'hours'}`;
+}
+
+/**
+ * Seconds a film of `shots` shots of `frames` frames takes to make, before its shots are written.
+ * Scenes are about three shots: the first is plain, the others continue it when the model can.
+ */
+export function filmWork(shots: number, frames: number, pace: { frames: number; plain: number; continuing: number }, canContinue: boolean) {
+	const scale = frames / pace.frames;
+	const plain = canContinue ? Math.ceil(shots / 3) : shots;
+	return (plain * pace.plain + (shots - plain) * pace.continuing) * scale;
+}
+
 /** The list with the item at `from` put at `to`. */
 export function reorder<T>(list: readonly T[], from: number, to: number): T[] {
 	const out = [...list];
