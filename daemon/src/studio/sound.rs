@@ -527,6 +527,8 @@ mod tests {
         assert_ne!(a, peaks_name(Path::new("/music/other.wav"), 1000, 5));
     }
 
+    // The paths here are written the Unix way; on Windows they are not full paths.
+    #[cfg(unix)]
     #[test]
     fn a_region_file_is_a_sound_file_in_a_known_place() {
         let folder = Path::new("/films/fox");

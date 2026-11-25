@@ -2711,6 +2711,8 @@ mod tests {
         assert_eq!(narration_file(FsPath::new("/nowhere/at/all")), FsPath::new("/nowhere/at/all/narration.wav"));
     }
 
+    // The paths here are written the Unix way; on Windows they are not full paths.
+    #[cfg(unix)]
     #[test]
     fn only_the_sounds_of_a_film_are_read_for_it() {
         let mut p = Project { id: "p".into(), folder: "/films/fox".into(), sounds: vec!["/music/theme.mp3".into()], ..Project::default() };
