@@ -23,6 +23,8 @@
 	const model = $derived(app.chatPackages[0] ?? null);
 	const folderName = $derived(code.folder.split(/[/\\]/).filter(Boolean).pop() ?? code.folder);
 	const mode = $derived(modes.find((m) => m.id === code.mode) ?? modes[0]);
+	const plan = $derived(task?.plan ?? []);
+	const planDone = $derived(plan.filter((s) => s.status === 'done').length);
 
 	onMount(() => {
 		code.enter();
@@ -87,6 +89,8 @@
 				return `Searched the web for “${short(text(step, 'query'), 48)}”`;
 			case 'fetch_url':
 				return `Opened ${short(text(step, 'url').replace(/^https?:\/\//, ''), 56)}`;
+			case 'update_plan':
+				return 'Updated the plan';
 			case 'use_skill':
 				return `Read the skill ${text(step, 'name')}`;
 			default:
@@ -225,6 +229,23 @@
 				{/if}
 			</div>
 		</header>
+
+		{#if task && plan.length}
+			<div class="column">
+				<details class="plan" open>
+					<summary>Plan <span class="count">{planDone} of {plan.length} done</span></summary>
+					<ol>
+						{#each plan as s, i (i)}
+							<li class={s.status} aria-current={s.status === 'doing' ? 'step' : undefined}>
+								<span class="box" aria-hidden="true">{#if s.status === 'done'}<Icon name="check" size={11} />{/if}</span>
+								<span class="what">{s.text}</span>
+								<span class="sr">{s.status === 'done' ? 'done' : s.status === 'doing' ? 'in progress' : 'to do'}</span>
+							</li>
+						{/each}
+					</ol>
+				</details>
+			</div>
+		{/if}
 
 		{#if task}
 			<div class="thread scroll" bind:this={thread}>
@@ -508,6 +529,105 @@
 
 	.state.live {
 		color: var(--accent);
+	}
+
+	/* --- the plan: a small checklist that stays above the work --- */
+	.plan {
+		flex: none;
+		margin: 0 0 10px;
+		padding: 8px 12px;
+		border: 1px solid var(--line-soft);
+		border-radius: 12px;
+		font-size: 13.5px;
+	}
+
+	.plan summary {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		min-height: 22px;
+		cursor: pointer;
+		font: 500 12.5px/1 var(--rb-text);
+		color: var(--muted);
+		list-style: none;
+	}
+
+	.plan summary::-webkit-details-marker {
+		display: none;
+	}
+
+	.plan .count {
+		color: var(--faint);
+		font-weight: 400;
+	}
+
+	.plan ol {
+		margin: 6px 0 2px;
+		padding: 0;
+		list-style: none;
+		display: grid;
+		gap: 5px;
+		max-height: 30vh;
+		overflow: auto;
+	}
+
+	.plan li {
+		display: flex;
+		align-items: baseline;
+		gap: 9px;
+		color: var(--muted);
+		line-height: 1.4;
+	}
+
+	.plan .box {
+		flex: none;
+		display: grid;
+		place-items: center;
+		width: 14px;
+		height: 14px;
+		border-radius: 4px;
+		box-shadow: inset 0 0 0 1.5px var(--line);
+		transform: translateY(2px);
+	}
+
+	.plan li.done {
+		color: var(--faint);
+	}
+
+	.plan li.done .box {
+		background: var(--fit-soft);
+		box-shadow: none;
+		color: var(--fit);
+	}
+
+	.plan li.doing {
+		color: var(--ink);
+	}
+
+	.plan li.doing .box {
+		box-shadow: inset 0 0 0 1.5px var(--accent);
+	}
+
+	.plan li.doing .box::after {
+		content: '';
+		width: 6px;
+		height: 6px;
+		border-radius: 2px;
+		background: var(--accent);
+	}
+
+	.plan .what {
+		min-width: 0;
+		overflow-wrap: anywhere;
+	}
+
+	.sr {
+		position: absolute;
+		width: 1px;
+		height: 1px;
+		overflow: hidden;
+		clip-path: inset(50%);
+		white-space: nowrap;
 	}
 
 	/* --- the start page of a folder --- */

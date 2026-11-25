@@ -592,11 +592,19 @@ export interface AgentTaskRow {
 	updated_ms: number;
 }
 
+/** One step of the plan the model keeps while it works. */
+export interface AgentPlanStep {
+	text: string;
+	status: 'pending' | 'doing' | 'done';
+}
+
 export interface AgentTask extends AgentTaskRow {
 	web: boolean;
 	steps: AgentStep[];
 	pending: AgentPending | null;
 	error: string | null;
+	/** Missing from a service that is older than the plan. */
+	plan?: AgentPlanStep[];
 }
 
 export interface AgentSkill {

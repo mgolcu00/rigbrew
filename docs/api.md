@@ -98,8 +98,13 @@ status `running`, `waiting`, `done`, `failed`, `denied` or `stopped`. `pending` 
 `"always": true` on a command allows that exact command line for the rest of the task; on a file change it turns
 the task to `auto_edits`. A call the person said no to is not asked again until their next message, and after two refusals of one tool that tool is not asked for again until then.
 
-The tools: `list_files`, `read_file`, `search`, `edit_file`, `write_file`, `run_command`, `use_skill`, `finish`,
-and `web_search` and `fetch_url` when the task was started with `"web": true`.
+The tools: `list_files`, `read_file`, `search`, `edit_file`, `write_file`, `run_command`, `update_plan`,
+`use_skill`, `finish`, and `web_search` and `fetch_url` when the task was started with `"web": true`.
+
+A task also has a `plan`: the steps the model wrote with `update_plan`, each `{"text", "status"}` with the status
+`pending`, `doing` or `done`, and at most one step `doing`. The plan is sent back to the model at the end of the
+system message on every turn, so it is still there when older messages were left out to fit the context. A plan
+that is finished is cleared by the person's next message.
 
 - **Files stay inside the folder.** Every path is resolved through the file system first, so `..`, an absolute
   path and a symbolic link that leads out are refused alike. Nothing inside `.git` is written. Rigbrew's own data
