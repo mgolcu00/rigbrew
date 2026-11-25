@@ -4,7 +4,7 @@
 
 import * as api from './api.ts';
 import type { StudioListing, StudioPace, StudioShot, StudioSound, StudioView } from './api.ts';
-import { plain } from './errors.ts';
+import { codeOf, plain } from './errors.ts';
 import { remembered } from './remember.ts';
 import { app } from './state.svelte.ts';
 import { MASTER, SHOTS, StudioAudio, type PlayRegion } from './studio-audio.ts';
@@ -76,7 +76,7 @@ const usualLayout: Layout = {
 	vzoom: 1
 };
 
-const say = (e: unknown) => plain(e).text;
+const say = (e: unknown) => `${plain(e).text} ${codeOf(e)}`;
 const tail = (path: string) => path.split(/[\\/]/).pop() ?? path;
 
 /** What is asked before something that cannot simply be taken back, or that costs work. */

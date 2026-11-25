@@ -3,7 +3,7 @@
 	import * as api from '#lib/api.ts';
 	import type { StudioView } from '#lib/api.ts';
 	import { videoLengthsOf, videoSizesOf, type SizeName } from '#lib/chat.svelte.ts';
-	import { plain } from '#lib/errors.ts';
+	import { codeOf, plain } from '#lib/errors.ts';
 	import { bytes as bytesOf } from '#lib/format.ts';
 	import { guide } from '#lib/guide.svelte.ts';
 	import { app } from '#lib/state.svelte.ts';
@@ -28,7 +28,7 @@
 	const video = $derived(app.videoPackage);
 	const lengths = $derived(videoLengthsOf(video));
 	const shapes = $derived(videoSizesOf(video));
-	const say = (e: unknown) => plain(e).text;
+	const say = (e: unknown) => `${plain(e).text} ${codeOf(e)}`;
 	const tilde = (path: string) => path.replace(/^\/Users\/[^/]+/, '~');
 
 	// --- one sentence to a finished film ---------------------------------------------------------
@@ -415,7 +415,7 @@
 				<span class="st-problem selectable" role="alert">{studio.problem}</span>
 				<button class="closer" onclick={() => (studio.problem = '')} aria-label="Dismiss"><StudioIcon name="close" size={10} /></button>
 			{:else if exported?.state === 'failed'}
-				<span class="st-problem selectable" role="alert">The film could not be exported. {exported.error ?? ''}</span>
+				<span class="st-problem selectable" role="alert">The film could not be exported. Try again. {codeOf(exported.error ?? '')}</span>
 			{:else if studio.silent.length > 0}
 				<span class="st-problem selectable">{studio.silent.join(', ')} cannot be played in the app: {studio.silent.length === 1 ? 'it is' : 'they are'} silent here, and heard in the exported film.</span>
 			{:else if studio.note}
