@@ -2,7 +2,7 @@
 	import { videoLengthsOf, videoSizesOf, type SizeName } from '#lib/chat.svelte.ts';
 	import { bytes as bytesOf } from '#lib/format.ts';
 	import { app } from '#lib/state.svelte.ts';
-	import { dbLabel, panLabel, regionEnd, regionSpan, type DocRegion, type DocShot, type DocTrack } from '#lib/studio-edit.ts';
+	import { dbLabel, names, panLabel, regionEnd, regionSpan, type DocRegion, type DocShot, type DocTrack } from '#lib/studio-edit.ts';
 	import { STATE_WORD, fileName } from '#lib/studio-look.ts';
 	import { SHOTS, TRACK_COLORS, studio } from '#lib/studio.svelte.ts';
 	import { shortTime, timecode } from '#lib/studio-time.ts';
@@ -84,6 +84,31 @@
 	});
 	const used = $derived(shot?.takes?.find((t) => t.n === shot.take));
 
+	// The cast as the shot sees it: who it names (their looks go in), whose portrait it can start from.
+	const named = $derived(shot && doc ? doc.cast.filter((m) => names(shot.prompt, m.name)) : []);
+	const portrayed = $derived(doc ? doc.cast.filter((m) => studio.portraitCount(m.id) > 0) : []);
+	const docLines = $derived(shot ? (studio.docShot(shot.id)?.lines ?? []) : []);
+	/** The language the lines are shown and edited in when it is not the film's own. */
+	const other = $derived(doc?.dub ?? '');
+	const lineCount = $derived(doc ? doc.shots.reduce((n, s) => n + s.lines.length, 0) : 0);
+	const dubbing = $derived(studio.jobs.dub?.state === 'working');
+	const listening = $derived(studio.jobs.listen?.state === 'working');
+	const spoken = $derived(studio.view?.spoken ?? ['English']);
+	const reads = (language: string) => spoken.some((l) => l.toLowerCase() === language.trim().toLowerCase());
+	const languages = $derived.by(() => {
+		const all = [studio.ownLanguage, ...(studio.view?.languages ?? [])];
+		if (doc?.dub) all.push(doc.dub);
+		return all.filter((l, i) => l && all.findIndex((x) => x.toLowerCase() === l.toLowerCase()) === i);
+	});
+	let into = $state('');
+
+	async function translate() {
+		const language = into.trim();
+		if (!language) return;
+		await studio.dub(language);
+		into = '';
+	}
+
 	let hint = $state('');
 	let idea = $state('');
 	let wanted = $state(6);
@@ -159,12 +184,50 @@
 			></textarea>
 			<div class="st-row">
 				<input class="st-in grow" bind:value={hint} placeholder="What should be different (optional)" aria-label="What the chat model should change" onkeydown={(e) => (e.stopPropagation(), e.key === 'Enter' && studio.rewrite(shot.id, hint))} />
-				<button class="st-btn" onclick={() => studio.rewrite(shot.id, hint)} disabled={studio.busy !== '' || app.chatPackages.length === 0} title="The chat model writes this description again, in the words of the shots around it. Undo brings the old one back.">
+				<button class="st-btn" onclick={() => studio.rewrite(shot.id, hint)} disabled={studio.busy !== '' || app.chatPackages.length === 0} title={app.chatPackages.length === 0 ? 'Needs the chat model' : 'The chat model writes this description again, in the words of the shots around it. Undo brings the old one back.'}>
 					<StudioIcon name="spark" size={12} />
 					{studio.busy === 'rewriting' ? 'Writing…' : 'Rewrite'}
 				</button>
 			</div>
-			{#if app.chatPackages.length === 0}<p class="st-note">Rewriting needs a chat model.</p>{/if}
+			{#if named.length > 0 || doc.look.trim()}
+				<p class="st-note" title="When the shot is made, these words are put behind its description, the same in every shot.">
+					Added: {[...named.filter((m) => m.look.trim()).map((m) => `${m.name}'s look`), ...(doc.look.trim() ? ['the film\'s look'] : [])].join(', ') || 'nothing'}
+				</p>
+			{/if}
+		</section>
+		<section class="st-sec">
+			<h3 class="st-h">Lines <span class="count">{docLines.length}</span></h3>
+			{#each docLines as l (l.id)}
+				<div class="st-row line">
+					<select class="st-in who" value={l.who} aria-label="Who says it" onchange={(e) => studio.setLine(shot.id, l.id, 'Speaker', (x) => (x.who = e.currentTarget.value))}>
+						<option value="">Narrator</option>
+						{#each doc.cast as m (m.id)}<option value={m.id}>{m.name}</option>{/each}
+					</select>
+					{#if other}
+						<input
+							class="st-in grow"
+							value={l.said[other] ?? ''}
+							maxlength="300"
+							placeholder={l.text}
+							title="In {other}. As written: {l.text}"
+							aria-label="The line in {other}"
+							oninput={(e) => studio.setLine(shot.id, l.id, 'Line', (x) => (x.said = { ...x.said, [other]: e.currentTarget.value }), 'line')}
+							onkeydown={(e) => e.stopPropagation()}
+						/>
+					{:else}
+						<input class="st-in grow" value={l.text} maxlength="300" placeholder="What is said" aria-label="What is said" oninput={(e) => studio.setLine(shot.id, l.id, 'Line', (x) => (x.text = e.currentTarget.value), 'line')} onkeydown={(e) => e.stopPropagation()} />
+					{/if}
+					<button class="st-btn quiet icon" onclick={() => studio.removeLine(shot.id, l.id)} aria-label="Delete the line" title="Delete the line"><StudioIcon name="close" size={10} /></button>
+				</div>
+			{/each}
+			<div class="st-row">
+				<button class="st-btn" onclick={() => studio.addLine(shot.id)} disabled={docLines.length >= 8}><StudioIcon name="plus" size={11} /> Line</button>
+				{#if made && docLines.length === 0 && studio.view?.can_listen}
+					<button class="st-btn" onclick={() => studio.listen([shot.id])} disabled={listening} title="The listening model writes down what is said in this clip">{listening ? 'Listening…' : 'From the clip'}</button>
+				{/if}
+				{#if other}<span class="st-note">{other}</span>{/if}
+			</div>
+			{#if made && docLines.length === 0 && used?.ext && !studio.view?.can_listen}<p class="st-note">No listening model is installed: type what is said.</p>{/if}
 		</section>
 		<section class="st-sec">
 			<h3 class="st-h">Shot</h3>
@@ -195,6 +258,15 @@
 					{/if}
 				</div>
 			{/if}
+			{#if !shot.continues && studio.view?.can_continue && portrayed.length > 0}
+				<div class="st-row">
+					<span class="st-lab">Starts from</span>
+					<select class="st-in grow" value={shot.from ?? ''} aria-label="The picture the shot starts from" title="The clip starts from this picture and moves on from it" onchange={(e) => setShot('Start from a portrait', (s) => (s.from = e.currentTarget.value))}>
+						<option value="">Nothing</option>
+						{#each portrayed as m (m.id)}<option value={m.id}>Portrait of {m.name}</option>{/each}
+					</select>
+				</div>
+			{/if}
 			<div class="st-row">
 				<span class="st-lab">Seed</span>
 				<input
@@ -203,7 +275,7 @@
 					min="0"
 					max="4294967295"
 					value={shot.seed ?? ''}
-					placeholder="new each time"
+					placeholder={doc.seed === null ? 'new each time' : `film's: ${doc.seed}`}
 					aria-label="Seed for the next clip"
 					onchange={(e) => setShot('Seed', (s) => (s.seed = e.currentTarget.value === '' ? null : Math.max(0, Math.floor(Number(e.currentTarget.value)))))}
 					onkeydown={(e) => e.stopPropagation()}
@@ -508,6 +580,86 @@
 			</dl>
 		</section>
 		<section class="st-sec">
+			<h3 class="st-h">Look and cast</h3>
+			<div class="st-row">
+				<span class="st-lab">Look</span>
+				<input class="st-in grow" value={doc.look} maxlength="300" placeholder="Style, colours, light, lens" aria-label="The look every shot shares" title="Put behind the description of every shot when it is made" oninput={(e) => studio.edit('Look of the film', (d) => (d.look = e.currentTarget.value), 'film-look')} onkeydown={(e) => e.stopPropagation()} />
+			</div>
+			<div class="st-row">
+				<span class="st-lab">Seed</span>
+				<input
+					class="st-in num"
+					type="number"
+					min="0"
+					max="4294967295"
+					value={doc.seed ?? ''}
+					placeholder="new each shot"
+					aria-label="Seed for every shot"
+					title="Every shot without a seed of its own starts from this one, so the shots start alike"
+					onchange={(e) => studio.edit('Seed of the film', (d) => (d.seed = e.currentTarget.value === '' ? null : Math.max(0, Math.floor(Number(e.currentTarget.value)))))}
+					onkeydown={(e) => e.stopPropagation()}
+				/>
+				<span class="st-lab right">Cast</span>
+				<button class="st-btn" onclick={() => (studio.set('bottom', true), studio.set('tab', 'cast'))} title="Cast (K)"><StudioIcon name="cast" size={12} /> {doc.cast.length}</button>
+			</div>
+		</section>
+		<section class="st-sec">
+			<h3 class="st-h">Speech <span class="count">{lineCount} {lineCount === 1 ? 'line' : 'lines'}</span></h3>
+			<div class="st-row">
+				<span class="st-lab">Language</span>
+				<input class="st-in lang" value={doc.language} maxlength="24" placeholder={studio.ownLanguage} aria-label="Language the lines are written in" onchange={(e) => studio.edit('Language of the lines', (d) => (d.language = e.currentTarget.value.trim()))} onkeydown={(e) => e.stopPropagation()} />
+				<span class="st-lab right">Voice</span>
+				<select class="st-in" value={doc.voice === null ? '' : String(doc.voice)} aria-label="Voice of the narrator" disabled={!app.voicePackage} onchange={(e) => studio.edit('Voice of the narrator', (d) => (d.voice = e.currentTarget.value === '' ? null : Number(e.currentTarget.value)))}>
+					<option value="">Usual</option>
+					{#each { length: studio.view?.voices ?? 0 } as _, n (n)}<option value={String(n)}>Voice {n + 1}</option>{/each}
+				</select>
+			</div>
+			<label class="st-row st-check" title="When the chat model writes shots, it writes what is said in them too">
+				<input type="checkbox" checked={doc.speech} onchange={(e) => studio.edit('Lines with the shots', (d) => (d.speech = e.currentTarget.checked))} />
+				The shot writer writes lines
+			</label>
+			<div class="st-row">
+				<button class="st-btn" onclick={() => studio.dub()} disabled={lineCount === 0 || dubbing || !app.voicePackage} title={!app.voicePackage ? 'Needs a voice. Add it under Models.' : 'The voice reads every line onto a voice track, at its shot'}>
+					<StudioIcon name="speech" size={12} />
+					{dubbing ? 'Dubbing…' : 'Dub'}
+				</button>
+				<input class="st-in grow" bind:value={into} maxlength="24" placeholder="Another language" aria-label="Another language to translate the lines into" onkeydown={(e) => (e.stopPropagation(), e.key === 'Enter' && translate())} />
+				<button class="st-btn" onclick={translate} disabled={!into.trim() || lineCount === 0 || dubbing || app.chatPackages.length === 0} title={app.chatPackages.length === 0 ? 'Needs the chat model' : 'The chat model translates the lines'}>Translate</button>
+			</div>
+			{#if into.trim() && !reads(into)}<p class="st-note">The voice reads {spoken.join(' and ')}. {into.trim()}: subtitles only.</p>{/if}
+			{#if languages.length > 1}
+				<div class="st-row">
+					<span class="st-lab">Shown in</span>
+					<span class="st-seg" role="radiogroup" aria-label="Language that is heard and read">
+						{#each languages as l (l)}
+							<button role="radio" aria-checked={studio.language.toLowerCase() === l.toLowerCase()} onclick={() => studio.showIn(l)}>{l}</button>
+						{/each}
+					</span>
+				</div>
+			{/if}
+			<div class="st-row">
+				<span class="st-lab">Subtitles</span>
+				<label class="st-check"><input type="checkbox" checked={doc.subtitles.show} onchange={(e) => studio.edit('Subtitles', (d) => (d.subtitles.show = e.currentTarget.checked))} /> Show</label>
+				<label class="st-check" title="Drawn into the pictures of the exported file. Otherwise the file has a subtitle track a player turns on, and an .srt lies next to it.">
+					<input type="checkbox" checked={doc.subtitles.burn} onchange={(e) => studio.edit('Subtitles in the picture', (d) => (d.subtitles.burn = e.currentTarget.checked))} /> In the picture
+				</label>
+			</div>
+			<div class="st-row">
+				<span class="st-lab">Under speech</span>
+				<input
+					class="amount"
+					type="range"
+					min="0"
+					max="100"
+					step="5"
+					value={Math.round(doc.duck * 100)}
+					aria-label="How far the shots' sound goes down under speech"
+					oninput={(e) => studio.edit('Sound under speech', (d) => (d.duck = Number(e.currentTarget.value) / 100), 'duck')}
+				/>
+				<span class="st-val" title="How far the shots' own sound goes down while a line is said">−{Math.round(doc.duck * 100)}%</span>
+			</div>
+		</section>
+		<section class="st-sec">
 			<h3 class="st-h">Start and end</h3>
 			<div class="st-row">
 				<label class="st-check"><input type="checkbox" checked={doc.fade_in} onchange={(e) => studio.edit('Fade in', (d) => (d.fade_in = e.currentTarget.checked))} /> Fade in</label>
@@ -520,10 +672,10 @@
 			<textarea class="st-ta" bind:value={idea} rows="3" placeholder="What is the film about? For example: a red fox finds a paper boat in a snowy forest and follows it down a stream" aria-label="What the film is about" disabled={studio.busy !== ''} onkeydown={(e) => e.stopPropagation()}></textarea>
 			<div class="st-row">
 				<select class="st-in" bind:value={wanted} aria-label="How many shots">{#each [3, 4, 6, 8, 12, 16, 24, 36, 60] as n (n)}<option value={n}>{n} shots</option>{/each}</select>
-				<button class="st-btn" onclick={() => write(false)} disabled={!idea.trim() || studio.busy !== '' || app.chatPackages.length === 0}>{studio.busy === 'writing' ? 'Writing…' : doc.shots.length ? 'Add to the film' : 'Write the shots'}</button>
-				{#if doc.shots.length > 0}<button class="st-btn quiet" onclick={replaceShots} disabled={!idea.trim() || studio.busy !== '' || app.chatPackages.length === 0}>Replace the shots</button>{/if}
+				<button class="st-btn" onclick={() => write(false)} disabled={!idea.trim() || studio.busy !== '' || !studio.canWrite}>{studio.busy === 'writing' ? 'Writing…' : doc.shots.length ? 'Add to the film' : 'Write the shots'}</button>
+				{#if doc.shots.length > 0}<button class="st-btn quiet" onclick={replaceShots} disabled={!idea.trim() || studio.busy !== '' || !studio.canWrite}>Replace the shots</button>{/if}
 			</div>
-			{#if app.chatPackages.length === 0}<p class="st-note">Needs a chat model. Add one under <button class="link" onclick={() => app.go('models')}>Models</button>.</p>{/if}
+			{#if !studio.canWrite}<p class="st-note">Needs the video model and the chat model.</p>{/if}
 			{#if studio.busy === 'writing'}<p class="st-note" role="status">The chat model is writing. This can take a minute or two.</p>{/if}
 		</section>
 		{@render narrationTool('the track named Narration')}
@@ -561,6 +713,23 @@
 </div>
 
 <style>
+	.line :global(.who) {
+		flex: none;
+		width: 84px;
+	}
+
+	.inspector :global(.lang) {
+		width: 86px;
+	}
+
+	.amount {
+		flex: 1;
+		min-width: 0;
+		height: 14px;
+		margin: 0;
+		accent-color: var(--st-accent);
+	}
+
 	.inspector {
 		flex: 1 1 0;
 		min-height: 0;

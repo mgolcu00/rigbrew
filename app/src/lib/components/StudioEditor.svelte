@@ -3,8 +3,9 @@
 	import { dbLabel, regionEnd, regionSpan, trimRegionEnd, trimRegionStart, trimShot, type DocRegion } from '#lib/studio-edit.ts';
 	import { LOOK, darker, fileName, lighter } from '#lib/studio-look.ts';
 	import { studio } from '#lib/studio.svelte.ts';
-	import { rulerLabel, rulerSteps, shortTime, snapFrame } from '#lib/studio-time.ts';
+	import { rulerLabel, rulerSteps, shortTime, snapFrame, zoomSpanAround, zoomedSpan } from '#lib/studio-time.ts';
 	import { hasClip, shotSeconds } from '#lib/studio.ts';
+	import { mod } from '#lib/words.ts';
 
 	// The Editor: what is selected, as wide as the panel. A shot is its real frames as a filmstrip
 	// over its sound, with a handle at each end to trim it. A sound region is its file's waveform
@@ -26,10 +27,16 @@
 
 	/** What the editor shows from left to right, in seconds of the clip or of the sound file. */
 	let frozen = $state<{ from: number; to: number } | null>(null);
+	/** The Editor's own zoom: 1 shows all of it, more shows a part, from `panFrom` on. */
+	let ez = $state(1);
+	let panFrom = $state(0);
 	const span = $derived.by(() => {
-		void studio.drawn;
 		// While a handle is dragged the scale stands still.
 		if (frozen) return frozen;
+		return zoomedSpan(whole, ez, panFrom);
+	});
+	const whole = $derived.by(() => {
+		void studio.drawn;
 		if (shot) return { from: 0, to: shotSeconds(shot) };
 		if (found) {
 			const file = studio.fileSeconds(found.region.file) ?? 0;
@@ -43,6 +50,35 @@
 		return { from: 0, to: 1 };
 	});
 	const pps = $derived((width - PAD * 2) / Math.max(0.05, span.to - span.from));
+
+	// Another shot or region: all of it again.
+	$effect(() => {
+		void shot?.id;
+		void found?.region.id;
+		ez = 1;
+		panFrom = 0;
+	});
+
+	function zoomBy(factor: number, x = 0.5) {
+		const next = zoomSpanAround(whole, span, factor, x);
+		ez = next.zoom;
+		panFrom = next.from;
+	}
+
+	/** Pinch, or Ctrl or Cmd and the wheel: zoom around the pointer. Sideways, or Shift and the wheel: move along. */
+	function wheel(e: WheelEvent) {
+		if (!shot && !found) return;
+		if (e.ctrlKey || e.metaKey) {
+			e.preventDefault();
+			const box = (e.currentTarget as HTMLElement).getBoundingClientRect();
+			zoomBy(Math.exp(-e.deltaY * 0.01), (e.clientX - box.left - PAD) / Math.max(1, width - PAD * 2));
+			return;
+		}
+		const along = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.shiftKey ? e.deltaY : 0;
+		if (along === 0 || ez <= 1) return;
+		e.preventDefault();
+		panFrom = zoomedSpan(whole, ez, span.from + along / pps).from;
+	}
 	const xOf = (seconds: number) => PAD + (seconds - span.from) * pps;
 	const tOf = (x: number) => span.from + (x - PAD) / pps;
 
@@ -457,13 +493,49 @@
 		{/if}
 		<span class="grow"></span>
 		{#if tip}<span class="tip">{tip}</span>{/if}
+		{#if shot || found}
+			<span class="ezoom" role="group" aria-label="Zoom of the Editor" title="Zoom of the Editor: pinch, or {mod} and the wheel">
+				<button onclick={() => zoomBy(1 / 1.6)} disabled={ez <= 1} aria-label="Zoom out">−</button>
+				<button class="fit" onclick={() => ((ez = 1), (panFrom = 0))} disabled={ez <= 1} aria-label="Show all of it">{ez > 1 ? `${ez < 10 ? ez.toFixed(1) : Math.round(ez)}×` : 'All'}</button>
+				<button onclick={() => zoomBy(1.6)} disabled={ez >= 64} aria-label="Zoom in">+</button>
+			</span>
+		{/if}
 	</div>
-	<div class="stage" bind:this={wrap}>
+	<div class="stage" bind:this={wrap} onwheel={wheel}>
 		<canvas bind:this={canvas} style:width="{width}px" style:height="{height}px" onpointerdown={down} onpointermove={move} onpointerup={up} onpointercancel={up} aria-label="The selected shot or region, enlarged"></canvas>
 	</div>
 </div>
 
 <style>
+	.ezoom {
+		flex: none;
+		display: inline-flex;
+		margin-left: 8px;
+		border-radius: 3px;
+		background: var(--st-edge);
+		box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06);
+	}
+
+	.ezoom button {
+		min-width: 18px;
+		height: 16px;
+		padding: 0 4px;
+		font: 500 10.5px/16px var(--rb-data);
+		color: var(--st-muted);
+	}
+
+	.ezoom button.fit {
+		min-width: 34px;
+	}
+
+	.ezoom button:hover:not(:disabled) {
+		color: var(--st-ink);
+	}
+
+	.ezoom button:disabled {
+		opacity: 0.45;
+	}
+
 	.editor {
 		height: 100%;
 		min-height: 0;

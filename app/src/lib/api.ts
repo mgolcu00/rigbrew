@@ -506,6 +506,52 @@ export interface StudioTake {
 	seconds?: number;
 	frames: number;
 	made_frames?: number;
+	/** "mp4" for a clip brought in from a video; made clips have none. */
+	ext?: string;
+	/** The clip has twice the film's width and height. */
+	large?: boolean;
+}
+
+/** One spoken line of a shot: by a cast member (`who` is their id) or, without one, the narrator. */
+export interface StudioLine {
+	id: string;
+	who?: string;
+	text: string;
+	/** The same line in other languages, by the language's name. */
+	said?: Record<string, string>;
+}
+
+/** A character of a film: a name and the fixed words for how they look. */
+export interface StudioMember {
+	id: string;
+	name: string;
+	look?: string;
+	/** The speaker number of the voice that says their lines. */
+	voice?: number | null;
+	/** How many portraits were made of them; 0 or missing for none. */
+	portrait?: number;
+}
+
+/** One subtitle, in seconds of the film. */
+export interface StudioCue {
+	start: number;
+	end: number;
+	text: string;
+	shot: string;
+}
+
+/** Long work on a film: bringing a video in, dubbing, listening to clips. */
+export interface StudioJob {
+	state: 'none' | 'working' | 'done' | 'failed';
+	stage?: string;
+	done?: number;
+	of?: number;
+	shots?: number;
+	lines?: number;
+	language?: string;
+	left_out?: boolean;
+	spoken?: boolean;
+	error?: string;
 }
 
 export interface StudioShot {
@@ -535,6 +581,10 @@ export interface StudioShot {
 	take?: number;
 	/** A seed to make the next clip with; without one every clip gets a new seed. */
 	seed?: number | null;
+	/** What is said during the shot. */
+	lines?: StudioLine[];
+	/** The id of a cast member whose portrait the shot starts from. */
+	from?: string;
 }
 
 /** A stretch of a sound file at a place in the film. */
@@ -553,12 +603,17 @@ export interface StudioRegion {
 	fade_out?: number;
 	/** How many times the stretch plays, one after another. */
 	loops?: number;
+	/** For the reading of a spoken line: "<shot>/<line>". */
+	line?: string;
 }
 
 /** A sound track: music, narration or effects. */
 export interface StudioTrack {
 	id: string;
 	name: string;
+	/** "voice" for the readings of the film's lines in one language (`lang`); "sound" otherwise. */
+	kind?: string;
+	lang?: string;
 	color: string;
 	/** 0 to 2. */
 	volume?: number;
@@ -599,6 +654,22 @@ export interface StudioProject {
 	fade_out?: boolean;
 	/** How the film is written to its MP4. */
 	export?: StudioExportOptions;
+	/** One line every shot shares: style, colours, light, lens. */
+	look?: string;
+	cast?: StudioMember[];
+	/** A seed every shot without its own is made with. */
+	seed?: number | null;
+	/** Whether the shot writer writes spoken lines. */
+	speech?: boolean;
+	/** The language the lines are written in. */
+	language?: string;
+	/** The speaker number of the narrator's voice. */
+	voice?: number | null;
+	subtitles?: { show: boolean; burn: boolean };
+	/** How far the shots' own sound goes down while a line is said, 0 to 1. */
+	duck?: number;
+	/** The language that is heard and read when it is not the film's own. */
+	dub?: string;
 	updated_ms: number;
 }
 
@@ -614,6 +685,21 @@ export interface StudioView {
 	export?: StudioExport;
 	/** About how many seconds of work are left: `all` for every shot that is not made, `left` for what is waiting or being made. */
 	estimate?: { all: number; left: number };
+	/** Which shots name which cast member, by the member's id. */
+	cast_in?: Record<string, string[]>;
+	/** The subtitles as the timeline holds them, in the language that is shown. */
+	cues?: StudioCue[];
+	/** The language that is shown, the film's own, and every one it can be shown in. */
+	language?: string;
+	own_language?: string;
+	languages?: string[];
+	/** The languages the installed voice reads aloud. */
+	spoken?: string[];
+	can_listen?: boolean;
+	/** How many voices the installed voice has. */
+	voices?: number;
+	jobs?: { import: StudioJob; dub: StudioJob; listen: StudioJob };
+	has?: { video: boolean; chat: boolean; voice: boolean; image: boolean };
 }
 
 /** What a shot of `frames` frames takes on this machine, in seconds: plain, and continuing the shot before. */
@@ -635,7 +721,7 @@ export interface StudioListing {
 }
 
 /** The films, and `home`: the folder new films go into when none is chosen. */
-export const studioList = () => json<{ projects: StudioListing[]; home?: string | null; pace?: StudioPace; can_continue?: boolean }>('GET', '/v1/studio/projects');
+export const studioList = () => json<{ projects: StudioListing[]; home?: string | null; pace?: StudioPace; can_continue?: boolean; voices?: number }>('GET', '/v1/studio/projects');
 /** Opens the film in `folder`, or starts one there. Without a folder the service makes one named after the film. */
 export const studioOpen = (folder: string, name = '') => json<StudioView>('POST', '/v1/studio/projects', { folder, name });
 export const studioRead = (id: string) => json<StudioView>('GET', `/v1/studio/projects/${enc(id)}`);
@@ -671,7 +757,18 @@ export interface StudioSave {
 		volume?: number;
 		mute?: boolean;
 		seed?: number | null;
+		lines?: { id?: string; who?: string; text: string; said?: Record<string, string> }[];
+		from?: string;
 	}[];
+	look?: string;
+	cast?: { id?: string; name: string; look?: string; voice?: number | null }[];
+	seed?: number | null;
+	speech?: boolean;
+	language?: string;
+	voice?: number | null;
+	subtitles?: { show: boolean; burn: boolean };
+	duck?: number;
+	dub?: string;
 }
 export const studioSave = (id: string, body: StudioSave) => json<StudioView>('PUT', `/v1/studio/projects/${enc(id)}`, body);
 /** The voice reads a text; the reading is saved in the film's folder and set on a narration track at `at` seconds. */
@@ -708,8 +805,46 @@ export const studioSoundFile = async (id: string, file: string) => (await send('
 export const studioForget = (id: string) => json<unknown>('DELETE', `/v1/studio/projects/${enc(id)}`);
 export const studioRender = (id: string, shots?: string[]) => json<StudioView>('POST', `/v1/studio/projects/${enc(id)}/render`, shots ? { shots } : {});
 export const studioStop = (id: string) => json<StudioView>('DELETE', `/v1/studio/projects/${enc(id)}/render`);
-export const studioStoryboard = async (id: string, idea: string, shots: number) =>
-	(await json<{ shots: { prompt: string; continues?: boolean }[] }>('POST', `/v1/studio/projects/${enc(id)}/storyboard`, { idea, shots })).shots;
+/** The shots of the film as it is saved, written for its cast, look and speech. With `asWritten`, every line of the idea is one shot as it stands. */
+export const studioStoryboard = async (id: string, idea: string, shots: number, asWritten = false) =>
+	(
+		await json<{ shots: { prompt: string; continues?: boolean; lines?: { who: string; text: string }[] }[] }>('POST', `/v1/studio/projects/${enc(id)}/storyboard`, {
+			idea,
+			shots,
+			as_written: asWritten
+		})
+	).shots;
+/** What the chat model makes of a few plain words: the film before its shots are written. Nothing is saved. */
+export interface StudioBrief {
+	title: string;
+	shape: 'landscape' | 'portrait' | 'square';
+	size: string;
+	seconds: number;
+	frames: number;
+	shots: number;
+	look: string;
+	speech: boolean;
+	language: string;
+	cast: { name: string; look: string }[];
+}
+export const studioBrief = (text: string) => json<StudioBrief>('POST', '/v1/studio/brief', { text });
+/** Brings a video file into the film as shots, cut at its scene changes. `studioJob(id, 'import')` says where that is. */
+export const studioImport = (id: string, path: string) => json<StudioJob>('POST', `/v1/studio/projects/${enc(id)}/import`, { path });
+export const studioJob = (id: string, kind: 'import' | 'dub' | 'listen') => json<StudioJob>('GET', `/v1/studio/projects/${enc(id)}/${kind}`);
+/** The voice reads every spoken line onto a voice track; another language is translated first. */
+export const studioDub = (id: string, language?: string) => json<StudioJob>('POST', `/v1/studio/projects/${enc(id)}/dub`, language ? { language } : {});
+/** The listening model writes down what is said in the clips that have no lines. */
+export const studioListen = (id: string, shots?: string[]) => json<StudioJob>('POST', `/v1/studio/projects/${enc(id)}/listen`, shots ? { shots } : {});
+/** The chat model writes how a character looks from a few words. Nothing is saved. */
+export const studioLook = async (id: string, name: string, words: string) => (await json<{ look: string }>('POST', `/v1/studio/projects/${enc(id)}/cast/look`, { name, words })).look;
+export const studioMakePortrait = (id: string, member: string) => json<StudioView>('POST', `/v1/studio/projects/${enc(id)}/cast/${enc(member)}/portrait`);
+export const studioPortrait = async (id: string, member: string) => (await send('GET', `/v1/studio/projects/${enc(id)}/cast/${enc(member)}/portrait`)).blob();
+/** The subtitles as the export holds them, and whether their pictures are drawn already. */
+export const studioSubtitles = (id: string) =>
+	json<{ cues: StudioCue[]; key: string; width: number; height: number; language: string; drawn: boolean }>('GET', `/v1/studio/projects/${enc(id)}/subtitles`);
+/** One subtitle as a picture (RGBA as base64), for an export that draws the subtitles into the film. */
+export const studioCaption = (id: string, key: string, n: number, of: number, w: number, h: number, rgba: string) =>
+	json<{ kept: number; whole: boolean }>('PUT', `/v1/studio/projects/${enc(id)}/captions?key=${enc(key)}&n=${n}&of=${of}&w=${w}&h=${h}`, { rgba });
 export interface StudioExport {
 	state: 'none' | 'working' | 'done' | 'failed';
 	file?: string;
@@ -718,6 +853,8 @@ export interface StudioExport {
 	bytes?: number;
 	/** Seconds of film in the file. */
 	seconds?: number;
+	/** How the subtitles went out: none, a file next to the film, a track in it, or drawn into the pictures. */
+	subtitles?: 'none' | 'file' | 'track' | 'burned';
 }
 /** Shows the exported file in the system's file manager. */
 export const studioReveal = (id: string) => json<{ shown: string }>('POST', `/v1/studio/projects/${enc(id)}/reveal`);
@@ -828,6 +965,13 @@ export const undoAgentTask = (id: string) => taskOf(json('POST', `/v1/agent/task
 export const stopAgentTask = (id: string) => taskOf(json('DELETE', `/v1/agent/tasks/${enc(id)}`));
 export const removeAgentTask = (id: string) => json<{ removed: string }>('DELETE', `/v1/agent/tasks/${enc(id)}?remove=true`);
 export const agentSkills = (folder: string) => optional<{ skills: AgentSkill[]; dir: string; folder_dir: string }>('GET', `/v1/agent/skills?folder=${enc(folder)}`);
+
+/** Asks for one video or sound file with the system's own dialog. `null` when cancelled, or outside the app. */
+export async function pickFile(kind: 'video' | 'sound', title = 'Choose a file'): Promise<string | null> {
+	if (!isTauri) return null;
+	const { invoke } = await import('@tauri-apps/api/core');
+	return (await invoke<string | null>('pick_file', { title, kind })) ?? null;
+}
 
 /** Asks for a folder with the system's own dialog. `null` when cancelled, or outside the app. */
 export async function pickFolder(title = 'Choose a folder'): Promise<string | null> {

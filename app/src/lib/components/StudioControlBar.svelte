@@ -55,6 +55,7 @@
 		<button class="cb" class:on={studio.layout.inspector} aria-pressed={studio.layout.inspector} onclick={() => studio.set('inspector', !studio.layout.inspector)} title="Inspector (I)" aria-label="Inspector"><StudioIcon name="inspector" /></button>
 		<button class="cb" class:on={studio.layout.bottom && studio.layout.tab === 'mixer'} aria-pressed={studio.layout.bottom && studio.layout.tab === 'mixer'} onclick={() => studio.bottom('mixer')} title="Mixer (X)" aria-label="Mixer"><StudioIcon name="mixer" /></button>
 		<button class="cb" class:on={studio.layout.bottom && studio.layout.tab === 'editor'} aria-pressed={studio.layout.bottom && studio.layout.tab === 'editor'} onclick={() => studio.bottom('editor')} title="Editor (E)" aria-label="Editor"><StudioIcon name="editor" /></button>
+		<button class="cb" class:on={studio.layout.bottom && studio.layout.tab === 'cast'} aria-pressed={studio.layout.bottom && studio.layout.tab === 'cast'} onclick={() => studio.bottom('cast')} title="Cast (K)" aria-label="Cast"><StudioIcon name="cast" /></button>
 		<span class="sep"></span>
 		<button class="cb" onclick={() => studio.undo()} disabled={!canUndo} title={canUndo ? `Undo ${canUndo} (${mod}Z)` : 'Nothing to undo'} aria-label="Undo"><StudioIcon name="undo" /></button>
 		<button class="cb" onclick={() => studio.redo()} disabled={!canRedo} title={canRedo ? `Redo ${canRedo} (Shift ${mod}Z)` : 'Nothing to redo'} aria-label="Redo"><StudioIcon name="redo" /></button>
@@ -120,7 +121,7 @@
 			</div>
 		{/if}
 		<span class="sep"></span>
-		<button class="st-btn" onclick={() => studio.make()} disabled={studio.todo === 0 || !video || studio.view?.rendering} title={video ? `Make the shots that are not made (${mod}Return)` : 'Add Video under Models first'}>
+		<button class="st-btn" onclick={() => studio.make()} disabled={studio.todo === 0 || !video || studio.view?.rendering} title={video ? `Make the shots that are not made (${mod}Return)` : 'Needs the video model'}>
 			Make{studio.todo > 0 ? ` ${studio.todo}` : ''}
 		</button>
 		<button class="st-btn primary" onclick={() => studio.exportFilm()} disabled={studio.exportPlan.parts.length === 0 || exporting} title="Join the made shots and the sound tracks into one MP4 file in the film's folder ({mod}B)">{exporting ? 'Exporting…' : 'Export'}</button>

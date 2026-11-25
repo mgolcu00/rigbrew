@@ -148,8 +148,10 @@ export const articles: Article[] = [
 		id: 'studio',
 		title: 'Studio: a film made of shots',
 		body: [
-			'Say what the film is about and how long it should be, then press “Make the film”. The chat model writes the shots, the video model makes them one after another with sound, and the film is saved as one MP4 file in a folder of yours. It keeps going while you do something else.',
+			'Say what the film is about and press “Make the film”. The chat model chooses a shape, a length, a look and the cast, and writes the shots; the video model makes them one after another with sound; the film is saved as one MP4 file in a folder of yours. It keeps going while you do something else. “Detailed” sets all of that yourself. “From a video” cuts a video file into shots that you then trim, dub and continue.',
+			'A film has a cast. A character has a name and a look; a shot names its characters, and the look of everyone it names is put into the shot when it is made, word for word, the same every time. That keeps them close from shot to shot; it does not promise the same face. A seed for the whole film and shots that continue the one before help too.',
 			'An open film is a workstation. The shots stand on the film track in order: drag one to move it, drag its edges to trim it, drag the small handle between two shots for a dissolve or a fade through black. Select a shot to change its description in the Inspector, let the chat model rewrite it, or try it again and keep the take you like.',
+			'A shot can have spoken lines. “Dub” has the voice read them onto a voice track, and the shots’ own sound goes down under them. Lines can be translated; the film then shows subtitles in that language. An export writes the subtitles as a file next to the film and as a track in it, or draws them into the picture.',
 			'Under the film you add sound tracks for music, narration and effects. Drag a sound file from the Library onto a track, move it, trim its edges, fade its corners, split it at the playhead. Each track has mute, solo, a volume fader and pan; the Mixer shows them all with the master.',
 			'Space plays the film as the export will hold it. Everything can be undone. Press ? in Studio for the list of keys.'
 		]

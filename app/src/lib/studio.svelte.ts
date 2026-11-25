@@ -3,16 +3,19 @@
 // none of them talks to the service on its own.
 
 import * as api from './api.ts';
-import type { StudioListing, StudioPace, StudioShot, StudioSound, StudioView } from './api.ts';
+import type { StudioBrief, StudioJob, StudioListing, StudioPace, StudioShot, StudioSound, StudioView } from './api.ts';
+import { drawCaption } from './studio-captions.ts';
 import { codeOf, plain } from './errors.ts';
 import { remembered } from './remember.ts';
 import { app } from './state.svelte.ts';
 import { MASTER, SHOTS, StudioAudio, type PlayRegion } from './studio-audio.ts';
 import {
 	History,
+	docMember,
 	docOf,
 	docShot,
 	heard,
+	names,
 	moveShots,
 	newId,
 	overlapping,
@@ -21,7 +24,10 @@ import {
 	saveBody,
 	splitRegion,
 	stripGain,
+	takeWork,
 	type Doc,
+	type DocLine,
+	type DocMember,
 	type DocRegion,
 	type DocShot,
 	type DocTrack
@@ -48,7 +54,7 @@ interface Layout {
 	library: boolean;
 	inspector: boolean;
 	bottom: boolean;
-	tab: 'mixer' | 'editor';
+	tab: 'mixer' | 'editor' | 'cast';
 	libraryWidth: number;
 	inspectorWidth: number;
 	bottomHeight: number;
@@ -58,6 +64,8 @@ interface Layout {
 	lcd: 'time' | 'shot';
 	snap: boolean;
 	vzoom: number;
+	/** A track made taller or lower than the others, by its id: 1 is as the others are. */
+	heights: Record<string, number>;
 }
 
 const usualLayout: Layout = {
@@ -73,7 +81,8 @@ const usualLayout: Layout = {
 	libraryTab: 'films',
 	lcd: 'time',
 	snap: true,
-	vzoom: 1
+	vzoom: 1,
+	heights: {}
 };
 
 const say = (e: unknown) => `${plain(e).text} ${codeOf(e)}`;
@@ -93,6 +102,8 @@ class Studio {
 	home = $state('');
 	pace = $state<StudioPace | null>(null);
 	carries = $state(false);
+	/** How many voices the installed voice has. */
+	voices = $state(0);
 
 	// --- the film that is open ----------------------------------------------------------------------
 	/** The film as the service last sent it: states, takes, progress, export. */
@@ -104,7 +115,13 @@ class Studio {
 	/** One quiet line about what just happened ("Undo: Trim shot"). */
 	note = $state('');
 	question = $state<Question | null>(null);
-	busy = $state<'' | 'writing' | 'narrating' | 'rewriting' | 'adding'>('');
+	busy = $state<'' | 'writing' | 'narrating' | 'rewriting' | 'adding' | 'looking' | 'portrait'>('');
+	/** Long work on the film as the service reports it: a video brought in, a dub, clips listened to. */
+	jobs = $state<{ import?: StudioJob; dub?: StudioJob; listen?: StudioJob }>({});
+	/** The cast member the Cast panel shows. */
+	member = $state('');
+	/** The portraits that are here, by film, member and which portrait it is. */
+	portraits = $state<Record<string, string>>({});
 
 	// --- what is selected -------------------------------------------------------------------------
 	shotsSel = $state<string[]>([]);
@@ -156,6 +173,8 @@ class Studio {
 	edits = $state(0);
 	#timer: ReturnType<typeof setTimeout> | undefined;
 	#dirty = false;
+	/** While the service works on the film itself, nothing is saved over what it does. */
+	#held = 0;
 	#saving: Promise<void> = Promise.resolve();
 	#poll: ReturnType<typeof setInterval> | undefined;
 	clipboard: { regions: DocRegion[]; track: string } | null = null;
@@ -175,6 +194,16 @@ class Studio {
 	strips = $derived([{ id: SHOTS, ...(this.doc?.shot_track ?? { mute: false, solo: false, volume: 1, pan: 0 }) }, ...(this.doc?.tracks ?? [])]);
 	heard = $derived(heard(this.strips));
 	overlaps = $derived(new Set((this.doc?.tracks ?? []).flatMap((t) => [...overlapping(t.regions)])));
+	/** The stretches of the film in which a line is heard: the shots' own sound goes down under them. */
+	said = $derived<[number, number][]>((this.doc?.tracks ?? []).filter((t) => t.kind === 'voice' && this.heard[t.id]).flatMap((t) => t.regions.map((r) => [r.start, regionEnd(r)] as [number, number])));
+	/** The subtitles on the timeline, when the film shows them. */
+	cues = $derived(this.doc?.subtitles.show ? (this.view?.cues ?? []) : []);
+	/** The language the film's lines are written in, and the one that is shown. */
+	ownLanguage = $derived(this.doc?.language || this.view?.own_language || 'English');
+	language = $derived(this.doc?.dub || this.ownLanguage);
+	/** Whether the video model is installed: without it nothing is written or made. */
+	canMake = $derived(Boolean(app.videoPackage));
+	canWrite = $derived(Boolean(app.videoPackage) && app.chatPackages.length > 0);
 
 	#whole(s: DocShot): StudioShot {
 		const known = this.status[s.id];
@@ -185,7 +214,8 @@ class Studio {
 			seconds: known?.seconds,
 			made_frames: known?.made_frames,
 			takes: known?.takes,
-			take: known?.take
+			take: known?.take,
+			from: s.from
 		};
 	}
 
@@ -224,6 +254,7 @@ class Studio {
 			this.home = all.home ?? '';
 			this.pace = all.pace ?? null;
 			this.carries = Boolean(all.can_continue);
+			this.voices = all.voices ?? 0;
 		} catch (e) {
 			this.problem = say(e);
 		}
@@ -410,7 +441,7 @@ class Studio {
 	saveNow(): Promise<void> {
 		clearTimeout(this.#timer);
 		this.#timer = undefined;
-		if (!this.doc || !this.#dirty) return this.#saving;
+		if (!this.doc || !this.#dirty || this.#held > 0) return this.#saving;
 		const body = saveBody($state.snapshot(this.doc) as Doc);
 		const id = this.id;
 		this.#dirty = false;
@@ -579,7 +610,7 @@ class Studio {
 		if (!this.doc) return '';
 		const id = newId();
 		const n = this.doc.tracks.length;
-		this.edit('Add track', (doc) => doc.tracks.push({ id, name: name || `Sound ${n + 1}`, color: TRACK_COLORS[n % TRACK_COLORS.length], volume: 1, pan: 0, mute: false, solo: false, regions: [] }));
+		this.edit('Add track', (doc) => doc.tracks.push({ id, name: name || `Sound ${n + 1}`, kind: 'sound', lang: '', color: TRACK_COLORS[n % TRACK_COLORS.length], volume: 1, pan: 0, mute: false, solo: false, regions: [] }));
 		this.selectTrack(id);
 		app.track('studio_track_added', { tracks: n + 1 });
 		return id;
@@ -589,7 +620,7 @@ class Studio {
 		const at = this.doc?.tracks.findIndex((t) => t.id === id) ?? -1;
 		if (!this.doc || at < 0) return;
 		const from = $state.snapshot(this.doc.tracks[at]) as DocTrack;
-		const copy: DocTrack = { ...from, id: newId(), name: `${from.name} copy`.slice(0, 40), solo: false, regions: from.regions.map((r) => ({ ...r, id: newId() })) };
+		const copy: DocTrack = { ...from, id: newId(), kind: 'sound', lang: '', name: `${from.name} copy`.slice(0, 40), solo: false, regions: from.regions.map((r) => ({ ...r, id: newId() })) };
 		this.edit('Duplicate track', (doc) => doc.tracks.splice(at + 1, 0, copy));
 		this.selectTrack(copy.id);
 		app.track('studio_track_added', { tracks: this.doc.tracks.length });
@@ -698,7 +729,7 @@ class Studio {
 	// --- making, takes, export ----------------------------------------------------------------------
 
 	async make(shots?: string[]) {
-		if (!this.doc) return;
+		if (!this.doc || !this.canMake) return;
 		this.problem = '';
 		try {
 			await this.saveNow();
@@ -761,6 +792,7 @@ class Studio {
 		this.problem = '';
 		try {
 			await this.saveNow();
+			if (this.doc.subtitles.burn) await this.#captions();
 			await api.studioExport(this.id);
 			app.track('studio_export', {
 				shots: this.exportPlan.parts.length,
@@ -780,6 +812,30 @@ class Studio {
 		}
 	}
 
+	/**
+	 * Draws the subtitles as pictures for an export that holds them in its frames, and hands
+	 * them to the service: one picture for each, as wide as the exported film. Subtitles that are
+	 * drawn already are not drawn again. When this does not work the export still goes on, with
+	 * the subtitles as a track.
+	 */
+	async #captions() {
+		const id = this.id;
+		try {
+			const sub = await api.studioSubtitles(id);
+			if (sub.drawn || sub.cues.length === 0) return;
+			this.note = 'Drawing the subtitles…';
+			for (const [n, cue] of sub.cues.entries()) {
+				const picture = drawCaption(cue.text, sub.width, sub.height);
+				if (!picture) return;
+				await api.studioCaption(id, sub.key, n, sub.cues.length, picture.width, picture.height, picture.rgba);
+			}
+		} catch {
+			// The export says how the subtitles went out.
+		} finally {
+			if (this.note === 'Drawing the subtitles…') this.note = '';
+		}
+	}
+
 	async reveal() {
 		try {
 			await api.studioReveal(this.id);
@@ -796,11 +852,16 @@ class Studio {
 		this.busy = 'writing';
 		this.problem = '';
 		try {
+			// The shots are written for the film as it is saved: its cast, its look, whether it speaks.
+			await this.saveNow();
 			const written = await api.studioStoryboard(this.id, idea.trim(), count);
 			const carries = Boolean(this.view?.can_continue);
 			this.edit(replace ? 'Write the shots again' : 'Write shots', (doc) => {
 				if (replace) doc.shots = [];
-				for (const s of written) doc.shots.push(docShot({ id: newId(), prompt: s.prompt, frames: this.usualFrames, continues: Boolean(s.continues && carries && doc.shots.length > 0) }));
+				for (const s of written) {
+					const lines = (s.lines ?? []).map((l) => ({ id: newId(), who: l.who, text: l.text }));
+					doc.shots.push(docShot({ id: newId(), prompt: s.prompt, frames: this.usualFrames, continues: Boolean(s.continues && carries && doc.shots.length > 0), lines }));
+				}
 			});
 			app.track('studio_shots_written', { shots: written.length, replace });
 			return true;
@@ -856,6 +917,288 @@ class Studio {
 			return false;
 		} finally {
 			this.busy = '';
+		}
+	}
+
+	// --- the cast -----------------------------------------------------------------------------------
+
+	/** The shots that name a member, as the film stands now. */
+	shotsWith(member: string): StudioShot[] {
+		const who = this.doc?.cast.find((m) => m.id === member);
+		return who ? this.shots.filter((s) => names(s.prompt, who.name)) : [];
+	}
+
+	addMember(name = '', look = ''): string {
+		if (!this.doc) return '';
+		const taken = new Set(this.doc.cast.map((m) => m.name.toLowerCase()));
+		let fresh = name.trim() || 'Character';
+		for (let n = 2; taken.has(fresh.toLowerCase()); n++) fresh = `${name.trim() || 'Character'} ${n}`;
+		const member = docMember({ id: newId(), name: fresh, look });
+		this.edit('Add character', (doc) => doc.cast.push(member));
+		this.member = member.id;
+		app.track('studio_cast_added', { cast: this.doc.cast.length });
+		return member.id;
+	}
+
+	setMember(id: string, label: string, change: (m: DocMember) => void, key = '') {
+		this.edit(
+			label,
+			(doc) => {
+				const m = doc.cast.find((x) => x.id === id);
+				if (m) change(m);
+			},
+			key ? `${key}:${id}` : ''
+		);
+	}
+
+	removeMember(id: string) {
+		if (!this.doc?.cast.some((m) => m.id === id)) return;
+		this.edit('Remove character', (doc) => {
+			doc.cast = doc.cast.filter((m) => m.id !== id);
+			for (const s of doc.shots) {
+				if (s.from === id) s.from = '';
+				for (const l of s.lines) if (l.who === id) l.who = '';
+			}
+		});
+		if (this.member === id) this.member = this.doc.cast[0]?.id ?? '';
+	}
+
+	/** The chat model writes how a member looks from a few words; the old look comes back with undo. */
+	async writeLook(id: string, words: string) {
+		const m = this.doc?.cast.find((x) => x.id === id);
+		if (!m || this.busy) return false;
+		this.busy = 'looking';
+		this.problem = '';
+		try {
+			await this.saveNow();
+			const look = await api.studioLook(this.id, m.name, words.trim() || m.look);
+			this.setMember(id, 'Write the look', (x) => (x.look = look));
+			app.track('studio_look_written', {});
+			return true;
+		} catch (e) {
+			this.problem = say(e);
+			return false;
+		} finally {
+			this.busy = '';
+		}
+	}
+
+	/** The picture model makes a portrait from the member's look. */
+	async makePortrait(id: string) {
+		if (!this.doc || this.busy) return;
+		this.busy = 'portrait';
+		this.problem = '';
+		try {
+			await this.saveNow();
+			this.#server(await api.studioMakePortrait(this.id, id));
+			app.track('studio_portrait_made', {});
+		} catch (e) {
+			this.problem = say(e);
+		} finally {
+			this.busy = '';
+		}
+	}
+
+	/** Which portrait a member has: 0 for none. */
+	portraitCount(member: string) {
+		return this.view?.project.cast?.find((m) => m.id === member)?.portrait ?? 0;
+	}
+
+	/** The portrait of a member, once it is here. Asking for it fetches it. */
+	portrait(member: string): string | undefined {
+		const n = this.portraitCount(member);
+		if (!n) return undefined;
+		const key = `${this.id}:${member}:${n}`;
+		if (!this.#asked.has(key)) {
+			this.#asked.add(key);
+			const film = this.id;
+			api.studioPortrait(film, member)
+				.then((blob) => (this.portraits = { ...this.portraits, [key]: URL.createObjectURL(blob) }))
+				.catch(() => this.#asked.delete(key));
+		}
+		return this.portraits[key];
+	}
+
+	// --- what is said: lines, the dub, subtitles ---------------------------------------------------
+
+	addLine(shot: string, who = '') {
+		const id = newId();
+		this.edit('Add line', (doc) => doc.shots.find((s) => s.id === shot)?.lines.push({ id, who, text: '', said: {} }));
+		return id;
+	}
+
+	setLine(shot: string, line: string, label: string, change: (l: DocLine) => void, key = '') {
+		this.edit(
+			label,
+			(doc) => {
+				const l = doc.shots.find((s) => s.id === shot)?.lines.find((x) => x.id === line);
+				if (l) change(l);
+			},
+			key ? `${key}:${line}` : ''
+		);
+	}
+
+	removeLine(shot: string, line: string) {
+		this.edit('Delete line', (doc) => {
+			const s = doc.shots.find((x) => x.id === shot);
+			if (s) s.lines = s.lines.filter((l) => l.id !== line);
+		});
+	}
+
+	/** The language that is heard and read. Its voice track is on, the others are muted. */
+	showIn(language: string) {
+		if (!this.doc) return;
+		const own = language.toLowerCase() === this.ownLanguage.toLowerCase();
+		this.edit('Language', (doc) => {
+			doc.dub = own ? '' : language;
+			const heard = doc.tracks.some((t) => t.kind === 'voice' && t.lang.toLowerCase() === language.toLowerCase()) ? language : this.ownLanguage;
+			if (!doc.tracks.some((t) => t.kind === 'voice' && t.lang.toLowerCase() === heard.toLowerCase())) return;
+			for (const t of doc.tracks) if (t.kind === 'voice') t.mute = t.lang.toLowerCase() !== heard.toLowerCase();
+		});
+	}
+
+	/**
+	 * Work the service does on the film itself and reports on: started, looked at until it is
+	 * done, and then the film is taken as the service has it. One step for undo.
+	 */
+	async #job(kind: 'import' | 'dub' | 'listen', label: string, start: () => Promise<StudioJob>): Promise<StudioJob | null> {
+		if (!this.doc || this.jobs[kind]?.state === 'working') return null;
+		const id = this.id;
+		this.problem = '';
+		let held = false;
+		try {
+			await this.saveNow();
+			const before = $state.snapshot(this.doc) as Doc;
+			let job = await start();
+			// From here the service changes the film: an edit made meanwhile waits, and is put together with its work.
+			this.#held++;
+			held = true;
+			this.jobs = { ...this.jobs, [kind]: job };
+			while (job.state === 'working') {
+				await new Promise((r) => setTimeout(r, 1200));
+				job = await api.studioJob(id, kind);
+				if (this.id === id) this.jobs = { ...this.jobs, [kind]: job };
+			}
+			if (this.id !== id) return job;
+			if (job.state === 'failed') {
+				this.problem = say(job.error ?? '');
+				return job;
+			}
+			const view = await api.studioRead(id);
+			if (this.id !== id || !this.doc) return job;
+			const theirs = docOf(view.project);
+			const edited = this.#dirty;
+			this.history.push(before, label);
+			this.view = view;
+			this.doc = edited ? takeWork(kind, $state.snapshot(this.doc) as Doc, theirs) : theirs;
+			this.edits++;
+			this.jumps++;
+			this.loadSounds();
+			return job;
+		} catch (e) {
+			this.problem = say(e);
+			this.jobs = { ...this.jobs, [kind]: { state: 'none' } };
+			return null;
+		} finally {
+			if (held) this.#held--;
+			// What was edited while the service worked is saved now.
+			if (this.#dirty && this.id === id) this.#touch();
+		}
+	}
+
+	/** The voice reads every line onto a voice track; another language is translated first. */
+	async dub(language?: string) {
+		const job = await this.#job('dub', 'Dub', () => api.studioDub(this.id, language));
+		if (job?.state === 'done') {
+			app.track('studio_dubbed', { lines: job.lines ?? 0, translated: Boolean(language), spoken: job.spoken !== false });
+			this.note = job.spoken === false ? `Translated into ${job.language}. The voice does not read it: subtitles only.` : `Dubbed: ${job.lines} ${job.lines === 1 ? 'line' : 'lines'}.`;
+		}
+	}
+
+	/** The listening model writes down what is said in the clips that have no lines. */
+	async listen(shots?: string[]) {
+		const job = await this.#job('listen', 'Write down what is said', () => api.studioListen(this.id, shots));
+		if (job?.state === 'done') {
+			app.track('studio_listened', { lines: job.lines ?? 0 });
+			this.note = job.lines ? `Wrote down ${job.lines} ${job.lines === 1 ? 'line' : 'lines'}.` : 'Nothing was said in these clips.';
+		}
+	}
+
+	/** Brings a video file into the film as shots, cut where its scenes change. */
+	async importVideo(path: string) {
+		if (!path.trim()) return false;
+		const job = await this.#job('import', 'Bring in a video', () => api.studioImport(this.id, path.trim()));
+		if (job?.state === 'done') {
+			app.track('studio_video_imported', { shots: job.shots ?? 0, left_out: Boolean(job.left_out) });
+			this.note = `${job.shots} ${job.shots === 1 ? 'shot' : 'shots'} brought in.${job.left_out ? ' The film is full: the end of the video was left out.' : ''}`;
+			this.fits++;
+		}
+		return job?.state === 'done';
+	}
+
+	/**
+	 * A film from a few plain words. The chat model directs it (a brief: title, shape, length,
+	 * look, cast, speech), the film is started in a folder of its own, the shots are written for
+	 * it and making them starts. `stage` is told where this is. What was chosen stays changeable.
+	 */
+	async direct(text: string, wish: Partial<StudioBrief> & { folder?: string; asWritten?: boolean; voice?: number | null; subtitles?: boolean } = {}, stage: (at: 'directing' | 'writing' | 'starting') => void = () => {}) {
+		this.problem = '';
+		let opened: StudioView | null = null;
+		try {
+			stage('directing');
+			// A film whose shots are used as written needs no director: what was set is the brief.
+			const chosen: Partial<StudioBrief> = wish.asWritten ? {} : await api.studioBrief(text);
+			const brief = { ...chosen, ...Object.fromEntries(Object.entries(wish).filter(([, v]) => v !== undefined && v !== '')) } as Partial<StudioBrief>;
+			opened = await api.studioOpen(wish.folder?.trim() ?? '', brief.title || text.split(/\s+/).slice(0, 6).join(' '));
+			const id = opened.project.id;
+			// A folder that already holds a film is opened as it is.
+			if (opened.project.shots.length > 0) {
+				this.adopt(opened);
+				return true;
+			}
+			const frames = brief.frames ?? this.usualFrames;
+			const count = wish.shots ?? brief.shots ?? Math.max(1, Math.round((brief.seconds ?? 30) / (frames / 24)));
+			await api.studioSave(id, {
+				size: brief.size,
+				look: brief.look ?? '',
+				cast: (brief.cast ?? []).map((m) => ({ name: m.name, look: m.look })),
+				speech: Boolean(brief.speech),
+				language: brief.language ?? '',
+				voice: wish.voice ?? null,
+				subtitles: { show: wish.subtitles ?? true, burn: false },
+				auto_export: true
+			});
+			stage('writing');
+			const shots = await api.studioStoryboard(id, text, count, Boolean(wish.asWritten));
+			stage('starting');
+			const carries = Boolean(opened.can_continue);
+			await api.studioSave(id, {
+				shots: shots.map((s, i) => ({ prompt: s.prompt, frames, continues: carries && i > 0 && Boolean(s.continues), lines: (s.lines ?? []).map((l) => ({ who: l.who, text: l.text })) }))
+			});
+			this.adopt(await api.studioRender(id));
+			app.track('studio_quick_film', { seconds: brief.seconds ?? 0, shots: shots.length, shape: brief.shape ?? '', own_folder: Boolean(wish.folder?.trim()), cast: brief.cast?.length ?? 0, speech: Boolean(brief.speech), detailed: Object.keys(wish).length > 0 });
+			return true;
+		} catch (e) {
+			// The folder is there: the film is opened, and the idea can be tried again from its Inspector.
+			if (opened) this.adopt(opened);
+			this.problem = say(e);
+			return false;
+		} finally {
+			this.refresh();
+		}
+	}
+
+	/** A film that starts from a video file: a folder named after the file, and the file cut into its shots. */
+	async fromVideo(path: string, folder = '') {
+		this.problem = '';
+		try {
+			const name = (tail(path).replace(/\.[^.]+$/, '') || 'Film').slice(0, 60);
+			this.adopt(await api.studioOpen(folder.trim(), name));
+			this.refresh();
+			return await this.importVideo(path);
+		} catch (e) {
+			this.problem = say(e);
+			return false;
 		}
 	}
 
@@ -1164,7 +1507,7 @@ class Studio {
 	}
 
 	/** Shows a tab of the bottom panel; the same key again closes the panel. */
-	bottom(tab: 'mixer' | 'editor') {
+	bottom(tab: 'mixer' | 'editor' | 'cast') {
 		if (this.layout.bottom && this.layout.tab === tab) this.set('bottom', false);
 		else {
 			this.set('tab', tab);

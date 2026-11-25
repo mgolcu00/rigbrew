@@ -8,7 +8,12 @@ import {
 	balance,
 	dbLabel,
 	dbOf,
+	captionRows,
+	cueAt,
 	docOf,
+	duckLevel,
+	names,
+	told,
 	dropPlace,
 	fadeLevel,
 	faderToGain,
@@ -25,6 +30,7 @@ import {
 	pasteRegions,
 	regionEnd,
 	saveBody,
+	takeWork,
 	splitRegion,
 	stripGain,
 	trimRegionEnd,
@@ -47,7 +53,9 @@ import {
 	timecode,
 	xToTime,
 	zoomAround,
-	zoomToSlider
+	zoomSpanAround,
+	zoomToSlider,
+	zoomedSpan
 } from './studio-time.ts';
 
 const close = (a, b, by = 1e-9) => assert.ok(Math.abs(a - b) <= by, `${a} is not ${b}`);
@@ -134,8 +142,21 @@ test('a dragged edge snaps to region edges and the playhead, else to frames', ()
 test('the window follows the playhead and scrolls at its edges', () => {
 	const z = { pps: 100, scroll: 0 };
 	assert.equal(followScroll(4, z, 1000), 0);
-	// Off the right edge: a page on, the playhead near the left.
-	assert.equal(followScroll(9.9, z, 1000), 990 - 120);
+	// Past the place it is held at, the window moves with the playhead: it stands still on the screen.
+	assert.equal(followScroll(6.2, z, 1000), 0);
+	assert.equal(followScroll(6.3, z, 1000), 10);
+	assert.equal(followScroll(9.9, z, 1000), 990 - 620);
+	assert.equal(followScroll(9.9, { pps: 100, scroll: 370 }, 1000), 370);
+	// The Editor's own zoom: a part of what it shows, held inside it, the moment under the pointer staying put.
+	const base = { from: 2, to: 10 };
+	assert.deepEqual(zoomedSpan(base, 1, 5), { from: 2, to: 10 });
+	assert.deepEqual(zoomedSpan(base, 4, 5), { from: 5, to: 7 });
+	assert.deepEqual(zoomedSpan(base, 4, 99), { from: 8, to: 10 });
+	assert.deepEqual(zoomedSpan(base, 0.2, -4), { from: 2, to: 10 });
+	assert.deepEqual(zoomSpanAround(base, base, 2, 0.5), { zoom: 2, from: 4 });
+	assert.deepEqual(zoomSpanAround(base, { from: 4, to: 8 }, 2, 0.25), { zoom: 4, from: 4.5 });
+	assert.deepEqual(zoomSpanAround(base, { from: 4, to: 8 }, 0.1, 0.5), { zoom: 1, from: 2 });
+	assert.equal(zoomSpanAround(base, base, 1000, 0.5).zoom, 64);
 	// Behind the window (after a jump back): the same.
 	assert.equal(followScroll(1, { pps: 100, scroll: 500 }, 1000), 0);
 	assert.equal(edgeScroll(500, 1000), 0);
@@ -360,12 +381,15 @@ test('a film goes to the workstation and back to the service', () => {
 	};
 	const doc = docOf(project);
 	// What the service knows about clips is not part of the film an edit changes.
-	assert.deepEqual(Object.keys(doc.shots[0]).sort(), ['continues', 'frames', 'id', 'join', 'join_seconds', 'mute', 'prompt', 'seed', 'trim_end', 'trim_start', 'volume']);
+	assert.deepEqual(Object.keys(doc.shots[0]).sort(), ['continues', 'frames', 'from', 'id', 'join', 'join_seconds', 'lines', 'mute', 'prompt', 'seed', 'trim_end', 'trim_start', 'volume']);
 	assert.deepEqual([doc.shots[0].join, doc.shots[0].join_seconds, doc.shots[0].volume, doc.shots[1].join_seconds], ['cut', 0.5, 1, 1.25]);
 	assert.deepEqual([doc.master, doc.fade_in, doc.fade_out, doc.shot_track], [1, true, false, { volume: 1, pan: 0, mute: false, solo: false }]);
 	assert.deepEqual(doc.tracks[0].regions[0], { id: 'r1', file: '/m/theme.wav', start: 2, offset: 0, length: 8, gain: 1, fade_in: 0, fade_out: 0, loops: 3 });
 	const body = saveBody(doc);
-	assert.deepEqual(body.shots[1], { id: 'b2', prompt: 'a boat', frames: 121, continues: true, trim_start: 0.5, trim_end: 0, join: 'dissolve', join_seconds: 1.25, volume: 0.5, mute: true, seed: 7 });
+	assert.deepEqual(body.shots[1], { id: 'b2', prompt: 'a boat', frames: 121, continues: true, trim_start: 0.5, trim_end: 0, join: 'dissolve', join_seconds: 1.25, volume: 0.5, mute: true, seed: 7, lines: [], from: '' });
+	// A film from before casts and lines has none, shows its subtitles and turns the shots down under speech.
+	assert.deepEqual([doc.look, doc.cast, doc.seed, doc.speech, doc.dub, doc.subtitles, doc.duck], ['', [], null, false, '', { show: true, burn: false }, 0.6]);
+	assert.deepEqual([body.look, body.cast, body.seed, body.voice, body.subtitles, body.duck], ['', [], null, null, { show: true, burn: false }, 0.6]);
 	assert.equal(body.tracks[0].regions[0].loops, 3);
 	// The body is a copy: changing it leaves the film alone.
 	body.tracks[0].regions[0].start = 99;
@@ -374,4 +398,98 @@ test('a film goes to the workstation and back to the service', () => {
 	const id = newId();
 	assert.match(id, /^[0-9a-z]{12}$/);
 	assert.notEqual(id, newId());
+});
+
+test('a film with a cast and lines goes to the service and back as it is', () => {
+	const project = {
+		id: 'p',
+		name: 'Boat',
+		folder: '/f',
+		size: '640x384',
+		updated_ms: 1,
+		look: 'soft watercolour',
+		seed: 1234,
+		speech: true,
+		language: 'English',
+		voice: 3,
+		duck: 0.4,
+		dub: 'Turkish',
+		subtitles: { show: false, burn: true },
+		cast: [{ id: 'm1', name: 'Mira', look: 'a girl of eight', voice: 7, portrait: 2 }, { id: 'f1', name: 'Fox' }],
+		shots: [{ id: 'a1', prompt: 'Mira kneels', frames: 121, state: 'done', from: 'm1', lines: [{ id: 'l1', who: 'm1', text: 'Go on!', said: { Turkish: 'Hadi!' } }, { id: 'l2', text: 'And it went.' }] }]
+	};
+	const doc = docOf(project);
+	assert.deepEqual(doc.cast, [{ id: 'm1', name: 'Mira', look: 'a girl of eight', voice: 7 }, { id: 'f1', name: 'Fox', look: '', voice: null }]);
+	assert.deepEqual(doc.shots[0].lines, [{ id: 'l1', who: 'm1', text: 'Go on!', said: { Turkish: 'Hadi!' } }, { id: 'l2', who: '', text: 'And it went.', said: {} }]);
+	const body = saveBody(doc);
+	assert.deepEqual([body.look, body.seed, body.speech, body.language, body.voice, body.duck, body.dub, body.subtitles], ['soft watercolour', 1234, true, 'English', 3, 0.4, 'Turkish', { show: false, burn: true }]);
+	assert.deepEqual([body.shots[0].from, body.shots[0].lines[0].said], ['m1', { Turkish: 'Hadi!' }]);
+	// The body is a copy all the way down.
+	body.shots[0].lines[0].said.Turkish = 'x';
+	body.cast[0].name = 'x';
+	assert.deepEqual([doc.shots[0].lines[0].said.Turkish, doc.cast[0].name], ['Hadi!', 'Mira']);
+});
+
+test('a shot is told the look of who it names, as the service tells it', () => {
+	const cast = [
+		{ id: 'm1', name: 'Mira', look: 'a girl of eight in a yellow raincoat and red boots, short dark hair.', voice: null },
+		{ id: 'f1', name: 'the Fox', look: 'a small red fox with a white-tipped tail', voice: null },
+		{ id: 'x1', name: 'Ada', look: '', voice: null }
+	];
+	const look = 'soft watercolour, muted winter colours';
+	// The same sentences as daemon/src/studio/cast.rs puts together.
+	assert.equal(
+		told(look, cast, 'Mira kneels by the stream and the fox watches from the trees'),
+		'Mira kneels by the stream and the fox watches from the trees. Mira: a girl of eight in a yellow raincoat and red boots, short dark hair. the Fox: a small red fox with a white-tipped tail. soft watercolour, muted winter colours.'
+	);
+	assert.equal(told(look, cast, 'A wide view of the forest.'), 'A wide view of the forest. soft watercolour, muted winter colours.');
+	assert.equal(told('', cast, 'The admiral salutes Ada.'), 'The admiral salutes Ada.');
+	assert.equal(told('', [], 'a fox in snow'), 'a fox in snow');
+	assert.equal(told(look, cast, '  '), '');
+	assert.deepEqual([names("MIRA's boat", 'Mira'), names('admiral', 'Mira'), names('Mira', ''), names('İpek ve Çağrı', 'çağrı')], [true, false, false, true]);
+});
+
+test('subtitles: the one on screen, its rows, and the shots under it', () => {
+	const cues = [{ start: 0.5, end: 2, text: 'A fox walks.' }, { start: 2, end: 3, text: 'It stops.' }];
+	assert.deepEqual([0, 0.5, 1.99, 2, 3, 9].map((t) => cueAt(cues, t)?.text), [undefined, 'A fox walks.', 'A fox walks.', 'It stops.', undefined, undefined]);
+	// Rows are broken where the text is too wide for the picture; a row the service broke stays broken.
+	const wide = (t) => t.length * 10;
+	assert.deepEqual(captionRows('A fox walks through the snow', 120, wide), ['A fox walks', 'through the', 'snow']);
+	assert.deepEqual(captionRows('A fox walks\nthrough the snow', 400, wide), ['A fox walks', 'through the snow']);
+	assert.deepEqual(captionRows('one two three four five six seven eight', 80, wide, 2), ['one two', 'three four five six seven eight']);
+	assert.deepEqual(captionRows('', 100, wide), []);
+	// The shots' sound: down under a line, a quarter of a second to get there and back.
+	const said = [[2, 4], [4.2, 5]];
+	const level = (t) => Math.round(duckLevel(said, 0.6, t) * 1000) / 1000;
+	assert.deepEqual([0, 1.75, 1.875, 2, 3, 4.1, 5.125, 5.25, 9].map(level), [1, 1, 0.7, 0.4, 0.4, 0.4, 0.7, 1, 1]);
+	assert.equal(duckLevel(said, 0, 3), 1);
+	assert.equal(duckLevel([], 0.6, 3), 1);
+});
+
+test('work the service did is put into the film as it was edited meanwhile', () => {
+	const film = (over = {}) =>
+		docOf({ id: 'p', name: 'Boat', folder: '/f', size: '640x384', updated_ms: 1, shots: [{ id: 'a1', prompt: 'a fox', frames: 121, state: 'done', lines: [{ id: 'l1', text: 'A fox walks.' }] }, { id: 'b2', prompt: '', frames: 96, state: 'done' }], ...over });
+	const mine = film();
+	mine.name = 'Renamed while it worked';
+	mine.shots[0].prompt = 'a red fox';
+	// A dub: the voice track and the translations come in; what was edited stays.
+	const voice = { id: 'v1', name: 'Turkish voice', kind: 'voice', lang: 'Turkish', color: '#4f8fd9', regions: [{ id: 'r1', file: '/f/voice/x.wav', start: 0.15, length: 1.5, line: 'a1/l1' }] };
+	const dubbed = film({ dub: 'Turkish', tracks: [voice], shots: [{ id: 'a1', prompt: 'a fox', frames: 121, state: 'done', lines: [{ id: 'l1', text: 'A fox walks.', said: { Turkish: 'Bir tilki yürüyor.' } }] }, { id: 'b2', prompt: '', frames: 96, state: 'done' }] });
+	const afterDub = takeWork('dub', mine, dubbed);
+	assert.deepEqual([afterDub.name, afterDub.shots[0].prompt, afterDub.dub, afterDub.tracks.map((t) => [t.kind, t.lang, t.regions.length])], ['Renamed while it worked', 'a red fox', 'Turkish', [['voice', 'Turkish', 1]]]);
+	assert.deepEqual(afterDub.shots[0].lines[0].said, { Turkish: 'Bir tilki yürüyor.' });
+	// A second dub replaces its own track and adds none.
+	assert.equal(takeWork('dub', afterDub, dubbed).tracks.length, 1);
+	// A video brought in: its shots come in behind the ones here.
+	const brought = film({ size: '384x640', export: { scale: 2 }, shots: [{ id: 'a1', prompt: 'a fox', frames: 121, state: 'done' }, { id: 'b2', prompt: '', frames: 96, state: 'done' }, { id: 'c3', prompt: '', frames: 120, state: 'done', take: 1, takes: [{ n: 1, frames: 120, ext: 'mp4' }] }] });
+	const afterImport = takeWork('import', mine, brought);
+	assert.deepEqual([afterImport.shots.map((s) => s.id), afterImport.size, afterImport.takes.c3, afterImport.shots[0].prompt], [['a1', 'b2', 'c3'], '640x384', 1, 'a red fox']);
+	// Only an empty film takes the shape of the video.
+	assert.deepEqual([takeWork('import', film({ shots: [] }), brought).size, takeWork('import', film({ shots: [] }), brought).export.scale], ['384x640', 2]);
+	// Clips listened to: lines for the shots that had none, and no others.
+	const heard = film({ language: 'English', shots: [{ id: 'a1', prompt: 'a fox', frames: 121, state: 'done', lines: [{ id: 'x9', text: 'Heard instead.' }] }, { id: 'b2', prompt: '', frames: 96, state: 'done', lines: [{ id: 'l7', text: 'Then the boat came.' }] }] });
+	const afterListen = takeWork('listen', mine, heard);
+	assert.deepEqual([afterListen.shots[0].lines[0].text, afterListen.shots[1].lines[0].text, afterListen.language], ['A fox walks.', 'Then the boat came.', 'English']);
+	// The film handed in is left as it was.
+	assert.deepEqual([mine.tracks.length, mine.shots.length, mine.shots[1].lines.length], [0, 2, 0]);
 });

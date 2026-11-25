@@ -472,14 +472,22 @@ class AppState {
 		this.applyTheme();
 	}
 
-	/** Puts the chosen appearance on the document and, in the app, on the window frame. */
+	/**
+	 * The appearance on screen. Studio is a dark workstation: while it is shown the whole window
+	 * is dark (the sidebar, sheets, menus and the window frame), and the person's own choice is
+	 * back when they leave it.
+	 */
+	shownTheme = $derived<Theme>(this.phase === 'ready' && this.screen === 'studio' ? 'dark' : this.theme);
+
+	/** Puts the appearance on the document and, in the app, on the window frame. */
 	applyTheme() {
+		const theme = this.shownTheme;
 		const root = document.documentElement;
-		if (this.theme === 'system') delete root.dataset.theme;
-		else root.dataset.theme = this.theme;
+		if (theme === 'system') delete root.dataset.theme;
+		else root.dataset.theme = theme;
 		if (api.isTauri) {
 			import('@tauri-apps/api/window')
-				.then(({ getCurrentWindow }) => getCurrentWindow().setTheme(this.theme === 'system' ? null : this.theme))
+				.then(({ getCurrentWindow }) => getCurrentWindow().setTheme(theme === 'system' ? null : theme))
 				.catch(() => {});
 		}
 	}

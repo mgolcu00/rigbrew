@@ -1,7 +1,7 @@
 // What an edit does to a film, with no screen in it: the film as the workstation holds it, moving
 // and trimming shots and regions, splitting, the undo history, and the arithmetic of the mixer.
 
-import type { StudioExportOptions, StudioProject, StudioSave, StudioShot, StudioStrip } from './api.ts';
+import type { StudioExportOptions, StudioMember, StudioProject, StudioSave, StudioShot, StudioStrip } from './api.ts';
 import { FPS, snapFrame } from './studio-time.ts';
 
 /** A shot as the person edits it. What the service knows about its clip is kept apart. */
@@ -17,6 +17,27 @@ export interface DocShot {
 	volume: number;
 	mute: boolean;
 	seed: number | null;
+	/** What is said during the shot. */
+	lines: DocLine[];
+	/** The id of a cast member whose portrait the shot starts from; empty for none. */
+	from: string;
+}
+
+/** One spoken line: by a cast member (`who` is their id) or, with none, the narrator. */
+export interface DocLine {
+	id: string;
+	who: string;
+	text: string;
+	/** The same line in other languages, by the language's name. */
+	said: Record<string, string>;
+}
+
+/** A character: a name, the fixed words for how they look, and the voice that says their lines. */
+export interface DocMember {
+	id: string;
+	name: string;
+	look: string;
+	voice: number | null;
 }
 
 export interface DocRegion {
@@ -34,6 +55,9 @@ export interface DocRegion {
 export interface DocTrack {
 	id: string;
 	name: string;
+	/** "voice" for the readings of the film's lines in one language (`lang`); "sound" otherwise. */
+	kind: string;
+	lang: string;
 	color: string;
 	volume: number;
 	pan: number;
@@ -54,6 +78,20 @@ export interface Doc {
 	shots: DocShot[];
 	shot_track: StudioStrip;
 	tracks: DocTrack[];
+	/** One line every shot shares: style, colours, light, lens. */
+	look: string;
+	cast: DocMember[];
+	/** A seed every shot without its own is made with. */
+	seed: number | null;
+	/** Whether the shot writer writes spoken lines, the language they are in, and the narrator's voice. */
+	speech: boolean;
+	language: string;
+	voice: number | null;
+	subtitles: { show: boolean; burn: boolean };
+	/** How far the shots' own sound goes down while a line is said, 0 to 1. */
+	duck: number;
+	/** The language that is heard and read; empty for the film's own. */
+	dub: string;
 	/** The take each shot has in use, so an undo can put the one before back in use. Not saved from here. */
 	takes: Record<string, number>;
 }
@@ -76,8 +114,12 @@ export const docShot = (s: Partial<StudioShot> & { id: string }): DocShot => ({
 	join_seconds: s.join_seconds ?? 0.5,
 	volume: s.volume ?? 1,
 	mute: Boolean(s.mute),
-	seed: s.seed ?? null
+	seed: s.seed ?? null,
+	lines: (s.lines ?? []).map((l) => ({ id: l.id, who: l.who ?? '', text: l.text, said: { ...l.said } })),
+	from: s.from ?? ''
 });
+
+export const docMember = (m: Partial<StudioMember> & { id: string }): DocMember => ({ id: m.id, name: m.name ?? '', look: m.look ?? '', voice: m.voice ?? null });
 
 /** The film as the service sent it, as the workstation edits it. */
 export function docOf(p: StudioProject): Doc {
@@ -91,10 +133,21 @@ export function docOf(p: StudioProject): Doc {
 		export: { ...p.export },
 		shots: p.shots.map(docShot),
 		shot_track: { volume: 1, pan: 0, mute: false, solo: false, ...p.shot_track },
+		look: p.look ?? '',
+		cast: (p.cast ?? []).map(docMember),
+		seed: p.seed ?? null,
+		speech: Boolean(p.speech),
+		language: p.language ?? '',
+		voice: p.voice ?? null,
+		subtitles: { show: true, burn: false, ...p.subtitles },
+		duck: p.duck ?? 0.6,
+		dub: p.dub ?? '',
 		takes: Object.fromEntries(p.shots.filter((s) => s.take).map((s) => [s.id, s.take as number])),
 		tracks: (p.tracks ?? []).map((t) => ({
 			id: t.id,
 			name: t.name,
+			kind: t.kind ?? 'sound',
+			lang: t.lang ?? '',
 			color: t.color,
 			volume: t.volume ?? 1,
 			pan: t.pan ?? 0,
@@ -126,7 +179,16 @@ export function saveBody(doc: Doc): StudioSave {
 		master: doc.master,
 		export: doc.export,
 		shot_track: doc.shot_track,
-		shots: doc.shots.map((s) => ({ ...s })),
+		shots: doc.shots.map((s) => ({ ...s, lines: s.lines.map((l) => ({ ...l, said: { ...l.said } })) })),
+		look: doc.look,
+		cast: doc.cast.map((m) => ({ ...m })),
+		seed: doc.seed,
+		speech: doc.speech,
+		language: doc.language,
+		voice: doc.voice,
+		subtitles: { ...doc.subtitles },
+		duck: doc.duck,
+		dub: doc.dub,
 		tracks: doc.tracks.map((t) => ({ ...t, regions: t.regions.map((r) => ({ ...r })) }))
 	};
 }
@@ -415,3 +477,103 @@ export function heard(strips: readonly { id: string; mute: boolean; solo: boolea
 
 /** The gain of a strip as it is mixed: its volume when it is heard, nothing when it is not. */
 export const stripGain = (volume: number, on: boolean) => (on ? Math.min(2, Math.max(0, volume)) : 0);
+
+// --- the cast and what is said ------------------------------------------------------------------
+
+/** Whether `name` stands in `text` as a word of its own, whatever the case: "Mira" is in "mira's boat", not in "admiral". */
+export function names(text: string, name: string) {
+	const [t, n] = [text.toLowerCase(), name.trim().toLowerCase()];
+	if (!n) return false;
+	const letter = /[\p{L}\p{N}]/u;
+	for (let at = t.indexOf(n); at >= 0; at = t.indexOf(n, at + 1)) {
+		const before = at > 0 ? t[at - 1] : '';
+		const after = t[at + n.length] ?? '';
+		if (!letter.test(before) && !letter.test(after)) return true;
+	}
+	return false;
+}
+
+/**
+ * What the video model is told for a shot, as the service puts it together: the description,
+ * then the look of every character it names, word for word, then the look of the film.
+ */
+export function told(look: string, cast: readonly DocMember[], prompt: string) {
+	const text = prompt.trim();
+	const film = look.trim().replace(/\.+$/, '');
+	const seen = cast.filter((m) => names(text, m.name) && m.look.trim());
+	if (!text || (seen.length === 0 && !film)) return text;
+	let out = /[.!?]$/.test(text) ? text : `${text}.`;
+	for (const m of seen) out += ` ${m.name}: ${m.look.trim().replace(/\.+$/, '')}.`;
+	if (film) out += ` ${film}.`;
+	return out;
+}
+
+/** The subtitle on screen at a moment of the film, if any. */
+export function cueAt<T extends { start: number; end: number }>(cues: readonly T[], seconds: number): T | undefined {
+	return cues.find((c) => seconds >= c.start && seconds < c.end);
+}
+
+/** A subtitle broken into rows that fit `width`, as `measure` says how wide a text is. At most `rows` rows; the last takes what is left. */
+export function captionRows(text: string, width: number, measure: (text: string) => number, rows = 3): string[] {
+	const out: string[] = [];
+	for (const given of text.split('\n')) {
+		let row = '';
+		for (const word of given.split(/\s+/).filter(Boolean)) {
+			const longer = row ? `${row} ${word}` : word;
+			if (row && measure(longer) > width && out.length < rows - 1) {
+				out.push(row);
+				row = word;
+			} else row = longer;
+		}
+		if (row) out.push(row);
+	}
+	return out.length > rows ? [...out.slice(0, rows - 1), out.slice(rows - 1).join(' ')] : out;
+}
+
+/**
+ * How loud the shots' own sound is under what is said, at a moment of the film: 1 away from any
+ * line, `1 - by` while one is said, with a quarter of a second to go down and to come back. The
+ * same arithmetic as the export.
+ */
+export function duckLevel(said: readonly [number, number][], by: number, seconds: number, ramp = 0.25) {
+	let down = 0;
+	for (const [from, to] of said) {
+		if (to <= from) continue;
+		down += Math.min(1, Math.max(0, Math.min((seconds - (from - ramp)) / ramp, (to + ramp - seconds) / ramp)));
+	}
+	return 1 - Math.min(1, Math.max(0, by)) * Math.min(1, down);
+}
+
+/**
+ * What the service did to the film (a video brought in, a dub, clips listened to) put into the
+ * film as it stands here, for when it was edited while the service worked: only what that work
+ * makes is taken from the service's film, everything else stays as it was edited.
+ */
+export function takeWork(kind: 'import' | 'dub' | 'listen', mine: Doc, theirs: Doc): Doc {
+	const out: Doc = JSON.parse(JSON.stringify(mine));
+	if (kind === 'import') {
+		// An empty film took the shape of the video.
+		if (mine.shots.length === 0) [out.size, out.export] = [theirs.size, { ...theirs.export }];
+		for (const s of theirs.shots) if (!out.shots.some((x) => x.id === s.id)) out.shots.push(JSON.parse(JSON.stringify(s)));
+		out.takes = { ...theirs.takes, ...out.takes };
+	} else if (kind === 'dub') {
+		// The voice tracks are the service's; which one is heard follows the language it set.
+		for (const t of theirs.tracks.filter((x) => x.kind === 'voice')) {
+			const at = out.tracks.findIndex((x) => x.id === t.id);
+			if (at >= 0) out.tracks[at] = JSON.parse(JSON.stringify(t));
+			else out.tracks.push(JSON.parse(JSON.stringify(t)));
+		}
+		out.dub = theirs.dub;
+		for (const s of out.shots) {
+			const there = theirs.shots.find((x) => x.id === s.id);
+			for (const l of s.lines) l.said = { ...there?.lines.find((x) => x.id === l.id)?.said, ...l.said };
+		}
+	} else {
+		for (const s of out.shots) {
+			const there = theirs.shots.find((x) => x.id === s.id);
+			if (s.lines.length === 0 && there) s.lines = JSON.parse(JSON.stringify(there.lines));
+		}
+		out.language ||= theirs.language;
+	}
+	return out;
+}
