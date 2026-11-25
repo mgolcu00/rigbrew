@@ -123,11 +123,15 @@ pub async fn fetch_file(
         fs::create_dir_all(dir).await?;
     }
 
+    // A community file can come without a checksum (the site gave none): its size is all there is to check.
+    let unchecked = file.sha256.is_empty();
     if let Ok(meta) = fs::metadata(&dest).await {
         if meta.len() == file.size {
             let mut h = Sha256::new();
-            hash_file(&dest, &mut h).await?;
-            if hex(&h.finalize()) == file.sha256.to_lowercase() {
+            if !unchecked {
+                hash_file(&dest, &mut h).await?;
+            }
+            if unchecked || hex(&h.finalize()) == file.sha256.to_lowercase() {
                 on_progress(Progress { path: &file.path, done: file.size, total: file.size });
                 return Ok(Outcome::Present);
             }
@@ -190,7 +194,7 @@ pub async fn fetch_file(
             why: format!("connection closed at {have} of {} bytes; run again to resume", file.size),
         });
     }
-    if hex(&hasher.finalize()) != file.sha256.to_lowercase() {
+    if !unchecked && hex(&hasher.finalize()) != file.sha256.to_lowercase() {
         fs::remove_file(&part).await.ok();
         return Err(DownloadError::Corrupt { path: file.path.clone(), why: "sha256 does not match the manifest".into() });
     }
@@ -209,6 +213,19 @@ pub async fn pull(
     on_progress: &mut (dyn FnMut(Progress<'_>) + Send),
 ) -> Result<Vec<(String, Outcome)>, DownloadError> {
     let _ = package;
+    pull_from(client, &manifest.base_url, variant, data_dir, free_mb, on_progress).await
+}
+
+/// Downloads every file of a variant from `<base_url>/<path>` into `data_dir`. Checks free disk
+/// space first.
+pub async fn pull_from(
+    client: &reqwest::Client,
+    base_url: &str,
+    variant: &Variant,
+    data_dir: &Path,
+    free_mb: u64,
+    on_progress: &mut (dyn FnMut(Progress<'_>) + Send),
+) -> Result<Vec<(String, Outcome)>, DownloadError> {
     let mut missing = 0u64;
     for f in &variant.files {
         if crate::bundle::is_bundle(f) && crate::bundle::unpacked(data_dir, f) {
@@ -229,7 +246,7 @@ pub async fn pull(
             results.push((f.path.clone(), Outcome::Present));
             continue;
         }
-        let outcome = fetch_file(client, &manifest.base_url, f, data_dir, on_progress).await?;
+        let outcome = fetch_file(client, base_url, f, data_dir, on_progress).await?;
         if crate::bundle::is_bundle(f) {
             let (root, file) = (data_dir.to_path_buf(), f.clone());
             tokio::task::spawn_blocking(move || crate::bundle::unpack(&root, &file))

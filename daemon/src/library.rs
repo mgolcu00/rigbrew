@@ -144,7 +144,7 @@ pub async fn recent(State(app): State<Shared>, Query(q): Query<RecentQuery>) -> 
     let events = app.events.lock().unwrap().recent(RECENT_KINDS, limit).unwrap_or_default();
     let name = |id: &Value| -> String {
         let id = id.as_str().unwrap_or("");
-        app.manifest.package(id).map(|p| p.name.clone()).unwrap_or_else(|| id.to_string())
+        app.package(id).map(|p| p.name).unwrap_or_else(|| id.to_string())
     };
     let items: Vec<Value> = events
         .iter()

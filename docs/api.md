@@ -25,6 +25,9 @@ Browsers are refused unless the request comes from the app's own origin.
 | `GET /v1/packages` | Every package with its versions, the version recommended for this machine and why, and what is installed. |
 | `POST /v1/packages/{id}/pull` | Start a download, optionally `{"variant": "q5"}`. Returns a job id. The engine the model needs comes with it. |
 | `DELETE /v1/packages/{id}` | Remove installed files (`?variant=q5` for one version). Files another installed version still uses are kept. |
+| `POST /v1/community/lookup` | `{"url"}`: what a link to an open chat model holds. Answers `{host, site, owner, repo, url, license, gated, budget_mb, files: [{file, size, needs_mb, fits, checked, id, installed}], pick, skipped, links}`. See [Community models](#community-models). |
+| `POST /v1/community` | `{"repo", "file"}`: add one of those files as a chat package and start its download. Answers `{"job", "id", "name"}`; follow the job like any other download. |
+| `DELETE /v1/community/{id}` | Remove a community model: its files and its place in the list. A running download of it stops first. |
 | `GET /v1/jobs`, `GET /v1/jobs/{id}`, `DELETE /v1/jobs/{id}` | Download progress, and cancel. A cancelled or interrupted download resumes where it stopped. |
 | `GET /v1/engine`, `DELETE /v1/engine` | Which models are in memory (`loaded`: the one used last; `all`); unload them. A chat model and a picture or video model stay in memory together when both fit the budget. |
 | `POST /v1/chat/completions` | OpenAI-compatible chat. `model` is a package id such as `steep-4b`. Streaming and tool calls work. |
@@ -85,6 +88,41 @@ are used. Engine programs (llama.cpp's `llama-server`, stable-diffusion.cpp's `s
 `sherpa-onnx-offline-tts`) are downloaded per platform from the same manifest, unpacked into `engines/` (plain files
 only), and run as child processes; the servers bind to loopback. A package file with the role `bundle` is a folder
 packed as a tar: after it is verified it is unpacked next to itself (plain files only) and the archive is deleted.
+
+## Community models
+
+A person can add an open chat model that is not in the manifest by pasting a link. These models are not tested by
+Rigbrew and are never mixed into the signed manifest: they are kept in `community.json` in the data folder, their
+files live under `community/<owner>__<repo>/`, and `GET /v1/packages` lists them after the manifest's packages with
+`"community": true` and `source` saying where they come from (`name`, `url`, `license`). They are chat packages for
+the llama.cpp engine with one version (`gguf`), so `POST /v1/chat/completions`, the jobs and `GET /v1/usage` treat
+them like any other package. Their ids start with `community-`.
+
+`POST /v1/community/lookup` accepts:
+
+- a Hugging Face model, as `owner/name` or `https://huggingface.co/owner/name`, optionally with a file
+  (`owner/name/file.gguf`, or a `/blob/` or `/resolve/` link to a `.gguf` file);
+- a GitHub repo or release (`https://github.com/owner/name`, `/releases/tag/<tag>`, or a release file). The `.gguf`
+  files of the release are listed. When there are none, `links` holds the Hugging Face models the README links to.
+
+Only `https://huggingface.co` and `https://github.com` are accepted, with no port or sign-in in the link. Owner,
+repo, revision and file names may hold letters, digits, `.`, `_`, `-` and `+`, never start with a dot, and file
+names must end in `.gguf`. Files larger than 200 GB, parts of split models (`-00001-of-00003.gguf`) and vision
+add-ons (`mmproj`) are left out and counted in `skipped`. Refused links answer 400, repos that are private or do not
+exist 404, and a site that cannot be reached 502, each with a sentence in `error.message`.
+
+A file needs its size and about 15% more in memory (`needs_mb`). `fits` compares that with `budget_mb`, the
+accelerator's memory budget from `GET /v1/system` (the processor's on a machine without one). `pick` is the file the
+link named when it fits, otherwise the largest file that fits. `POST /v1/community` asks the site again, so sizes and
+checksums never come from the request; it answers 409 for a file that does not fit and for a repo that asks for a
+sign-in on its site (`gated`). Hugging Face files are pinned to the commit the lookup saw. The download is checked
+against the site's sha256 when it gives one (`checked`); otherwise only the size is checked.
+
+```sh
+curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"repo":"bartowski/SmolLM2-360M-Instruct-GGUF","file":"SmolLM2-360M-Instruct-Q4_K_M.gguf"}' \
+  http://127.0.0.1:$PORT/v1/community
+```
 
 ## Environment
 
