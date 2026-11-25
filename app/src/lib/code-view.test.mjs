@@ -78,6 +78,21 @@ test('a step is a short label and the thing it was about', () => {
 	assert.deepEqual(lineOf(tool('fetch_url', { url: 'https://example.com/docs' })), { verb: 'Open', code: 'example.com/docs' });
 	assert.deepEqual(lineOf(tool('call_tool', { connector: 'git', tool: 'log' })), { verb: 'Use', code: 'git log' });
 	assert.deepEqual(lineOf(tool('something_new')), { verb: 'something_new', code: '' });
+	// Running, looking and checking: one quiet line each.
+	const started = 'Started the app on http://localhost:5173/ with `npm run dev -- --port 5173`.\nIts last lines:\n  Local: http://localhost:5173/';
+	assert.deepEqual(lineOf(tool('start_app', {}, 'done', { result: started })), { verb: 'Started the app on', code: ':5173' });
+	assert.deepEqual(lineOf(tool('start_app', { command: 'npm run dev' }, 'waiting', { result: null })), { verb: 'Start the app', code: 'npm run dev' });
+	assert.deepEqual(lineOf(tool('start_app', { command: 'npm run dev' }, 'failed', { result: '`npm run dev` ended at once' })), { verb: 'Start the app', code: 'npm run dev' });
+	assert.deepEqual(lineOf(tool('look_at_page', { url: 'http://localhost:5173/' })), { verb: 'Looked at', code: '/' });
+	assert.deepEqual(lineOf(tool('look_at_page', { url: 'http://localhost:5173/cart?x=1' }, 'running')), { verb: 'Looking at', code: '/cart?x=1' });
+	assert.deepEqual(lineOf(tool('look_at_page', {})), { verb: 'Looked at', code: '/' });
+	const checked = 'Checks: 14 passed, 2 failed\nok       cargo check\nFAILED   cargo test: 14 passed, 2 failed';
+	assert.deepEqual(lineOf(tool('check_project', {}, 'failed', { result: checked })), { verb: 'Checks', code: '14 passed, 2 failed', quiet: true });
+	assert.deepEqual(lineOf(tool('check_project', {}, 'running', { result: null })), { verb: 'Checking', code: '' });
+	assert.deepEqual(lineOf(tool('check_project', {}, 'denied', { result: 'The person did not allow this.' })), { verb: 'Checks', code: '' });
+	assert.deepEqual(lineOf(tool('simulator', { action: 'screenshot' })), { verb: 'Looked at the phone', code: '' });
+	assert.deepEqual(lineOf(tool('simulator', { action: 'logs', app: 'Shop' })), { verb: 'Read the log of', code: 'Shop' });
+	assert.deepEqual(lineOf(tool('simulator', { action: 'list' })), { verb: 'Listed the devices', code: '' });
 	assert.deepEqual(diffCount('--- /dev/null\n+++ b/x\n@@ -0,0 +1,2 @@\n+a\n+b'), { plus: 2, minus: 0 });
 });
 
@@ -92,4 +107,7 @@ test('what is happening is read from the step that is going', () => {
 	assert.equal(activityOf([tool('web_search', {}, 'running')]), 'web');
 	assert.equal(activityOf([tool('fetch_url', {}, 'running')]), 'web');
 	assert.equal(activityOf([tool('call_tool', {}, 'running')]), 'thinking');
+	assert.equal(activityOf([tool('start_app', {}, 'running')]), 'running');
+	assert.equal(activityOf([tool('check_project', {}, 'running')]), 'running');
+	assert.equal(activityOf([tool('look_at_page', {}, 'running')]), 'reading');
 });

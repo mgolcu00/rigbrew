@@ -104,6 +104,18 @@ export interface Line {
 	/** Lines added and removed, for a change with a diff. */
 	plus?: number;
 	minus?: number;
+	/** The line already says how it went ("14 passed, 2 failed"): no "failed" after it. */
+	quiet?: boolean;
+}
+
+/** The part of an address that says which page: "/cart?x=1". */
+function pageOf(url: string): string {
+	try {
+		const { pathname, search } = new URL(url);
+		return pathname + search;
+	} catch {
+		return url || '/';
+	}
 }
 
 /** The lines a unified diff adds and removes. */
@@ -150,6 +162,24 @@ export function lineOf(step: AgentToolStep): Line {
 			return { verb: 'Run', code: arg(step, 'command') };
 		case 'update_plan':
 			return { verb: 'Plan', code: '' };
+		case 'start_app': {
+			// "Started the app on http://localhost:5173/ with …": the port is all the line needs.
+			const port = step.status === 'done' ? /localhost:(\d+)/.exec(step.result ?? '')?.[1] : undefined;
+			return port ? { verb: 'Started the app on', code: `:${port}` } : { verb: 'Start the app', code: arg(step, 'command') };
+		}
+		case 'look_at_page':
+			return { verb: step.status === 'running' ? 'Looking at' : 'Looked at', code: pageOf(arg(step, 'url')) };
+		case 'check_project': {
+			const counted = /^Checks: (.+)$/m.exec(step.result ?? '')?.[1];
+			return counted ? { verb: 'Checks', code: counted, quiet: true } : { verb: step.status === 'running' ? 'Checking' : 'Checks', code: '' };
+		}
+		case 'simulator': {
+			const action = arg(step, 'action') || 'screenshot';
+			const device = arg(step, 'device');
+			if (action === 'logs') return { verb: 'Read the log of', code: arg(step, 'app') || device || 'the device' };
+			if (action === 'list') return { verb: 'Listed the devices', code: '' };
+			return { verb: 'Looked at the phone', code: device };
+		}
 		case 'find_tool':
 			return { verb: 'Find tool', code: arg(step, 'query') };
 		case 'call_tool':
@@ -188,7 +218,12 @@ export function activityOf(steps: readonly AgentStep[]): Activity {
 		case 'append_file':
 			return 'writing';
 		case 'run_command':
+		case 'start_app':
+		case 'check_project':
 			return 'running';
+		case 'look_at_page':
+		case 'simulator':
+			return 'reading';
 		case 'web_search':
 		case 'fetch_url':
 			return 'web';

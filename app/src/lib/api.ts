@@ -917,15 +917,6 @@ export interface AgentScreen {
 	at_ms: number;
 }
 
-/** A page the service wants opened in the app's hidden window (see `look.ts`). */
-export interface LookJob {
-	id: string;
-	url: string;
-	width: number;
-	height: number;
-	actions: unknown[];
-}
-
 export type AgentStep = { kind: 'user' | 'model' | 'note' | 'question'; text: string } | AgentToolStep;
 
 /** A step that waits for the person: a change to a file (with its diff), a command, or a connector's tool. */
@@ -1009,9 +1000,6 @@ export const answerAgentTask = (id: string, call: string, allow: boolean, always
 export const undoAgentTask = (id: string) => taskOf(json('POST', `/v1/agent/tasks/${enc(id)}/undo`));
 export const stopAgentTask = (id: string) => taskOf(json('DELETE', `/v1/agent/tasks/${enc(id)}`));
 export const removeAgentTask = (id: string) => json<{ removed: string }>('DELETE', `/v1/agent/tasks/${enc(id)}?remove=true`);
-/** Waits for a page the service wants looked at. `undefined` from a service that is too old to ask. */
-export const nextLook = async () => (await optional<{ look: LookJob | null }>('GET', '/v1/agent/looks/next'))?.look;
-export const answerLook = (id: string, seen: unknown) => json<{ ok: boolean }>('POST', `/v1/agent/looks/${enc(id)}`, seen);
 /** Looks at the task's running app the way the model does, and keeps what was seen with the task. */
 export const lookAtAgentApp = async (task: string, size = 'desktop') => (await json<{ page: AgentPage }>('POST', '/v1/agent/look', { task, size })).page;
 export const stopAgentApp = (id: string) => taskOf(json('DELETE', `/v1/agent/tasks/${enc(id)}/app`));

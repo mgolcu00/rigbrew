@@ -5,7 +5,6 @@
 
 import * as api from './api';
 import type { AgentMode, AgentSkill, AgentTask, AgentTaskRow } from './api';
-import { watchLooks } from './look';
 import { remembered } from './remember';
 
 const say = (e: unknown) => (e instanceof Error ? e.message : String(e));
@@ -75,6 +74,10 @@ class Code {
 
 	/** What the model has written of its answer so far, while the open task works. */
 	writing = $state('');
+	/** The preview next to a task (its running app, the phone's screen) is shown. */
+	preview = $state(remembered.get('code.preview') !== 'off');
+	/** A look at the page or the phone, asked for from the preview, is under way. */
+	looking = $state(false);
 
 	#watching = false;
 	#visible = false;
@@ -94,6 +97,11 @@ class Code {
 	setWeb(on: boolean) {
 		this.web = on;
 		remembered.set('code.web', on ? 'on' : 'off');
+	}
+
+	setPreview(on: boolean) {
+		this.preview = on;
+		remembered.set('code.preview', on ? 'on' : 'off');
 	}
 
 	setConnectors(on: boolean) {
@@ -142,8 +150,6 @@ class Code {
 
 	/** When the window opens: follow what is already working in the service. */
 	async wake() {
-		// The service has no browser: pages a task wants to see are opened by this window.
-		void watchLooks();
 		await this.refresh();
 		this.#watch();
 	}
@@ -291,6 +297,37 @@ class Code {
 		} finally {
 			this.busy = false;
 		}
+	}
+
+	/** One thing asked for from the preview: it shows that it is going, and its error if it has one. */
+	async #fromPreview(work: (task: AgentTask) => Promise<AgentTask | void>) {
+		const task = this.task;
+		if (!task || this.looking) return;
+		this.looking = true;
+		this.problem = '';
+		try {
+			const fresh = (await work(task)) ?? (await api.agentTask(task.id));
+			if (this.task?.id === task.id) this.#show(fresh);
+		} catch (e) {
+			this.problem = say(e);
+		} finally {
+			this.looking = false;
+		}
+	}
+
+	/** Stops the app the open task started. */
+	stopApp() {
+		return this.#fromPreview((task) => api.stopAgentApp(task.id));
+	}
+
+	/** Looks at the running app again the way the model does: its errors and a new picture. */
+	lookAgain(size: string) {
+		return this.#fromPreview(async (task) => void (await api.lookAtAgentApp(task.id, size)));
+	}
+
+	/** Takes a new picture of the phone's screen. */
+	deviceShot() {
+		return this.#fromPreview((task) => api.agentDeviceShot(task.id));
 	}
 
 	async remove(id: string) {

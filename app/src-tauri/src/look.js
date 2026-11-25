@@ -7,6 +7,7 @@
 	var errors = [];
 	var failed = [];
 	var notes = [];
+	var acting = false;
 
 	function add(list, text) {
 		try {
@@ -141,15 +142,28 @@
 		element.dispatchEvent(new Event('change', { bubbles: true }));
 	}
 
-	/** Clicks and types, one step after the other with a moment in between. */
+	/**
+	 * Clicks and types, one step after the other with a moment in between. What a step needs
+	 * may not be on the page yet (it is still loading, or the step before brings it): it is
+	 * looked for again for a few seconds before the step is given up.
+	 */
 	function act(steps) {
 		var at = 0;
+		var since = Date.now();
+		acting = true;
 		function next() {
-			if (at >= steps.length) return;
-			var step = steps[at++];
+			if (at >= steps.length) {
+				acting = false;
+				return;
+			}
+			var step = steps[at];
+			var target = step.click || step.type;
 			try {
-				var target = step.click || step.type;
 				var element = find(target, !step.click);
+				if (!element && Date.now() - since < 3000) {
+					setTimeout(next, 150);
+					return;
+				}
 				if (!element) {
 					add(notes, 'Nothing on the page matches "' + target + '", so that step was skipped.');
 				} else if (step.click) {
@@ -161,6 +175,8 @@
 			} catch (e) {
 				add(notes, 'A step did not work: ' + show(e));
 			}
+			at++;
+			since = Date.now();
 			setTimeout(next, 400);
 		}
 		next();
@@ -174,7 +190,8 @@
 			text: ((document.body && document.body.innerText) || '').slice(0, 6000),
 			errors: errors,
 			failed: failed,
-			note: notes.join(' ')
+			note: notes.join(' '),
+			busy: acting
 		};
 	}
 
