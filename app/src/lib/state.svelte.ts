@@ -14,8 +14,8 @@ export const APP_VERSION: string = __APP_VERSION__;
 /** The consent text version, used only when neither the service nor the server names one. */
 const CONSENT_FALLBACK = 'draft-2026-11-20.2';
 
-/** The three places, plus the profile behind the chip at the bottom left. */
-export type Screen = 'chat' | 'models' | 'device' | 'profile';
+/** The places, plus the profile behind the chip at the bottom left. */
+export type Screen = 'chat' | 'code' | 'models' | 'device' | 'profile';
 /** In the order of Cmd/Ctrl+1 to 3. */
 export const screens: Screen[] = ['chat', 'models', 'device'];
 
@@ -322,7 +322,7 @@ class AppState {
 	 */
 	#view(view: Record<string, string>) {
 		const wanted = view.screen as Screen | undefined;
-		if (wanted && ['chat', 'models', 'device', 'profile'].includes(wanted)) this.screen = wanted;
+		if (wanted && ['chat', 'code', 'models', 'device', 'profile'].includes(wanted)) this.screen = wanted;
 		if (view.sheet === 'settings' || view.sheet === 'privacy') this.sheet = view.sheet;
 		else if ('sheet' in view) this.sheet = null;
 		if (view.theme === 'light' || view.theme === 'dark' || view.theme === 'system') {

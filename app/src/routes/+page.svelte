@@ -13,6 +13,7 @@
 	import Sidebar from '#lib/components/Sidebar.svelte';
 	import UpdateNotice from '#lib/components/UpdateNotice.svelte';
 	import Chat from '#lib/screens/Chat.svelte';
+	import Code from '#lib/screens/Code.svelte';
 	import Device from '#lib/screens/Device.svelte';
 	import Models from '#lib/screens/Models.svelte';
 	import Profile from '#lib/screens/Profile.svelte';
@@ -154,6 +155,8 @@
 		<main>
 			{#if app.screen === 'chat'}
 				<Chat />
+			{:else if app.screen === 'code'}
+				<Code />
 			{:else if app.screen === 'models'}
 				<Models />
 			{:else if app.screen === 'device'}

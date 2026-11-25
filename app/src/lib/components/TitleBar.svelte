@@ -11,8 +11,8 @@
 	// also the drag area. Navigation is small on purpose: chat is what the app is.
 	const mac = isMac;
 	// Pro keeps the old name for the machine page; the others say what it is.
-	const names = $derived<Record<Screen, string>>({ chat: 'Chat', models: 'Models', device: ux.flags.techDetails ? 'Device' : `Your ${machine}`, profile: 'Profile' });
-	const tips: Record<Screen, string> = { chat: 'Chat with your models', models: 'Install and manage models', device: 'What this machine can run', profile: 'Your profile' };
+	const names = $derived<Record<Screen, string>>({ chat: 'Chat', code: 'Code', models: 'Models', device: ux.flags.techDetails ? 'Device' : `Your ${machine}`, profile: 'Profile' });
+	const tips: Record<Screen, string> = { chat: 'Chat with your models', code: 'Work on a folder', models: 'Install and manage models', device: 'What this machine can run', profile: 'Your profile' };
 
 	function newChat() {
 		chat.newChat();

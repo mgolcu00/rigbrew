@@ -6,6 +6,7 @@
 //! HTTP on 127.0.0.1, except two things that need the system:
 //!
 //! - saving a file the person asked to keep (`save_image`, `save_text`): a save dialog and a write;
+//! - choosing the folder a Code task works in (`pick_folder`): the system's folder dialog;
 //! - signing in through the system browser: `account.rs`, only present in official builds (feature `account`).
 
 #[cfg(feature = "account")]
@@ -263,6 +264,23 @@ async fn save_text(app: tauri::AppHandle, name: String, text: String) -> Result<
     .map_err(|e| e.to_string())?
 }
 
+/// Asks for the folder a Code task should work in. Returns its path, or `None` when the dialog
+/// was cancelled. Nothing is read or written here; the service does the work.
+#[tauri::command]
+async fn pick_folder(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let Some(picked) = app.dialog().file().set_title("Choose a folder").blocking_pick_folder() else {
+            return Ok(None);
+        };
+        let path = picked.into_path().map_err(|e| e.to_string())?;
+        Ok(Some(path.display().to_string()))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     #[cfg(unix)]
@@ -280,12 +298,13 @@ pub fn run() {
         save_image,
         save_video,
         save_text,
+        pick_folder,
         account::signin_listen,
         account::signin_wait,
         account::signin_cancel
     ]);
     #[cfg(not(feature = "account"))]
-    let builder = builder.invoke_handler(tauri::generate_handler![daemon_info, save_image, save_video, save_text]);
+    let builder = builder.invoke_handler(tauri::generate_handler![daemon_info, save_image, save_video, save_text, pick_folder]);
     builder
         .setup(|app| {
             // Start the service while the window is still loading.

@@ -127,6 +127,7 @@
 		if (app.sponsors) out.push({ id: 'sponsor', group: 'Actions', title: 'Support Rigbrew', icon: 'heart', words: 'sponsor donate', run: () => app.openSponsor('palette') });
 
 		out.push({ id: 'go-chat', group: 'Go to', title: 'Chat', keys: keys(`${mod}1`), icon: 'chat', run: toChat });
+		out.push({ id: 'go-code', group: 'Go to', title: 'Code', icon: 'code', words: 'agent folder project files repo task coding', run: () => app.go('code') });
 		out.push({ id: 'go-models', group: 'Go to', title: 'Models', keys: keys(`${mod}2`), icon: 'library', words: 'library install builds versions', run: () => app.go('models') });
 		out.push({ id: 'go-device', group: 'Go to', title: flags.techDetails ? 'Device' : `Your ${machine}`, keys: keys(`${mod}3`), icon: 'rig', words: 'device rig hardware machine memory mac computer', run: () => app.go('device') });
 		out.push({ id: 'go-profile', group: 'Go to', title: 'Profile', icon: 'person', words: 'account activity usage sign in streak', run: () => app.go('profile') });

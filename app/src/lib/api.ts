@@ -445,3 +445,73 @@ export async function openExternal(url: string) {
 		window.open(url, '_blank', 'noopener');
 	}
 }
+
+// --- Code: tasks a model works on in a folder (the loop runs in the service) ------------------
+
+export type AgentMode = 'ask' | 'read_only' | 'auto_edits';
+export type AgentState = 'running' | 'waiting' | 'done' | 'failed' | 'stopped' | 'interrupted';
+
+export interface AgentToolStep {
+	kind: 'tool';
+	call: string;
+	name: string;
+	arguments: Record<string, unknown>;
+	status: 'running' | 'waiting' | 'done' | 'failed' | 'denied' | 'stopped';
+	result: string | null;
+	diff: string | null;
+}
+
+export type AgentStep = { kind: 'user' | 'model' | 'note'; text: string } | AgentToolStep;
+
+/** A step that waits for the person: a change to a file (with its diff) or a command. */
+export interface AgentPending {
+	call: string;
+	tool: string;
+	path: string | null;
+	command: string | null;
+	diff: string | null;
+}
+
+export interface AgentTaskRow {
+	id: string;
+	folder: string;
+	title: string;
+	model: string;
+	mode: AgentMode;
+	state: AgentState;
+	created_ms: number;
+	updated_ms: number;
+}
+
+export interface AgentTask extends AgentTaskRow {
+	web: boolean;
+	steps: AgentStep[];
+	pending: AgentPending | null;
+	error: string | null;
+}
+
+export interface AgentSkill {
+	name: string;
+	description: string;
+	source: 'built-in' | 'yours' | 'folder';
+}
+
+const taskOf = async (answer: Promise<{ task: AgentTask }>) => (await answer).task;
+
+/** `null` from a service that is too old to have Code. */
+export const agentTasks = async (folder = '') => (await optional<{ tasks: AgentTaskRow[] }>('GET', `/v1/agent/tasks?folder=${enc(folder)}`))?.tasks ?? null;
+export const agentTask = (id: string) => taskOf(json('GET', `/v1/agent/tasks/${enc(id)}`));
+export const startAgentTask = (body: { folder: string; prompt: string; mode: AgentMode; web: boolean; model?: string }) => taskOf(json('POST', '/v1/agent/tasks', body));
+export const tellAgentTask = (id: string, body: { text: string; mode: AgentMode; web: boolean }) => taskOf(json('POST', `/v1/agent/tasks/${enc(id)}/message`, body));
+export const answerAgentTask = (id: string, call: string, allow: boolean, always = false) =>
+	taskOf(json('POST', `/v1/agent/tasks/${enc(id)}/approve`, { call, allow, always }));
+export const stopAgentTask = (id: string) => taskOf(json('DELETE', `/v1/agent/tasks/${enc(id)}`));
+export const removeAgentTask = (id: string) => json<{ removed: string }>('DELETE', `/v1/agent/tasks/${enc(id)}?remove=true`);
+export const agentSkills = (folder: string) => optional<{ skills: AgentSkill[]; dir: string; folder_dir: string }>('GET', `/v1/agent/skills?folder=${enc(folder)}`);
+
+/** Asks for a folder with the system's own dialog. `null` when cancelled, or outside the app. */
+export async function pickFolder(): Promise<string | null> {
+	if (!isTauri) return null;
+	const { invoke } = await import('@tauri-apps/api/core');
+	return invoke<string | null>('pick_folder');
+}
