@@ -512,6 +512,8 @@ export interface StudioProject {
 	folder: string;
 	size: string;
 	shots: StudioShot[];
+	/** The film is exported by itself when its last shot is made. */
+	auto_export?: boolean;
 	updated_ms: number;
 }
 
@@ -523,6 +525,8 @@ export interface StudioView {
 	seconds: number;
 	/** Whether the installed video model can start a shot from a picture. */
 	can_continue?: boolean;
+	/** Where the export of this film is. */
+	export?: StudioExport;
 }
 
 export interface StudioListing {
@@ -534,16 +538,18 @@ export interface StudioListing {
 	missing?: boolean;
 }
 
-export const studioList = async () => (await json<{ projects: StudioListing[] }>('GET', '/v1/studio/projects')).projects;
+/** The films, and `home`: the folder new films go into when none is chosen. */
+export const studioList = () => json<{ projects: StudioListing[]; home?: string | null }>('GET', '/v1/studio/projects');
+/** Opens the film in `folder`, or starts one there. Without a folder the service makes one named after the film. */
 export const studioOpen = (folder: string, name = '') => json<StudioView>('POST', '/v1/studio/projects', { folder, name });
 export const studioRead = (id: string) => json<StudioView>('GET', `/v1/studio/projects/${enc(id)}`);
-export const studioSave = (id: string, body: { name?: string; size?: string; shots?: { id?: string; prompt: string; frames: number; trim_start?: number; trim_end?: number; continues?: boolean }[] }) =>
+export const studioSave = (id: string, body: { name?: string; size?: string; auto_export?: boolean; shots?: { id?: string; prompt: string; frames: number; trim_start?: number; trim_end?: number; continues?: boolean }[] }) =>
 	json<StudioView>('PUT', `/v1/studio/projects/${enc(id)}`, body);
 export const studioForget = (id: string) => json<unknown>('DELETE', `/v1/studio/projects/${enc(id)}`);
 export const studioRender = (id: string, shots?: string[]) => json<StudioView>('POST', `/v1/studio/projects/${enc(id)}/render`, shots ? { shots } : {});
 export const studioStop = (id: string) => json<StudioView>('DELETE', `/v1/studio/projects/${enc(id)}/render`);
 export const studioStoryboard = async (id: string, idea: string, shots: number) =>
-	(await json<{ shots: { prompt: string }[] }>('POST', `/v1/studio/projects/${enc(id)}/storyboard`, { idea, shots })).shots;
+	(await json<{ shots: { prompt: string; continues?: boolean }[] }>('POST', `/v1/studio/projects/${enc(id)}/storyboard`, { idea, shots })).shots;
 export interface StudioExport {
 	state: 'none' | 'working' | 'done' | 'failed';
 	file?: string;

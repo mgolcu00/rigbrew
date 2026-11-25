@@ -10,6 +10,7 @@
 	// Studio: a film is a list of shots in a folder. Each shot is one description and one clip;
 	// the video model makes them one after another, so a long film renders on its own. The chat
 	// model can write the shots from an idea. Clips stay in the folder as plain files.
+	// The start screen takes one sentence and a length and does all of it: folder, shots, clips, MP4.
 
 	let films = $state<StudioListing[]>([]);
 	let view = $state<StudioView | null>(null);
@@ -31,6 +32,86 @@
 	const total = $derived(project ? project.shots.reduce((n, s) => n + s.frames / 24, 0) : 0);
 	const clock = (s: number) => (s >= 60 ? `${Math.floor(s / 60)} min ${Math.round(s % 60)} s` : `${Math.round(s)} s`);
 	const say = (e: unknown) => plain(e).text;
+	const tilde = (path: string) => path.replace(/^\/Users\/[^/]+/, '~');
+
+	// One sentence to a finished film.
+	const filmLengths = [
+		{ seconds: 15, label: 'About 15 s' },
+		{ seconds: 30, label: '30 s' },
+		{ seconds: 60, label: '1 min' },
+		{ seconds: 120, label: '2 min' },
+		{ seconds: 300, label: '5 min' }
+	] as const;
+	let about = $state('');
+	let aboutSeconds = $state<number>(30);
+	let aboutShape = $state<SizeName>('landscape');
+	let aboutFolder = $state('');
+	let askFolder = $state(false);
+	let home = $state('');
+	/** What the one-sentence film is doing: '' when idle. */
+	let quick = $state<'' | 'folder' | 'writing' | 'starting'>('');
+	/** The shot length closest to five seconds. */
+	const five = $derived(lengths.reduce((best, l) => (Math.abs(l.frames - 121) < Math.abs(best.frames - 121) ? l : best), lengths[0]).frames);
+	const quickShots = $derived(Math.max(1, Math.round(aboutSeconds / (five / 24))));
+
+	/** A name for the film out of its first words. */
+	function titleOf(text: string) {
+		const words = text
+			.replace(/[^\p{L}\p{N}\s'-]/gu, ' ')
+			.split(/\s+/)
+			.filter(Boolean)
+			.slice(0, 6)
+			.join(' ')
+			.slice(0, 48)
+			.trim();
+		return words ? words[0].toUpperCase() + words.slice(1) : 'Film';
+	}
+
+	async function changeFolder() {
+		const folder = await api.pickFolder('Choose a folder for the film');
+		if (folder) aboutFolder = folder;
+		else if (!api.isTauri) askFolder = true;
+	}
+
+	async function makeFilm() {
+		const text = about.trim();
+		if (!text || quick) return;
+		problem = '';
+		let opened: StudioView | null = null;
+		try {
+			quick = 'folder';
+			opened = await api.studioOpen(aboutFolder.trim(), titleOf(text));
+			const id = opened.project.id;
+			if (opened.project.shots.length > 0) {
+				// The folder already holds a film: it is opened as it is.
+				view = opened;
+				return;
+			}
+			quick = 'writing';
+			const shots = await api.studioStoryboard(id, text, quickShots);
+			quick = 'starting';
+			const carries = Boolean(opened.can_continue);
+			await api.studioSave(id, {
+				size: `${shapes[aboutShape].width}x${shapes[aboutShape].height}`,
+				auto_export: true,
+				shots: shots.map((s, i) => ({ prompt: s.prompt, frames: five, continues: carries && i > 0 && Boolean(s.continues) }))
+			});
+			view = video ? await api.studioRender(id) : await api.studioRead(id);
+			app.track('studio_quick_film', { seconds: aboutSeconds, shots: shots.length, shape: aboutShape, own_folder: Boolean(aboutFolder.trim()) });
+			about = '';
+		} catch (e) {
+			// The folder is there: open the film so the idea can be tried again from inside it.
+			if (opened) {
+				view = opened;
+				idea = text;
+				wanted = quickShots;
+			}
+			problem = say(e);
+		} finally {
+			quick = '';
+			refresh();
+		}
+	}
 
 	const urls = new Map<string, string>();
 	let clips = $state<Record<string, string>>({});
@@ -52,7 +133,9 @@
 
 	async function refresh() {
 		try {
-			films = await api.studioList();
+			const all = await api.studioList();
+			films = all.projects;
+			home = all.home ?? '';
 		} catch (e) {
 			problem = say(e);
 		}
@@ -94,7 +177,7 @@
 		timer = undefined;
 		if (!project) return;
 		try {
-			const saved = await api.studioSave(project.id, { name: project.name, size: project.size, shots: project.shots.map(({ id, prompt, frames, trim_start, trim_end, continues }) => ({ id, prompt, frames, trim_start: trim_start ?? 0, trim_end: trim_end ?? 0, continues: Boolean(continues) })) });
+			const saved = await api.studioSave(project.id, { name: project.name, size: project.size, auto_export: Boolean(project.auto_export), shots: project.shots.map(({ id, prompt, frames, trim_start, trim_end, continues }) => ({ id, prompt, frames, trim_start: trim_start ?? 0, trim_end: trim_end ?? 0, continues: Boolean(continues) })) });
 			// Keep what is being typed; take the states.
 			if (view && !timer) view = saved;
 		} catch (e) {
@@ -134,7 +217,7 @@
 		problem = '';
 		try {
 			const shots = await api.studioStoryboard(project.id, idea.trim(), wanted);
-			for (const s of shots) project.shots.push({ id: '', prompt: s.prompt, frames: video?.defaults?.frames ?? lengths[0].frames, state: 'empty' });
+			for (const s of shots) project.shots.push({ id: '', prompt: s.prompt, frames: video?.defaults?.frames ?? lengths[0].frames, state: 'empty', continues: Boolean(s.continues && view?.can_continue && project.shots.length > 0) });
 			await saveNow();
 			app.track('studio_shots_written', { shots: shots.length });
 		} catch (e) {
@@ -165,30 +248,26 @@
 		}
 	}
 
-	// One file out of the made shots, in the film's folder.
-	let exporting = $state<api.StudioExport | null>(null);
+	// One file out of the made shots, in the film's folder. The service says where the export is,
+	// also for a film that exports by itself.
+	const exported = $derived(view?.export ?? null);
 	let music = $state('');
 	async function exportFilm() {
 		if (!project) return;
 		problem = '';
 		try {
 			await saveNow();
-			exporting = await api.studioExport(project.id, music.trim() || undefined);
+			await api.studioExport(project.id, music.trim() || undefined);
 			app.track('studio_export_clicked', { shots: done.length, music: Boolean(music.trim()) });
-			while (exporting?.state === 'working') {
-				await new Promise((r) => setTimeout(r, 1500));
-				exporting = await api.studioExportState(project.id);
-			}
-			if (exporting?.state === 'failed') problem = `The film could not be exported. ${exporting.error ?? ''}`;
+			view = await api.studioRead(project.id);
 		} catch (e) {
 			problem = say(e);
-			exporting = null;
 		}
 	}
 
 	// While shots are being made, look again every two seconds (not while something is being typed).
 	const poll = setInterval(async () => {
-		if (!view?.rendering || timer) return;
+		if (!(view?.rendering || view?.export?.state === 'working') || timer) return;
 		try {
 			const fresh = await api.studioRead(view.project.id);
 			if (!timer && view && fresh.project.id === view.project.id) view = fresh;
@@ -224,16 +303,56 @@
 	<div class="column">
 		{#if !project}
 			<header class="hello">
-				<h1>Make a film, shot by shot</h1>
-				<p class="lede">A film is a list of shots in a folder of yours. Describe each shot, or let the chat model write them from an idea. The video model makes them one after another, with sound.</p>
-				<p class="row">
-					<button class="btn primary large" onclick={newFilm}>New film…</button>
-				</p>
-				{#if !api.isTauri}
-					<p class="row"><input class="field" bind:value={folderText} placeholder="/full/path/to/a/folder" aria-label="Folder for the film" /></p>
-				{/if}
-				{#if !video}<p class="note">No video model is installed yet. You can plan a film now and add Video under <button class="link" onclick={() => app.go('models')}>Models</button> before making it.</p>{/if}
+				<h1>Make a film</h1>
+				<p class="lede">Say what the film is about. The chat model writes the shots, the video model makes them one after another with sound, and the film is saved as one MP4 file.</p>
 			</header>
+			<div class="quick">
+				<textarea bind:value={about} rows="3" placeholder="What is the film about? For example: a red fox finds a paper boat in a snowy forest and follows it down a stream" aria-label="What is the film about?" disabled={quick !== ''}></textarea>
+				<div class="row">
+					<span class="label">Length</span>
+					<span class="seg" role="radiogroup" aria-label="Length of the film">
+						{#each filmLengths as l (l.seconds)}
+							<button type="button" role="radio" aria-checked={aboutSeconds === l.seconds} onclick={() => (aboutSeconds = l.seconds)} disabled={quick !== ''}>{l.label}</button>
+						{/each}
+					</span>
+					<span class="label">Shape</span>
+					<span class="chips" role="radiogroup" aria-label="Shape of the film">
+						{#each Object.entries(shapes) as [name, s] (name)}
+							<button type="button" role="radio" aria-checked={aboutShape === name} onclick={() => (aboutShape = name as SizeName)} disabled={quick !== ''} title={s.label} aria-label={s.label}><span class="shape" style:aspect-ratio="{s.width} / {s.height}"></span></button>
+						{/each}
+					</span>
+				</div>
+				<p class="row">
+					<button class="btn primary large" onclick={makeFilm} disabled={!about.trim() || quick !== '' || app.chatPackages.length === 0}>
+						{quick === 'writing' ? 'Writing the shots…' : quick ? 'Starting…' : 'Make the film'}
+					</button>
+					{#if quick === 'writing'}
+						<span class="note" role="status">The chat model is writing {quickShots} {quickShots === 1 ? 'shot' : 'shots'}. This can take a minute or two.</span>
+					{:else}
+						<span class="note">{quickShots} {quickShots === 1 ? 'shot' : 'shots'} of {Math.round(five / 24)} s. You can change every shot afterwards.</span>
+					{/if}
+				</p>
+				<p class="note">
+					{#if aboutFolder.trim()}
+						It is saved in <span class="selectable">{tilde(aboutFolder.trim())}</span>.
+						<button class="link" onclick={() => ((aboutFolder = ''), (askFolder = false))} disabled={quick !== ''}>Use the usual folder</button>
+					{:else}
+						It is saved in a new folder in <span class="selectable">{home ? tilde(home) : 'Movies/Rigbrew'}</span>.
+						<button class="link" onclick={changeFolder} disabled={quick !== ''}>Change folder</button>
+					{/if}
+				</p>
+				{#if askFolder}<input class="field" bind:value={aboutFolder} placeholder="/full/path/to/a/folder" aria-label="Folder for the film" />{/if}
+				{#if app.chatPackages.length === 0}<p class="note">Writing the shots needs a chat model. Add one under <button class="link" onclick={() => app.go('models')}>Models</button>.</p>{/if}
+				{#if !video}<p class="note">No video model is installed yet. The shots are written now and made once you add Video under <button class="link" onclick={() => app.go('models')}>Models</button>.</p>{/if}
+			</div>
+			{#if problem}<p class="problem selectable" role="alert">{problem}</p>{/if}
+			<p class="row other">
+				<button class="link" onclick={newFilm}>Start with an empty film</button>
+				<span class="note">to write every shot yourself, or to open a film folder.</span>
+			</p>
+			{#if !api.isTauri}
+				<p class="row"><input class="field" bind:value={folderText} placeholder="/full/path/to/a/folder" aria-label="Folder of an empty or existing film" /></p>
+			{/if}
 			{#if films.length > 0}
 				<h2 class="sub">Your films</h2>
 				<ul class="films">
@@ -243,12 +362,13 @@
 								<Icon name="video" size={16} />
 								<span class="fname">{f.name || 'Film'}</span>
 								<span class="fmeta">{f.missing ? 'The folder is gone' : `${f.made ?? 0} of ${f.shots ?? 0} shots made`}</span>
-								<span class="fpath selectable">{f.folder.replace(/^\/Users\/[^/]+/, '~')}</span>
+								<span class="fpath selectable">{tilde(f.folder)}</span>
 							</button>
 						</li>
 					{/each}
 				</ul>
 			{/if}
+			{#if video?.credit}<p class="note credit">{video.credit}</p>{/if}
 		{:else}
 			<header class="top">
 				<button class="btn quiet" onclick={() => ((view = null), refresh())}>← Films</button>
@@ -258,7 +378,7 @@
 					<button class="btn" onclick={stop}>Stop</button>
 				{:else}
 					<button class="btn" onclick={() => play(0)} disabled={done.length === 0}>Play film</button>
-					<button class="btn" onclick={exportFilm} disabled={done.length === 0 || exporting?.state === 'working'} title="Joins the made shots into one MP4 file in the film's folder">{exporting?.state === 'working' ? 'Exporting…' : 'Export'}</button>
+					<button class="btn" onclick={exportFilm} disabled={done.length === 0 || exported?.state === 'working'} title="Joins the made shots into one MP4 file in the film's folder">{exported?.state === 'working' ? 'Exporting…' : 'Export'}</button>
 					<button class="btn primary" onclick={() => make()} disabled={todo === 0 || !video} title={video ? '' : 'Add Video under Models first'}>Make {todo > 0 ? `${todo} ${todo === 1 ? 'shot' : 'shots'}` : 'film'}</button>
 				{/if}
 			</header>
@@ -270,7 +390,7 @@
 						<button type="button" role="radio" aria-checked={shape === name} onclick={() => setShape(name as SizeName)} disabled={view?.rendering} title={s.label} aria-label={s.label}><span class="shape" style:aspect-ratio="{s.width} / {s.height}"></span></button>
 					{/each}
 				</span>
-				<span class="path selectable" title={project.folder}>{project.folder.replace(/^\/Users\/[^/]+/, '~')}</span>
+				<span class="path selectable" title={project.folder}>{tilde(project.folder)}</span>
 			</p>
 			{#if view?.progress}
 				{@const p = view.progress}
@@ -279,7 +399,15 @@
 					Making shot {project.shots.findIndex((s) => s.id === p.shot) + 1} of {project.shots.length}{p.step !== null && p.steps ? `, step ${p.step} of ${p.steps}` : ''}, {clock(p.elapsed_ms / 1000)} so far. It keeps going if you leave this screen.
 				</p>
 			{/if}
-			{#if exporting?.state === 'done' && exporting.file}<p class="progress selectable" role="status">Exported {exporting.shots} {exporting.shots === 1 ? 'shot' : 'shots'} to {exporting.file.replace(/^\/Users\/[^/]+/, '~')}</p>{/if}
+			{#if exported?.state === 'working'}
+				<p class="progress" role="status"><span class="dot"></span>Joining {exported.shots} {exported.shots === 1 ? 'shot' : 'shots'} into one file.</p>
+			{:else if exported?.state === 'done' && exported.file}
+				<p class="progress selectable" role="status">The film is saved: {tilde(exported.file)}</p>
+			{:else if exported?.state === 'failed'}
+				<p class="problem selectable" role="alert">The film could not be exported. {exported.error ?? ''}</p>
+			{:else if project.auto_export && (view?.rendering || todo > 0)}
+				<p class="note">The film is exported by itself when the last shot is made.</p>
+			{/if}
 			{#if problem}<p class="problem selectable" role="alert">{problem}</p>{/if}
 
 			{#if playing !== null && done[playing]}
@@ -294,7 +422,7 @@
 			<div class="idea">
 				<textarea bind:value={idea} rows="2" placeholder="What is the film about? For example: a red fox finds a paper boat in a snowy forest and follows it down a stream" aria-label="What the film is about"></textarea>
 				<p class="row">
-					<label>Shots <select bind:value={wanted}>{#each [3, 4, 6, 8, 12, 16, 24] as n (n)}<option value={n}>{n}</option>{/each}</select></label>
+					<label>Shots <select bind:value={wanted}>{#each [3, 4, 6, 8, 12, 16, 24, 36, 60] as n (n)}<option value={n}>{n}</option>{/each}</select></label>
 					<button class="btn" onclick={write} disabled={!idea.trim() || writing || app.chatPackages.length === 0}>{writing ? 'Writing the shots…' : 'Write the shots'}</button>
 					{#if app.chatPackages.length === 0}<span class="note">Needs a chat model.</span>{/if}
 				</p>
@@ -338,11 +466,11 @@
 			</ol>
 			<p class="row end">
 				<button class="btn" onclick={() => addShot()}>Add a shot</button>
+				<label class="trim" title="When the last shot is made, the film is joined into one MP4 file in its folder, also with this screen closed."><input type="checkbox" bind:checked={project.auto_export} onchange={saveSoon} /> Export when the last shot is made</label>
 				<input class="field music" bind:value={music} placeholder="Music or narration for the export: full path to a sound file (optional)" aria-label="Sound file to lay under the exported film" />
 				{#if video?.credit}<span class="note">{video.credit}</span>{/if}
 			</p>
 		{/if}
-		{#if !project && problem}<p class="problem selectable" role="alert">{problem}</p>{/if}
 	</div>
 </section>
 
@@ -364,8 +492,52 @@
 	.hello {
 		display: grid;
 		justify-items: center;
-		gap: 14px;
-		padding: 12vh 0 8px;
+		gap: 10px;
+		padding: 7vh 0 0;
+		text-align: center;
+	}
+
+	.quick {
+		display: grid;
+		gap: 10px;
+		padding: 14px;
+		border: 1px solid var(--line-soft);
+		border-radius: 14px;
+	}
+
+	.label {
+		font-size: 12.5px;
+		color: var(--faint);
+	}
+
+	.seg {
+		display: inline-flex;
+		gap: 2px;
+		margin-right: 10px;
+	}
+
+	.seg button {
+		height: 26px;
+		padding: 0 9px;
+		border-radius: 8px;
+		font-size: 12.5px;
+		color: var(--muted);
+	}
+
+	.seg button:hover:not(:disabled) {
+		background: var(--hover);
+	}
+
+	.seg button[aria-checked='true'] {
+		background: var(--pressed);
+		color: var(--ink);
+	}
+
+	.other {
+		justify-content: center;
+	}
+
+	.credit {
 		text-align: center;
 	}
 

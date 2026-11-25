@@ -1,20 +1,22 @@
 //! Studio: films made of shots, kept in a folder the person chooses.
 //!
 //!   GET    /v1/studio/projects                    the films this install knows
-//!   POST   /v1/studio/projects                    {"folder", "name"}: start a film in a folder (created if missing)
+//!   POST   /v1/studio/projects                    {"folder"?, "name"}: start a film in a folder (created if missing;
+//!                                                 without one, a new folder named after the film under Movies/Rigbrew)
 //!   GET    /v1/studio/projects/{id}               the film: its shots and what is being made
-//!   PUT    /v1/studio/projects/{id}               {"name", "size", "shots": [{"id"?, "prompt", "frames"}]}
+//!   PUT    /v1/studio/projects/{id}               {"name", "size", "auto_export", "shots": [{"id"?, "prompt", "frames"}]}
 //!   DELETE /v1/studio/projects/{id}               forget the film (its folder stays)
 //!   POST   /v1/studio/projects/{id}/render        {"shots": [id]?, "model"?}: make the listed shots, or every shot not made yet
 //!   DELETE /v1/studio/projects/{id}/render        stop: the shot being made is stopped, the rest leave the queue
-//!   POST   /v1/studio/projects/{id}/storyboard    {"idea", "shots"}: the chat model writes shot descriptions (not saved)
+//!   POST   /v1/studio/projects/{id}/storyboard    {"idea", "shots"}: the chat model writes the shots in scenes (not saved)
 //!   POST   /v1/studio/projects/{id}/export      {"music"?, "music_volume"?}: join the made shots into `<folder>/<name>.mp4`
 //!   GET    /v1/studio/projects/{id}/export      where the export is: {"state", "file", "error"}
 //!   GET    /v1/studio/projects/{id}/clips/{shot}.webm
 //!
 //! A film is `<folder>/rigbrew-film.json` plus `<folder>/clips/<shot>.webm`; the list of folders is
 //! `<data dir>/studio.json`. Shots are made one after another by the installed video package through
-//! the same path as `/v1/videos/generations`, so a long film renders unattended, shot by shot.
+//! the same path as `/v1/videos/generations`, so a long film renders unattended, shot by shot. A film
+//! with `auto_export` is exported by the same worker when its last shot is made.
 
 use std::collections::VecDeque;
 use std::path::{Path as FsPath, PathBuf};
@@ -34,9 +36,13 @@ use serde_json::{json, Value};
 use crate::cloud::now_ms;
 use crate::{fail, video, App, Shared};
 
+mod board;
+
 const FILE: &str = "rigbrew-film.json";
 const MAX_SHOTS: usize = 200;
 const MAX_PROMPT: usize = 1200;
+/// The most shots one storyboard has: five minutes of five-second shots.
+const MAX_STORYBOARD: usize = 60;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Shot {
@@ -77,6 +83,9 @@ pub struct Project {
     /// "640x384": every shot of a film has the same shape.
     pub size: String,
     pub shots: Vec<Shot>,
+    /// Export the film by itself when its last shot is made.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub auto_export: bool,
     pub updated_ms: i64,
 }
 
@@ -142,6 +151,21 @@ fn valid_size(size: &str) -> bool {
         .is_some_and(|(w, h)| [w, h].iter().all(|v| v.parse::<u32>().is_ok_and(|n| (256..=1280).contains(&n) && n % 32 == 0)))
 }
 
+/// Where films go when the person does not choose a folder: `Movies/Rigbrew` in their home.
+fn films_home() -> Option<PathBuf> {
+    let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).filter(|h| !h.is_empty())?;
+    Some(PathBuf::from(home).join(if cfg!(target_os = "macos") { "Movies" } else { "Videos" }).join("Rigbrew"))
+}
+
+/// A folder for a new film named `name` inside `home`: the first of "Name", "Name 2", ... that holds no film yet.
+fn new_folder(home: &FsPath, name: &str) -> PathBuf {
+    let stem = file_stem(name);
+    (1..)
+        .map(|n| home.join(if n == 1 { stem.clone() } else { format!("{stem} {n}") }))
+        .find(|folder| !folder.join(FILE).exists())
+        .unwrap_or_else(|| home.join(&stem))
+}
+
 fn new_id() -> String {
     uuid::Uuid::new_v4().simple().to_string()[..12].to_string()
 }
@@ -171,7 +195,8 @@ fn view(app: &App, mut p: Project) -> Value {
         .iter()
         .filter(|pk| pk.modality == Modality::Video)
         .any(|pk| app.installed(pk).iter().any(|v| v.files.iter().any(|f| f.role == "mmproj")));
-    json!({"project": p, "progress": progress, "rendering": now.is_some() || !waiting.is_empty(), "made": made, "seconds": seconds, "can_continue": continues})
+    let export = export_of(&p.id);
+    json!({"project": p, "progress": progress, "rendering": now.is_some() || !waiting.is_empty(), "made": made, "seconds": seconds, "can_continue": continues, "export": export})
 }
 
 async fn list(State(app): State<Shared>) -> Json<Value> {
@@ -182,18 +207,26 @@ async fn list(State(app): State<Shared>) -> Json<Value> {
             None => json!({"id": id, "name": "", "folder": folder, "missing": true}),
         })
         .collect();
-    Json(json!({"projects": films}))
+    Json(json!({"projects": films, "home": films_home().map(|h| h.to_string_lossy().to_string())}))
 }
 
 #[derive(Deserialize)]
 struct NewProject {
+    #[serde(default)]
     folder: String,
     #[serde(default)]
     name: String,
 }
 
 async fn create(State(app): State<Shared>, Json(body): Json<NewProject>) -> Response {
-    let folder = PathBuf::from(body.folder.trim());
+    let folder = if body.folder.trim().is_empty() {
+        match films_home() {
+            Some(home) => new_folder(&home, body.name.trim()),
+            None => return fail(StatusCode::BAD_REQUEST, "choose a folder for the film"),
+        }
+    } else {
+        PathBuf::from(body.folder.trim())
+    };
     if !folder.is_absolute() || body.folder.len() > 1024 {
         return fail(StatusCode::BAD_REQUEST, "choose a folder by its full path");
     }
@@ -216,6 +249,7 @@ async fn create(State(app): State<Shared>, Json(body): Json<NewProject>) -> Resp
         folder: folder_text.clone(),
         size: "640x384".into(),
         shots: vec![],
+        auto_export: false,
         updated_ms: 0,
     });
     project.id = id.clone();
@@ -264,6 +298,8 @@ struct Save {
     size: Option<String>,
     #[serde(default)]
     shots: Option<Vec<ShotIn>>,
+    #[serde(default)]
+    auto_export: Option<bool>,
 }
 
 /// The new list of shots: a shot that keeps its id and its description keeps its clip; one whose
@@ -331,6 +367,9 @@ async fn save(State(app): State<Shared>, Path(id): Path<String>, Json(body): Jso
         for s in p.shots.iter_mut().filter(|s| s.state == "done") {
             s.state = "changed".into();
         }
+    }
+    if let Some(auto) = body.auto_export {
+        p.auto_export = auto;
     }
     if let Err(e) = store(&mut p) {
         return fail(StatusCode::INTERNAL_SERVER_ERROR, format!("the film could not be saved: {e}"));
@@ -537,6 +576,21 @@ async fn work(app: Shared) {
         if made {
             app.record("studio_shot_made", json!({"frames": s.frames, "seconds": seconds}));
         }
+        // The last waiting shot of a film that exports by itself: join it now, with the screen open or not.
+        if made && !with_queue(|q| q.waiting.iter().any(|(pid, _)| *pid == project)) {
+            export_when_complete(&app, &project).await;
+        }
+    }
+}
+
+/// Exports a film that asked for it once every described shot is made.
+async fn export_when_complete(app: &Shared, project: &str) {
+    let Some(p) = load(app, project).filter(|p| p.auto_export) else { return };
+    if p.shots.iter().any(|s| s.state != "done" && !s.prompt.is_empty()) {
+        return;
+    }
+    if let Err((_, why)) = begin_export(app, p, Export::default()).await {
+        set_export(project, json!({"state": "failed", "error": why}));
     }
 }
 
@@ -585,28 +639,12 @@ struct Idea {
     shots: Option<u32>,
 }
 
-/// "1. A fox ..." lines out of what the chat model wrote.
-fn shot_lines(text: &str, limit: usize) -> Vec<String> {
-    text.lines()
-        .filter_map(|line| {
-            let line = line.trim().trim_start_matches(['-', '*', '•']).trim();
-            let rest = line.trim_start_matches(|c: char| c.is_ascii_digit());
-            // Numbered ("3. ...", "3) ...") or bulleted lines only; headings and chatter are dropped.
-            let numbered = rest.len() < line.len() && (rest.starts_with('.') || rest.starts_with(')') || rest.starts_with(':'));
-            let body = if numbered { rest[1..].trim() } else { "" };
-            let body = body.trim_matches(['"', '*', '`']).trim();
-            (body.chars().count() >= 12).then(|| body.chars().take(MAX_PROMPT).collect())
-        })
-        .take(limit)
-        .collect()
-}
-
 async fn storyboard(State(app): State<Shared>, Path(_id): Path<String>, Json(body): Json<Idea>) -> Response {
     let idea: String = body.idea.trim().chars().take(2000).collect();
     if idea.is_empty() {
         return fail(StatusCode::BAD_REQUEST, "say what the film is about in \"idea\"");
     }
-    let count = body.shots.unwrap_or(6).clamp(1, 24) as usize;
+    let count = body.shots.unwrap_or(6).clamp(1, MAX_STORYBOARD as u32) as usize;
     let Some(chat) = app.manifest.packages.iter().find(|p| p.modality == Modality::Chat && !app.installed(p).is_empty()) else {
         return fail(StatusCode::CONFLICT, "No chat model is installed. Add Chat under Models first.");
     };
@@ -617,49 +655,72 @@ async fn storyboard(State(app): State<Shared>, Path(_id): Path<String>, Json(bod
     else {
         return fail(StatusCode::INTERNAL_SERVER_ERROR, "the service does not know its own address");
     };
-    let system = format!(
-        "You plan short films for a text-to-video model. Write exactly {count} shots as a numbered list, one line each, nothing else. \
-         Each line describes one continuous shot of a few seconds in English: who or what is seen, what moves, the place, the light, the camera, and the sound. \
-         Describe the same characters and places with the same words in every shot so they look alike. No dialogue, no titles, no text on screen."
-    );
-    let request = json!({
-        "model": chat.id,
-        "messages": [{"role": "system", "content": system}, {"role": "user", "content": idea}],
-        "max_tokens": 120 * count + 200,
-        "temperature": 0.7,
-        "chat_template_kwargs": {"enable_thinking": false},
-    });
-    let answer = app
-        .http
-        .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
-        .bearer_auth(&app.token)
-        .json(&request)
-        .timeout(Duration::from_secs(300))
-        .send()
-        .await;
-    let text = match answer {
-        Ok(r) if r.status().is_success() => r
-            .json::<Value>()
-            .await
-            .ok()
-            .and_then(|v| v["choices"][0]["message"]["content"].as_str().map(str::to_string))
-            .unwrap_or_default(),
-        Ok(r) => {
-            let v: Value = r.json().await.unwrap_or(Value::Null);
-            return fail(StatusCode::BAD_GATEWAY, v["error"]["message"].as_str().unwrap_or("the chat model could not answer").to_string());
+    // A long film is written in parts, each part told what came before it.
+    let mut shots: Vec<board::Line> = Vec::new();
+    for _ in 0..count / board::PART + 3 {
+        let ask = (count - shots.len()).min(board::PART);
+        if ask == 0 {
+            break;
         }
-        Err(e) => return fail(StatusCode::BAD_GATEWAY, e.to_string()),
-    };
-    let shots = shot_lines(&text, count);
+        let request = json!({
+            "model": chat.id,
+            "messages": [
+                {"role": "system", "content": board::system_prompt(ask)},
+                {"role": "user", "content": board::part_request(&idea, &shots, ask, count)},
+            ],
+            "max_tokens": 140 * ask + 200,
+            "temperature": 0.7,
+            "chat_template_kwargs": {"enable_thinking": false},
+        });
+        let answer = app
+            .http
+            .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
+            .bearer_auth(&app.token)
+            .json(&request)
+            .timeout(Duration::from_secs(300))
+            .send()
+            .await;
+        let text = match answer {
+            Ok(r) if r.status().is_success() => r
+                .json::<Value>()
+                .await
+                .ok()
+                .and_then(|v| v["choices"][0]["message"]["content"].as_str().map(str::to_string))
+                .unwrap_or_default(),
+            // What is written so far is still a film.
+            _ if !shots.is_empty() => break,
+            Ok(r) => {
+                let v: Value = r.json().await.unwrap_or(Value::Null);
+                return fail(
+                    StatusCode::BAD_GATEWAY,
+                    v["error"]["message"].as_str().unwrap_or("the chat model could not answer").to_string(),
+                );
+            }
+            Err(e) => return fail(StatusCode::BAD_GATEWAY, e.to_string()),
+        };
+        let part = board::shot_lines(&text, ask);
+        if part.is_empty() {
+            break;
+        }
+        shots.extend(part);
+    }
     if shots.is_empty() {
         return fail(StatusCode::BAD_GATEWAY, "The chat model did not write a list of shots. Try again, or say more about the film.");
     }
-    app.record("studio_storyboard_written", json!({"shots": shots.len()}));
-    Json(json!({"shots": shots.into_iter().map(|prompt| json!({"prompt": prompt})).collect::<Vec<_>>()})).into_response()
+    // A film starts with a cut.
+    shots[0].continues = false;
+    let scenes = shots.iter().filter(|s| !s.continues).count();
+    app.record("studio_storyboard_written", json!({"shots": shots.len(), "scenes": scenes, "asked": count}));
+    Json(json!({"shots": shots.into_iter().map(|s| json!({"prompt": s.prompt, "continues": s.continues})).collect::<Vec<_>>()}))
+        .into_response()
 }
 
 /// The export of each film: "working", "done" or "failed", with the file or what went wrong.
 static EXPORTS: Mutex<Vec<(String, Value)>> = Mutex::new(Vec::new());
+
+fn export_of(id: &str) -> Value {
+    EXPORTS.lock().unwrap().iter().find(|(i, _)| i == id).map(|(_, v)| v.clone()).unwrap_or_else(|| json!({"state": "none"}))
+}
 
 fn set_export(id: &str, value: Value) {
     let mut all = EXPORTS.lock().unwrap();
@@ -714,29 +775,35 @@ async fn export(State(app): State<Shared>, Path(id): Path<String>, body: Option<
     let Some(p) = load(&app, &id) else {
         return fail(StatusCode::NOT_FOUND, "no such film, or its folder is gone");
     };
-    let body = body.map(|b| b.0).unwrap_or_default();
+    match begin_export(&app, p, body.map(|b| b.0).unwrap_or_default()).await {
+        Ok(count) => (StatusCode::ACCEPTED, Json(json!({"state": "working", "shots": count}))).into_response(),
+        Err((status, why)) => fail(status, why),
+    }
+}
+
+/// Starts joining the made shots of a film into its MP4; answers with how many shots go in.
+async fn begin_export(app: &Shared, p: Project, body: Export) -> Result<usize, (StatusCode, String)> {
+    let id = p.id.clone();
     let (list, count) = concat_list(&p);
     if count == 0 {
-        return fail(StatusCode::CONFLICT, "No shot is made yet. Make the shots first.");
+        return Err((StatusCode::CONFLICT, "No shot is made yet. Make the shots first.".into()));
     }
     let music = match body.music.as_deref().map(str::trim).filter(|m| !m.is_empty()) {
         Some(m) if FsPath::new(m).is_absolute() && FsPath::new(m).is_file() => Some(m.to_string()),
-        Some(_) => return fail(StatusCode::BAD_REQUEST, "the sound file was not found: give its full path"),
+        Some(_) => return Err((StatusCode::BAD_REQUEST, "the sound file was not found: give its full path".into())),
         None => None,
     };
     if EXPORTS.lock().unwrap().iter().any(|(i, v)| *i == id && v["state"] == "working") {
-        return fail(StatusCode::CONFLICT, "This film is being exported already.");
+        return Err((StatusCode::CONFLICT, "This film is being exported already.".into()));
     }
-    let ffmpeg = match crate::engine_tool(&app, crate::EngineKind::Ffmpeg, "ffmpeg").await {
-        Ok(path) => path,
-        Err(e) => return fail(StatusCode::SERVICE_UNAVAILABLE, format!("The tool that joins the shots could not be set up: {e}")),
-    };
+    let ffmpeg = crate::engine_tool(app, crate::EngineKind::Ffmpeg, "ffmpeg")
+        .await
+        .map_err(|e| (StatusCode::SERVICE_UNAVAILABLE, format!("The tool that joins the shots could not be set up: {e}")))?;
     let folder = PathBuf::from(&p.folder);
     let out = folder.join(format!("{}.mp4", file_stem(&p.name)));
     let list_path = folder.join(".rigbrew-export.txt");
-    if let Err(e) = std::fs::write(&list_path, list) {
-        return fail(StatusCode::INTERNAL_SERVER_ERROR, format!("the film's folder cannot be written to: {e}"));
-    }
+    std::fs::write(&list_path, list)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("the film's folder cannot be written to: {e}")))?;
     set_export(&id, json!({"state": "working", "shots": count}));
     let volume = body.music_volume.unwrap_or(0.5).clamp(0.0, 1.0);
     let app2 = app.clone();
@@ -804,12 +871,11 @@ async fn export(State(app): State<Shared>, Path(id): Path<String>, body: Option<
             }
         }
     });
-    (StatusCode::ACCEPTED, Json(json!({"state": "working", "shots": count}))).into_response()
+    Ok(count)
 }
 
 async fn export_state(Path(id): Path<String>) -> Json<Value> {
-    let found = EXPORTS.lock().unwrap().iter().find(|(i, _)| *i == id).map(|(_, v)| v.clone());
-    Json(found.unwrap_or_else(|| json!({"state": "none"})))
+    Json(export_of(&id))
 }
 
 pub fn router() -> Router<Shared> {
@@ -921,6 +987,7 @@ mod tests {
             folder: dir.to_string_lossy().into(),
             size: "640x384".into(),
             shots: vec![shot("a1", "fox", "done"), shot("b2", "not made", "empty"), second],
+            auto_export: false,
             updated_ms: 0,
         };
         let (list, count) = concat_list(&p);
@@ -942,11 +1009,15 @@ mod tests {
     }
 
     #[test]
-    fn a_storyboard_is_read_from_numbered_lines_only() {
-        let text = "Here are your shots:\n1. A red fox trots through fresh snow between birch trees, soft light.\n2) The fox stops and looks up as snow falls from a branch.\n\n**Notes**: keep it calm.\n3. \"Close on the fox's face, breath in the cold air, quiet wind.\"";
-        let shots = shot_lines(text, 10);
-        assert_eq!(shots.len(), 3);
-        assert!(shots[0].starts_with("A red fox") && shots[2].starts_with("Close on"));
-        assert_eq!(shot_lines(text, 2).len(), 2);
+    fn a_new_film_gets_a_folder_of_its_own() {
+        let home = std::env::temp_dir().join(format!("rigbrew-films-{}", uuid::Uuid::new_v4().simple()));
+        assert_eq!(new_folder(&home, "The fox: a film"), home.join("The fox a film"));
+        std::fs::create_dir_all(home.join("The fox a film")).unwrap();
+        // An empty folder of that name is taken; one that holds a film is not.
+        assert_eq!(new_folder(&home, "The fox: a film"), home.join("The fox a film"));
+        std::fs::write(home.join("The fox a film").join(FILE), "{}").unwrap();
+        assert_eq!(new_folder(&home, "The fox: a film"), home.join("The fox a film 2"));
+        assert_eq!(new_folder(&home, ""), home.join("film"));
+        std::fs::remove_dir_all(home).ok();
     }
 }
