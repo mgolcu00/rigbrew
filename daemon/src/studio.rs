@@ -12,8 +12,9 @@
 //!   POST   /v1/studio/projects/{id}/export      {"music"?, "music_volume"?}: join the made shots into `<folder>/<name>.mp4`
 //!   GET    /v1/studio/projects/{id}/export      where the export is: {"state", "file", "error"}
 //!   GET    /v1/studio/projects/{id}/clips/{shot}.webm
+//!   GET    /v1/studio/projects/{id}/clips/{shot}.jpg   one small picture of the shot, for the timeline
 //!
-//! A film is `<folder>/rigbrew-film.json` plus `<folder>/clips/<shot>.webm`; the list of folders is
+//! A film is `<folder>/rigbrew-film.json` plus `<folder>/clips/<shot>.webm` (and `<shot>.jpg`); the list of folders is
 //! `<data dir>/studio.json`. Shots are made one after another by the installed video package through
 //! the same path as `/v1/videos/generations`, so a long film renders unattended, shot by shot. A film
 //! with `auto_export` is exported by the same worker when its last shot is made.
@@ -44,7 +45,7 @@ const MAX_PROMPT: usize = 1200;
 /// The most shots one storyboard has: five minutes of five-second shots.
 const MAX_STORYBOARD: usize = 60;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Shot {
     pub id: String,
     pub prompt: String,
@@ -57,6 +58,9 @@ pub struct Shot {
     /// How long the last render took.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seconds: Option<f32>,
+    /// The frames the clip really has: the video model rounds a length to what it can make.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub made_frames: Option<u32>,
     /// Seconds cut from the start and from the end of the clip when the film is exported or played.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub trim_start: f32,
@@ -65,6 +69,13 @@ pub struct Shot {
     /// Start this shot from the last picture of the shot before it, so the two join without a cut.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub continues: bool,
+}
+
+impl Shot {
+    /// The length of the shot in seconds: of its clip when there is one, else what was asked for.
+    fn length(&self) -> f32 {
+        self.made_frames.filter(|_| self.state == "done" || self.state == "changed").unwrap_or(self.frames) as f32 / 24.0
+    }
 }
 
 fn is_zero(v: &f32) -> bool {
@@ -142,6 +153,10 @@ fn clip_path(p: &Project, shot: &str) -> PathBuf {
     FsPath::new(&p.folder).join("clips").join(format!("{shot}.webm"))
 }
 
+fn poster_path(p: &Project, shot: &str) -> PathBuf {
+    FsPath::new(&p.folder).join("clips").join(format!("{shot}.jpg"))
+}
+
 fn valid_id(id: &str) -> bool {
     (1..=40).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
 }
@@ -188,7 +203,7 @@ fn view(app: &App, mut p: Project) -> Value {
         }
     }
     let made = p.shots.iter().filter(|s| s.state == "done").count();
-    let seconds: f32 = p.shots.iter().map(|s| s.frames as f32 / 24.0).sum();
+    let seconds: f32 = p.shots.iter().map(Shot::length).sum();
     let continues = app
         .manifest
         .packages
@@ -315,29 +330,26 @@ fn merge_shots(old: &[Shot], new: Vec<ShotIn>, size_changed: bool) -> Result<Vec
         if !(5..=241).contains(&frames) {
             return Err("a shot is between 5 and 241 frames".into());
         }
-        // Trims leave at least half a second of the shot.
-        let length = frames as f32 / 24.0;
-        let trim_start = s.trim_start.clamp(0.0, (length - 0.5).max(0.0));
-        let trim_end = s.trim_end.clamp(0.0, (length - 0.5 - trim_start).max(0.0));
         let id = s.id.filter(|i| valid_id(i) && !out.iter().any(|o| o.id == *i)).unwrap_or_else(new_id);
-        let shot = match old.iter().find(|o| o.id == id) {
-            Some(o) => {
-                let same = o.prompt == prompt && o.frames == frames && o.continues == s.continues && !size_changed;
+        // The first shot has nothing to continue.
+        let continues = s.continues && !out.is_empty();
+        let mut shot = match old.iter().position(|o| o.id == id) {
+            Some(at) => {
+                let o = &old[at];
+                // A shot that continues another was made from that shot's last picture: after a
+                // move it stands behind a different one and has to be made again.
+                let before = |list: &[Shot], at: usize| at.checked_sub(1).map(|i| list[i].id.clone());
+                let moved = continues && before(old, at) != out.last().map(|l| l.id.clone());
+                let same = o.prompt == prompt && o.frames == frames && o.continues == continues && !size_changed && !moved;
                 let state = if same || o.state == "empty" { o.state.clone() } else { "changed".into() };
-                Shot {
-                    id,
-                    prompt,
-                    frames,
-                    state,
-                    error: if same { o.error.clone() } else { None },
-                    seconds: o.seconds,
-                    trim_start,
-                    trim_end,
-                    continues: s.continues,
-                }
+                Shot { prompt, frames, state, error: if same { o.error.clone() } else { None }, continues, ..o.clone() }
             }
-            None => Shot { id, prompt, frames, state: empty(), error: None, seconds: None, trim_start, trim_end, continues: s.continues },
+            None => Shot { id, prompt, frames, state: empty(), continues, ..Shot::default() },
         };
+        // Trims leave at least half a second of the shot.
+        let length = shot.length();
+        shot.trim_start = s.trim_start.clamp(0.0, (length - 0.5).max(0.0));
+        shot.trim_end = s.trim_end.clamp(0.0, (length - 0.5 - shot.trim_start).max(0.0));
         out.push(shot);
     }
     Ok(out)
@@ -560,11 +572,14 @@ async fn work(app: Shared) {
                 let to = clip_path(&p, &shot);
                 to.parent().is_some_and(|d| std::fs::create_dir_all(d).is_ok()) && std::fs::copy(&from, &to).is_ok()
             });
+        // What the clip really holds, and a small picture of it for the timeline.
+        let frames = if made { look_at(&app, &clip_path(&p, &shot), &poster_path(&p, &shot)).await } else { None };
         set_shot(&app, &project, &shot, |s| {
             if made {
                 s.state = "done".into();
                 s.error = None;
                 s.seconds = Some(seconds);
+                s.made_frames = frames;
             } else if state == "cancelled" {
                 // Stopped by the person: the shot is as it was before.
                 s.error = None;
@@ -574,7 +589,15 @@ async fn work(app: Shared) {
             }
         });
         if made {
-            app.record("studio_shot_made", json!({"frames": s.frames, "seconds": seconds}));
+            app.record("studio_shot_made", json!({"frames": s.frames, "seconds": seconds, "continues": s.continues}));
+            // A made shot that continues this one started from the old last picture.
+            if let Some(mut p) = load(&app, &project) {
+                let after = p.shots.iter().position(|x| x.id == shot).map(|i| i + 1);
+                if let Some(next) = after.and_then(|i| p.shots.get_mut(i)).filter(|n| n.continues && n.state == "done") {
+                    next.state = "changed".into();
+                    store(&mut p).ok();
+                }
+            }
         }
         // The last waiting shot of a film that exports by itself: join it now, with the screen open or not.
         if made && !with_queue(|q| q.waiting.iter().any(|(pid, _)| *pid == project)) {
@@ -615,16 +638,58 @@ async fn last_picture(app: &Shared, clip: &FsPath) -> Option<String> {
     Some(base64::engine::general_purpose::STANDARD.encode(bytes?))
 }
 
+/// The number after the last "frame=" in what ffmpeg printed while it read a clip.
+fn frames_read(text: &str) -> Option<u32> {
+    let rest = text.rsplit("frame=").next().filter(|r| r.len() < text.len())?;
+    rest.trim_start().split(|c: char| !c.is_ascii_digit()).next()?.parse().ok().filter(|n| *n > 0)
+}
+
+/// Reads a clip once: writes a small picture from its middle to `poster` and answers how many
+/// frames it has. `None` when the tool for it is missing or cannot read the clip.
+async fn look_at(app: &Shared, clip: &FsPath, poster: &FsPath) -> Option<u32> {
+    let ffmpeg = crate::engine_tool(app, crate::EngineKind::Ffmpeg, "ffmpeg").await.ok()?;
+    let counted = tokio::process::Command::new(&ffmpeg)
+        .args(["-hide_banner", "-loglevel", "error", "-stats", "-i"])
+        .arg(clip)
+        .args(["-map", "0:v:0", "-f", "null", "-"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .output()
+        .await
+        .ok()?;
+    let frames = frames_read(&String::from_utf8_lossy(&counted.stderr));
+    let middle = format!("{:.3}", frames.unwrap_or(0) as f32 / 48.0);
+    tokio::process::Command::new(&ffmpeg)
+        .args(["-hide_banner", "-loglevel", "error", "-y", "-ss", &middle, "-i"])
+        .arg(clip)
+        .args(["-frames:v", "1", "-update", "1", "-vf", "scale=320:-2", "-q:v", "4"])
+        .arg(poster)
+        .stdin(std::process::Stdio::null())
+        .status()
+        .await
+        .ok();
+    frames
+}
+
 async fn clip(State(app): State<Shared>, Path((id, name)): Path<(String, String)>) -> Response {
-    let Some(shot) = name.strip_suffix(".webm").filter(|s| valid_id(s)) else {
-        return fail(StatusCode::BAD_REQUEST, "bad clip name");
+    let (shot, picture) = match (name.strip_suffix(".webm"), name.strip_suffix(".jpg")) {
+        (Some(shot), _) if valid_id(shot) => (shot, false),
+        (_, Some(shot)) if valid_id(shot) => (shot, true),
+        _ => return fail(StatusCode::BAD_REQUEST, "bad clip name"),
     };
     let Some(p) = load(&app, &id) else {
         return fail(StatusCode::NOT_FOUND, "no such film");
     };
-    match tokio::fs::read(clip_path(&p, shot)).await {
+    let clip = clip_path(&p, shot);
+    let file = if picture { poster_path(&p, shot) } else { clip.clone() };
+    // A film made before pictures were kept gets them when they are first asked for.
+    if picture && !file.is_file() && clip.is_file() {
+        let frames = look_at(&app, &clip, &file).await;
+        set_shot(&app, &id, shot, |s| s.made_frames = s.made_frames.or(frames));
+    }
+    match tokio::fs::read(file).await {
         Ok(bytes) => Response::builder()
-            .header(header::CONTENT_TYPE, "video/webm")
+            .header(header::CONTENT_TYPE, if picture { "image/jpeg" } else { "video/webm" })
             .header(header::CACHE_CONTROL, "no-store")
             .body(Body::from(bytes))
             .unwrap(),
@@ -758,7 +823,7 @@ fn concat_list(p: &Project) -> (String, usize) {
         if !path.is_file() {
             continue;
         }
-        let length = s.frames as f32 / 24.0;
+        let length = s.length();
         list.push_str(&format!("file '{}'\n", path.to_string_lossy().replace('\'', "'\\''")));
         if s.trim_start > 0.0 {
             list.push_str(&format!("inpoint {:.3}\n", s.trim_start));
@@ -900,9 +965,7 @@ mod tests {
             state: state.into(),
             error: None,
             seconds: Some(200.0),
-            trim_start: 0.0,
-            trim_end: 0.0,
-            continues: false,
+            ..Shot::default()
         }
     }
 
@@ -1005,7 +1068,57 @@ mod tests {
         )
         .unwrap();
         assert!(kept[0].trim_start <= 49.0 / 24.0 - 0.5 && kept[0].trim_end == 0.0);
+        // A clip is as long as the model made it, which is what the trims are held against.
+        let mut long = shot("d4", "x", "done");
+        long.frames = 49;
+        long.made_frames = Some(56);
+        assert_eq!(long.length(), 56.0 / 24.0);
+        long.state = "empty".into();
+        assert_eq!(long.length(), 49.0 / 24.0);
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    fn asked(id: &str, prompt: &str, continues: bool) -> ShotIn {
+        ShotIn { id: Some(id.into()), prompt: prompt.into(), frames: Some(121), trim_start: 0.0, trim_end: 0.0, continues }
+    }
+
+    #[test]
+    fn a_shot_that_continues_another_is_made_again_after_a_move() {
+        let mut b = shot("b2", "the fox stops", "done");
+        b.continues = true;
+        let mut d = shot("d4", "the boat turns", "done");
+        d.continues = true;
+        let old = vec![shot("a1", "a fox", "done"), b, shot("c3", "a boat", "done"), d];
+        let states = |order: &[(&str, &str, bool)]| {
+            let new = order.iter().map(|(id, prompt, continues)| asked(id, prompt, *continues)).collect();
+            merge_shots(&old, new, false).unwrap().into_iter().map(|s| (s.state, s.continues)).collect::<Vec<_>>()
+        };
+        let (done, changed) = (|c| ("done".to_string(), c), |c| ("changed".to_string(), c));
+        // Nothing moved: nothing changes.
+        assert_eq!(
+            states(&[("a1", "a fox", false), ("b2", "the fox stops", true), ("c3", "a boat", false), ("d4", "the boat turns", true)]),
+            [done(false), done(true), done(false), done(true)]
+        );
+        // The two scenes change places as a whole: each shot still follows the same one.
+        assert_eq!(
+            states(&[("c3", "a boat", false), ("d4", "the boat turns", true), ("a1", "a fox", false), ("b2", "the fox stops", true)]),
+            [done(false), done(true), done(false), done(true)]
+        );
+        // A continuing shot behind a different shot is made again; so is one that lost its place behind the first.
+        assert_eq!(
+            states(&[("a1", "a fox", false), ("c3", "a boat", false), ("b2", "the fox stops", true), ("d4", "the boat turns", true)]),
+            [done(false), done(false), changed(true), changed(true)]
+        );
+        // The first shot of a film continues nothing.
+        assert_eq!(states(&[("b2", "the fox stops", true), ("a1", "a fox", false)]), [changed(false), done(false)]);
+    }
+
+    #[test]
+    fn the_frames_of_a_clip_are_read_from_what_the_tool_prints() {
+        assert_eq!(frames_read("frame=   12 fps=0.0 q=-0.0 size=N/A\rframe=   56 fps=0.0 q=-0.0 Lsize=N/A time=00:00:02.33"), Some(56));
+        assert_eq!(frames_read("frame=121 fps=30"), Some(121));
+        assert_eq!(frames_read("clip.webm: Invalid data found when processing input"), None);
+        assert_eq!(frames_read(""), None);
     }
 
     #[test]

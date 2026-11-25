@@ -5,7 +5,9 @@
 	import { videoLengthsOf, videoSizesOf, type SizeName } from '#lib/chat.svelte.ts';
 	import { plain } from '#lib/errors.ts';
 	import { app } from '#lib/state.svelte.ts';
+	import { hasClip, remadeByMove, reorder, shotSeconds } from '#lib/studio.ts';
 	import Icon from '#lib/components/Icon.svelte';
+	import StudioTimeline from '#lib/components/StudioTimeline.svelte';
 
 	// Studio: a film is a list of shots in a folder. Each shot is one description and one clip;
 	// the video model makes them one after another, so a long film renders on its own. The chat
@@ -29,7 +31,7 @@
 	const shape = $derived((Object.keys(shapes) as SizeName[]).find((n) => `${shapes[n].width}x${shapes[n].height}` === project?.size) ?? 'landscape');
 	const done = $derived(project?.shots.filter((s) => s.state === 'done') ?? []);
 	const todo = $derived(project?.shots.filter((s) => s.state !== 'done' && s.prompt.trim()).length ?? 0);
-	const total = $derived(project ? project.shots.reduce((n, s) => n + s.frames / 24, 0) : 0);
+	const total = $derived(project ? project.shots.reduce((n, s) => n + shotSeconds(s), 0) : 0);
 	const clock = (s: number) => (s >= 60 ? `${Math.floor(s / 60)} min ${Math.round(s % 60)} s` : `${Math.round(s)} s`);
 	const say = (e: unknown) => plain(e).text;
 	const tilde = (path: string) => path.replace(/^\/Users\/[^/]+/, '~');
@@ -131,6 +133,34 @@
 		for (const s of done) clipOf(s);
 	});
 
+	// One small picture per made shot, for the timeline.
+	const pictureUrls = new Map<string, string>();
+	let posters = $state<Record<string, string>>({});
+	async function posterOf(shot: StudioShot) {
+		if (!project || !shot.id || !hasClip(shot)) return;
+		const key = `${shot.id}:${shot.seconds ?? 0}`;
+		if (pictureUrls.has(key)) return;
+		pictureUrls.set(key, '');
+		try {
+			const url = URL.createObjectURL(await api.studioPoster(project.id, shot.id));
+			pictureUrls.set(key, url);
+			posters = { ...posters, [shot.id]: url };
+		} catch {
+			pictureUrls.delete(key);
+		}
+	}
+	$effect(() => {
+		for (const s of project?.shots ?? []) posterOf(s);
+	});
+
+	// The shot the timeline and the list both point at.
+	let selected = $state(-1);
+	function select(i: number, scroll = true) {
+		selected = i;
+		const id = project?.shots[i]?.id;
+		if (scroll && id) document.getElementById(`shot-${id}`)?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+	}
+
 	async function refresh() {
 		try {
 			const all = await api.studioList();
@@ -196,12 +226,20 @@
 		saveSoon();
 	}
 
-	function move(i: number, by: number) {
+	// A move that sends made shots back to be made again is asked about first.
+	let pendingMove = $state<{ from: number; to: number; remade: number[] } | null>(null);
+	function move(from: number, to: number) {
+		if (!project || to < 0 || to >= project.shots.length || to === from) return;
+		const remade = remadeByMove(project.shots, from, to);
+		if (remade.length > 0) pendingMove = { from, to, remade };
+		else moveNow(from, to);
+	}
+	function moveNow(from: number, to: number) {
+		pendingMove = null;
 		if (!project) return;
-		const to = i + by;
-		if (to < 0 || to >= project.shots.length) return;
-		const [shot] = project.shots.splice(i, 1);
-		project.shots.splice(to, 0, shot);
+		project.shots = reorder(project.shots, from, to);
+		selected = to;
+		app.track('studio_shot_moved', { by: to - from });
 		saveSoon();
 	}
 
@@ -293,7 +331,7 @@
 	onDestroy(() => {
 		clearInterval(poll);
 		clearTimeout(timer);
-		for (const url of urls.values()) URL.revokeObjectURL(url);
+		for (const url of [...urls.values(), ...pictureUrls.values()]) if (url) URL.revokeObjectURL(url);
 	});
 
 	const stateWords: Record<StudioShot['state'], string> = { empty: 'Not made', queued: 'Waiting', making: 'Being made', done: 'Made', failed: 'Did not work', changed: 'Changed' };
@@ -419,6 +457,21 @@
 				</div>
 			{/if}
 
+			{#if project.shots.length > 0}
+				<StudioTimeline shots={project.shots} {posters} {selected} onselect={select} onmove={move} />
+			{/if}
+			{#if pendingMove}
+				{@const n = pendingMove.remade.length}
+				<p class="ask" role="alert">
+					<span>
+						{n === 1 ? `Shot ${pendingMove.remade[0] + 1} continues the shot before it.` : `${n} shots continue the shot before them.`}
+						After this move {n === 1 ? 'it starts' : 'they start'} from a different picture, so {n === 1 ? 'it has' : 'they have'} to be made again.
+					</span>
+					<button class="btn" onclick={() => pendingMove && moveNow(pendingMove.from, pendingMove.to)}>Move it</button>
+					<button class="btn quiet" onclick={() => (pendingMove = null)}>Leave it</button>
+				</p>
+			{/if}
+
 			<div class="idea">
 				<textarea bind:value={idea} rows="2" placeholder="What is the film about? For example: a red fox finds a paper boat in a snowy forest and follows it down a stream" aria-label="What the film is about"></textarea>
 				<p class="row">
@@ -430,7 +483,7 @@
 
 			<ol class="shots">
 				{#each project.shots as shot, i (shot.id || i)}
-					<li class="shot" class:making={shot.state === 'making'}>
+					<li class="shot" class:making={shot.state === 'making'} class:on={i === selected} id="shot-{shot.id}" onfocusin={() => select(i, false)}>
 						<span class="n">{i + 1}</span>
 						<div class="what">
 							<textarea bind:value={shot.prompt} oninput={saveSoon} rows="3" placeholder="What is seen, what moves, the place, the light, the sound" aria-label="Shot {i + 1}"></textarea>
@@ -447,8 +500,8 @@
 									<label class="trim" title="Seconds cut from the start and from the end of this shot in the exported film">Cut <input type="number" min="0" max="9" step="0.1" bind:value={shot.trim_start} oninput={saveSoon} aria-label="Seconds cut from the start of shot {i + 1}" /> <input type="number" min="0" max="9" step="0.1" bind:value={shot.trim_end} oninput={saveSoon} aria-label="Seconds cut from the end of shot {i + 1}" /> s</label>
 								{/if}
 								<span class="grow"></span>
-								<button class="tool" onclick={() => move(i, -1)} disabled={i === 0} title="Move up" aria-label="Move shot {i + 1} up">↑</button>
-								<button class="tool" onclick={() => move(i, 1)} disabled={i === project.shots.length - 1} title="Move down" aria-label="Move shot {i + 1} down">↓</button>
+								<button class="tool" onclick={() => move(i, i - 1)} disabled={i === 0} title="Move up" aria-label="Move shot {i + 1} up">↑</button>
+								<button class="tool" onclick={() => move(i, i + 1)} disabled={i === project.shots.length - 1} title="Move down" aria-label="Move shot {i + 1} down">↓</button>
 								{#if shot.id && shot.prompt.trim() && video}<button class="tool" onclick={() => make([shot.id])} disabled={shot.state === 'making' || shot.state === 'queued'} title={shot.state === 'done' ? 'Make this shot again' : 'Make this shot'}>{shot.state === 'done' ? 'Again' : 'Make'}</button>{/if}
 								<button class="tool" onclick={() => removeShot(i)} title="Remove this shot" aria-label="Remove shot {i + 1}"><Icon name="trash" size={13} /></button>
 							</p>
@@ -485,6 +538,7 @@
 		margin: 0 auto;
 		padding: 8px var(--gutter) 48px;
 		display: grid;
+		grid-template-columns: minmax(0, 1fr);
 		gap: 16px;
 		align-content: start;
 	}
@@ -684,6 +738,7 @@
 
 	.path {
 		min-width: 0;
+		max-width: 100%;
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
@@ -794,8 +849,28 @@
 		border-radius: 14px;
 	}
 
+	.shot.on {
+		border-color: var(--line);
+		background: var(--well);
+	}
+
 	.shot.making {
 		border-color: var(--accent);
+	}
+
+	.ask {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: 8px;
+		padding: 10px 12px;
+		border-radius: 10px;
+		background: var(--warn-soft);
+		font-size: 13.5px;
+	}
+
+	.ask span {
+		flex: 1 1 320px;
 	}
 
 	.n {

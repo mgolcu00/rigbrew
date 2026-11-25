@@ -499,6 +499,8 @@ export interface StudioShot {
 	state: 'empty' | 'queued' | 'making' | 'done' | 'failed' | 'changed';
 	error?: string;
 	seconds?: number;
+	/** The frames its clip really has: the video model rounds a length to what it can make. */
+	made_frames?: number;
 	/** Seconds cut from the start and the end when the film is played or exported. */
 	trim_start?: number;
 	trim_end?: number;
@@ -560,6 +562,8 @@ export const studioExport = (id: string, music?: string, volume?: number) =>
 	json<StudioExport>('POST', `/v1/studio/projects/${enc(id)}/export`, music ? { music, music_volume: volume ?? 0.5 } : {});
 export const studioExportState = (id: string) => json<StudioExport>('GET', `/v1/studio/projects/${enc(id)}/export`);
 export const studioClip = async (id: string, shot: string) => (await send('GET', `/v1/studio/projects/${enc(id)}/clips/${enc(shot)}.webm`)).blob();
+/** One small picture of a made shot. */
+export const studioPoster = async (id: string, shot: string) => (await send('GET', `/v1/studio/projects/${enc(id)}/clips/${enc(shot)}.jpg`)).blob();
 
 // --- Code: tasks a model works on in a folder (the loop runs in the service) ------------------
 
