@@ -413,6 +413,7 @@ mod tests {
             listen: tokio::sync::Mutex::new(()),
             videos: std::sync::Mutex::new(std::collections::HashMap::new()),
             image_progress: std::sync::Mutex::new(None),
+            agent: crate::agent::Agents::load(&dir),
         };
         (app, dir)
     }

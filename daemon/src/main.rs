@@ -38,7 +38,13 @@
 //!   POST   /v1/videos/generations         {"model", "prompt", "size", "frames", "steps", "seed"}: a clip, made in the background
 //!   GET    /v1/videos/jobs[/{id}]         progress of clips; DELETE /v1/videos/jobs/{id} stops one
 //!   GET    /v1/videos/files/{id}.webm     a saved clip; DELETE removes it
+//!   POST   /v1/agent/tasks                Code: {"folder", "prompt", "model", "mode", "web"} starts a task on a folder
+//!   GET    /v1/agent/tasks[/{id}]         tasks (?folder=), or one with its steps; DELETE stops it (?remove=true forgets it)
+//!   POST   /v1/agent/tasks/{id}/approve   {"call", "allow", "always"}: answer a step that waits for the person
+//!   POST   /v1/agent/tasks/{id}/message   {"text"}: continue the task
+//!   GET    /v1/agent/skills               the skills a task can use (?folder=)
 
+mod agent;
 mod cloud;
 mod library;
 mod speech;
@@ -169,6 +175,8 @@ struct App {
     videos: Mutex<HashMap<String, video::VideoJob>>,
     /// Where the picture being made is: stage and steps, for the app's card.
     image_progress: Mutex<Option<rigbrew_core::engine::VideoProgress>>,
+    /// Code tasks: the ones working now and the finished ones.
+    agent: agent::Agents,
 }
 
 type Shared = Arc<App>;
@@ -649,30 +657,71 @@ async fn ensure_engine(app: &App, package: &Package) -> Result<(u16, String, Str
     Ok(out)
 }
 
-async fn chat(State(app): State<Shared>, Json(mut body): Json<Value>) -> Response {
+/// One request to the chat engine of `package`: the model is loaded if it is not, the prompt is
+/// recorded, and the engine's answer comes back unread together with the variant that runs.
+async fn engine_chat(app: &App, package: &Package, mut body: Value) -> Result<(reqwest::Response, String), Box<Response>> {
+    let (port, key, variant) = ensure_engine(app, package).await?;
+    app.record("prompt", json!({"package": package.id, "variant": variant, "modality": "chat", "messages": body["messages"]}));
+    // The engine serves a single model; its name there is irrelevant.
+    if let Some(obj) = body.as_object_mut() {
+        obj.remove("model");
+    }
+    match app.http.post(format!("http://127.0.0.1:{port}/v1/chat/completions")).bearer_auth(key).json(&body).send().await {
+        Ok(resp) => Ok((resp, variant)),
+        Err(e) => {
+            app.record("error", json!({"where": "chat", "message": e.to_string()}));
+            Err(Box::new(fail(StatusCode::BAD_GATEWAY, e.to_string())))
+        }
+    }
+}
+
+/// The message inside an error answer (`{"error": {"message"}}`), or the text as it is.
+fn error_message(raw: &[u8]) -> String {
+    let text = String::from_utf8_lossy(raw);
+    serde_json::from_str::<Value>(&text)
+        .ok()
+        .and_then(|v| v["error"]["message"].as_str().map(str::to_string))
+        .unwrap_or_else(|| text.chars().take(300).collect())
+}
+
+/// A whole chat answer, not streamed, for work the service does itself (a Code task). It goes
+/// the same way as a chat from the app: same engine, same memory rules, same events.
+async fn complete(app: &App, package: &Package, body: Value) -> Result<Value, String> {
+    let started = std::time::Instant::now();
+    let (resp, variant) = match engine_chat(app, package, body).await {
+        Ok(v) => v,
+        Err(resp) => {
+            let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024).await.unwrap_or_default();
+            return Err(error_message(&bytes));
+        }
+    };
+    let ok = resp.status().is_success();
+    let raw = resp.bytes().await.map_err(|e| e.to_string())?;
+    if !ok {
+        let message = error_message(&raw);
+        app.record("error", json!({"where": "chat", "message": message}));
+        return Err(message);
+    }
+    let mut answer = summarize_answer(&String::from_utf8_lossy(&raw), false);
+    answer["package"] = json!(package.id);
+    answer["variant"] = json!(variant);
+    answer["seconds"] = json!(started.elapsed().as_secs_f64());
+    app.record("response", answer);
+    touch(app, &package.id).await;
+    serde_json::from_slice(&raw).map_err(|_| "The model's answer could not be read.".to_string())
+}
+
+async fn chat(State(app): State<Shared>, Json(body): Json<Value>) -> Response {
     let Some(model) = body["model"].as_str().map(str::to_string) else {
         return fail(StatusCode::BAD_REQUEST, "\"model\" is required");
     };
     let Some(package) = app.manifest.package(&model).filter(|p| p.modality == Modality::Chat) else {
         return fail(StatusCode::NOT_FOUND, format!("no chat package {model}"));
     };
-    let (port, key, variant) = match ensure_engine(&app, package).await {
+    let started = std::time::Instant::now();
+    let (resp, variant) = match engine_chat(&app, package, body).await {
         Ok(v) => v,
         Err(resp) => return *resp,
-    };
-    app.record("prompt", json!({"package": package.id, "variant": variant, "modality": "chat", "messages": body["messages"]}));
-    // The engine serves a single model; its name there is irrelevant.
-    if let Some(obj) = body.as_object_mut() {
-        obj.remove("model");
-    }
-    let started = std::time::Instant::now();
-    let upstream = app.http.post(format!("http://127.0.0.1:{port}/v1/chat/completions")).bearer_auth(key).json(&body).send().await;
-    let resp = match upstream {
-        Ok(resp) => resp,
-        Err(e) => {
-            app.record("error", json!({"where": "chat", "message": e.to_string()}));
-            return fail(StatusCode::BAD_GATEWAY, e.to_string());
-        }
     };
     let status = StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
     let content_type =
@@ -1112,6 +1161,7 @@ async fn main() {
         listen: tokio::sync::Mutex::new(()),
         videos: Mutex::new(HashMap::new()),
         image_progress: Mutex::new(None),
+        agent: agent::Agents::load(&root),
     });
     tokio::spawn(cloud::sync_loop(app.clone()));
     tokio::spawn(idle_loop(app.clone()));
@@ -1168,6 +1218,11 @@ async fn main() {
         .route("/v1/videos/jobs", get(video::jobs))
         .route("/v1/videos/jobs/{id}", get(video::job).delete(video::cancel))
         .route("/v1/videos/files/{name}", get(video::file_get).delete(video::file_delete))
+        .route("/v1/agent/tasks", get(agent::tasks).post(agent::task_create))
+        .route("/v1/agent/tasks/{id}", get(agent::task_get).delete(agent::task_delete))
+        .route("/v1/agent/tasks/{id}/approve", post(agent::task_approve))
+        .route("/v1/agent/tasks/{id}/message", post(agent::task_message))
+        .route("/v1/agent/skills", get(agent::skills_list))
         .layer(middleware::from_fn_with_state(app.clone(), auth))
         // The app's webview is a different origin. Only the app's own origins may call the API;
         // the bearer token is still required. Preflight requests carry no token and pass here.
