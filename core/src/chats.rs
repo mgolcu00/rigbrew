@@ -3,6 +3,9 @@
 //! The app owns the shape of a conversation; this store keeps it as an opaque JSON document
 //! with a title and timestamps, in its own SQLite file next to the event queue. Nothing here
 //! leaves the machine.
+//!
+//! A title also says who wrote it (`title_by`): "words" (the first words of the chat), "model"
+//! (the chat model named it) or "person". Chats from before that was kept have it empty.
 
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -44,6 +47,8 @@ impl From<rusqlite::Error> for ChatError {
 pub struct ChatMeta {
     pub id: String,
     pub title: String,
+    /// Who wrote the title: "words", "model", "person", or empty when it is not known.
+    pub title_by: String,
     pub created_ms: i64,
     pub updated_ms: i64,
     /// Size of the stored document in bytes.
@@ -54,11 +59,15 @@ pub struct ChatMeta {
 pub struct Chat {
     pub id: String,
     pub title: String,
+    pub title_by: String,
     pub created_ms: i64,
     pub updated_ms: i64,
     /// The app's own JSON, returned as stored.
     pub data: serde_json::Value,
 }
+
+/// Who can have written a title.
+pub const TITLE_BY: [&str; 3] = ["words", "model", "person"];
 
 pub struct ChatStore {
     db: Connection,
@@ -96,14 +105,27 @@ impl ChatStore {
              );
              CREATE INDEX IF NOT EXISTS chats_updated ON chats (updated_ms DESC);",
         )?;
+        // A store from before titles said who wrote them gets the column; its chats keep theirs.
+        let has_title_by = db.prepare("SELECT 1 FROM pragma_table_info('chats') WHERE name = 'title_by'")?.exists([])?;
+        if !has_title_by {
+            db.execute_batch("ALTER TABLE chats ADD COLUMN title_by TEXT NOT NULL DEFAULT '';")?;
+        }
         Ok(ChatStore { db })
     }
 
     /// All chats, most recently changed first.
     pub fn list(&self) -> Result<Vec<ChatMeta>, ChatError> {
-        let mut stmt = self.db.prepare("SELECT id, title, created_ms, updated_ms, length(data) FROM chats ORDER BY updated_ms DESC, id")?;
+        let mut stmt =
+            self.db.prepare("SELECT id, title, created_ms, updated_ms, length(data), title_by FROM chats ORDER BY updated_ms DESC, id")?;
         let rows = stmt.query_map([], |r| {
-            Ok(ChatMeta { id: r.get(0)?, title: r.get(1)?, created_ms: r.get(2)?, updated_ms: r.get(3)?, size: r.get::<_, i64>(4)? as u64 })
+            Ok(ChatMeta {
+                id: r.get(0)?,
+                title: r.get(1)?,
+                title_by: r.get(5)?,
+                created_ms: r.get(2)?,
+                updated_ms: r.get(3)?,
+                size: r.get::<_, i64>(4)? as u64,
+            })
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
@@ -114,21 +136,36 @@ impl ChatStore {
         }
         let row = self
             .db
-            .query_row("SELECT id, title, created_ms, updated_ms, data FROM chats WHERE id = ?1", params![id], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?, r.get::<_, i64>(3)?, r.get::<_, String>(4)?))
+            .query_row("SELECT id, title, created_ms, updated_ms, data, title_by FROM chats WHERE id = ?1", params![id], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, i64>(3)?,
+                    r.get::<_, String>(4)?,
+                    r.get::<_, String>(5)?,
+                ))
             })
             .optional()?;
-        Ok(row.map(|(id, title, created_ms, updated_ms, data)| Chat {
+        Ok(row.map(|(id, title, created_ms, updated_ms, data, title_by)| Chat {
             id,
             title,
+            title_by,
             created_ms,
             updated_ms,
             data: serde_json::from_str(&data).unwrap_or(serde_json::Value::Null),
         }))
     }
 
-    /// Creates or replaces a chat. The creation time of an existing chat is kept.
+    /// Creates or replaces a chat. The creation time of an existing chat is kept, and so is who
+    /// wrote its title.
     pub fn put(&self, id: &str, title: &str, data: &serde_json::Value) -> Result<ChatMeta, ChatError> {
+        self.put_titled(id, title, None, data)
+    }
+
+    /// As `put`, and says who wrote the title: "words", "model" or "person". `None` (or anything
+    /// else) keeps what the chat has.
+    pub fn put_titled(&self, id: &str, title: &str, title_by: Option<&str>, data: &serde_json::Value) -> Result<ChatMeta, ChatError> {
         if !valid_id(id) {
             return Err(ChatError::BadId);
         }
@@ -138,14 +175,17 @@ impl ChatStore {
         }
         let title: String = title.trim().chars().take(200).collect();
         let title = if title.is_empty() { "Untitled chat".to_string() } else { title };
+        let title_by = title_by.filter(|by| TITLE_BY.contains(by));
         let now = now_ms();
         self.db.execute(
-            "INSERT INTO chats (id, title, created_ms, updated_ms, data) VALUES (?1, ?2, ?3, ?3, ?4)
-             ON CONFLICT(id) DO UPDATE SET title = excluded.title, updated_ms = excluded.updated_ms, data = excluded.data",
-            params![id, title, now, text],
+            "INSERT INTO chats (id, title, created_ms, updated_ms, data, title_by) VALUES (?1, ?2, ?3, ?3, ?4, coalesce(?5, ''))
+             ON CONFLICT(id) DO UPDATE SET title = excluded.title, updated_ms = excluded.updated_ms, data = excluded.data,
+               title_by = coalesce(?5, chats.title_by)",
+            params![id, title, now, text, title_by],
         )?;
-        let created_ms = self.db.query_row("SELECT created_ms FROM chats WHERE id = ?1", params![id], |r| r.get(0))?;
-        Ok(ChatMeta { id: id.to_string(), title, created_ms, updated_ms: now, size: text.len() as u64 })
+        let (created_ms, title_by) =
+            self.db.query_row("SELECT created_ms, title_by FROM chats WHERE id = ?1", params![id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(ChatMeta { id: id.to_string(), title, title_by, created_ms, updated_ms: now, size: text.len() as u64 })
     }
 
     /// Returns whether a chat was removed.
@@ -199,6 +239,42 @@ mod tests {
         let list = s.list().unwrap();
         assert_eq!(list[0].id, "a");
         assert_eq!(list[0].title, "A renamed");
+    }
+
+    #[test]
+    fn who_wrote_the_title_is_kept_until_it_is_said_again() {
+        let s = ChatStore::in_memory().unwrap();
+        assert_eq!(s.put("a", "First words", &json!(1)).unwrap().title_by, "");
+        assert_eq!(s.put_titled("a", "A better name", Some("model"), &json!(1)).unwrap().title_by, "model");
+        // A save that does not say (an older app) keeps it, and so does a word that means nothing.
+        assert_eq!(s.put("a", "A better name", &json!(2)).unwrap().title_by, "model");
+        assert_eq!(s.put_titled("a", "A better name", Some("robot"), &json!(2)).unwrap().title_by, "model");
+        assert_eq!(s.put_titled("a", "Mine", Some("person"), &json!(2)).unwrap().title_by, "person");
+        assert_eq!(s.list().unwrap()[0].title_by, "person");
+        assert_eq!(s.get("a").unwrap().unwrap().title_by, "person");
+    }
+
+    #[test]
+    fn a_store_from_before_keeps_its_chats() {
+        let dir = std::env::temp_dir().join(format!("rigbrew-chats-{}-{}", std::process::id(), now_ms()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("chats.db");
+        {
+            let old = Connection::open(&path).unwrap();
+            old.execute_batch(
+                "CREATE TABLE chats (id TEXT PRIMARY KEY, title TEXT NOT NULL, created_ms INTEGER NOT NULL, updated_ms INTEGER NOT NULL, data TEXT NOT NULL);
+                 INSERT INTO chats VALUES ('old', 'From before', 5, 6, '{\"messages\":[]}');",
+            )
+            .unwrap();
+        }
+        // Opened twice: the column is added once, and the chat is as it was.
+        for _ in 0..2 {
+            let s = ChatStore::open(&path).unwrap();
+            let list = s.list().unwrap();
+            assert_eq!((list.len(), list[0].title.as_str(), list[0].title_by.as_str(), list[0].created_ms), (1, "From before", "", 5));
+            assert!(s.get("old").unwrap().unwrap().data["messages"].is_array());
+        }
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

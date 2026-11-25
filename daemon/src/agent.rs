@@ -13,6 +13,7 @@
 //!
 //!   POST   /v1/agent/tasks                {folder, prompt, model?, mode, web?, connectors?} starts a task
 //!   GET    /v1/agent/tasks?folder=        tasks, newest first
+//!   PUT    /v1/agent/tasks/{id}           {title}: the person names the task; the name is then theirs
 //!   GET    /v1/agent/tasks/{id}           state, steps so far, what waits for an answer, and the
 //!                                         answer being written (`writing`); ?brief=true leaves the steps out
 //!   POST   /v1/agent/tasks/{id}/approve   {call, allow, always?}
@@ -133,6 +134,10 @@ struct Task {
     id: String,
     folder: String,
     title: String,
+    /// Who wrote the title: "words" (the start of the request), "model" (see `crate::title`) or
+    /// "person". Empty in a task from before this was kept.
+    #[serde(default)]
+    title_by: String,
     model: String,
     mode: Mode,
     web: bool,
@@ -193,7 +198,7 @@ impl Task {
 
     fn summary(&self) -> Value {
         json!({
-            "id": self.id, "folder": self.folder, "title": self.title, "model": self.model, "mode": self.mode,
+            "id": self.id, "folder": self.folder, "title": self.title, "title_by": self.title_by, "model": self.model, "mode": self.mode,
             "state": self.state, "created_ms": self.created_ms, "updated_ms": self.updated_ms, "request_ms": self.request_ms,
             "steps": self.steps.len(),
         })
@@ -1098,6 +1103,59 @@ fn start(app: &Shared, id: &str, follow_up: bool) {
         id.to_string(),
         Running { abort: handle.abort_handle(), started: Instant::now(), approve: None, writing: Default::default() },
     );
+    drop(running);
+    if !follow_up {
+        tokio::spawn(name(app.clone(), id.to_string()));
+    }
+}
+
+/// What a new task is named after: its request and, when the model has said something by then,
+/// the start of that. `None` until the first turn is over or the task has ended.
+fn named_after(task: &Task) -> Option<(String, String)> {
+    let request = task.steps.iter().find_map(|s| match s {
+        Step::User { text } => Some(text.clone()),
+        _ => None,
+    })?;
+    if task.active() && task.turns == 0 {
+        return None;
+    }
+    let said = task.steps.iter().find_map(|s| match s {
+        Step::Model { text } | Step::Question { text } if !text.trim().is_empty() => Some(text.clone()),
+        _ => None,
+    });
+    let plan = task.extra.plan.iter().map(|p| p.text.as_str()).collect::<Vec<_>>().join("\n");
+    Some((request, said.unwrap_or(plan)))
+}
+
+/// Sets a title the model wrote, unless the person has named the task since.
+fn retitle(task: &mut Task, title: String) -> bool {
+    if task.title_by == "person" || title.trim().is_empty() {
+        return false;
+    }
+    task.title = title;
+    task.title_by = "model".into();
+    true
+}
+
+/// Names a new task once its first turn is over: the chat model is in memory by then. The work
+/// does not wait for this, and a task that never got a turn keeps the start of its request.
+async fn name(app: Shared, id: String) {
+    let mut about = None;
+    // A first turn can take minutes on a slow computer (the model is loaded for it).
+    for _ in 0..1800 {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let Some(task) = app.agent.get(&id) else { return };
+        about = named_after(&task);
+        if about.is_some() {
+            break;
+        }
+    }
+    let Some((request, said)) = about else { return };
+    let Some(task) = app.agent.get(&id) else { return };
+    let (title, by) = crate::title::write(&app, &request, &said, Some(&task.model), false).await;
+    if by == "model" {
+        app.agent.change(&id, |t| retitle(t, title));
+    }
 }
 
 /// Takes the task out of the running ones and records how it went.
@@ -1171,6 +1229,7 @@ pub async fn task_create(State(app): State<Shared>, Json(body): Json<NewTask>) -
         id: uuid::Uuid::new_v4().simple().to_string(),
         folder: folder.root().to_string_lossy().into_owned(),
         title: prompt.lines().next().unwrap_or("").chars().take(80).collect(),
+        title_by: "words".into(),
         model: package.id.clone(),
         mode: body.mode,
         web: body.web,
@@ -1306,6 +1365,28 @@ pub async fn task_message(State(app): State<Shared>, Path(id): Path<String>, Jso
                 None => not_found(),
             }
         }
+    }
+}
+
+#[derive(Deserialize)]
+pub struct NewTitle {
+    title: String,
+}
+
+/// The person names a task. From then on the name is theirs and nothing else changes it.
+pub async fn task_rename(State(app): State<Shared>, Path(id): Path<String>, Json(body): Json<NewTitle>) -> Response {
+    let title: String = body.title.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(80).collect();
+    if title.is_empty() {
+        return fail(StatusCode::BAD_REQUEST, "A task needs a name.");
+    }
+    let renamed = app.agent.change(&id, |t| {
+        t.title = title;
+        t.title_by = "person".into();
+        t.view()
+    });
+    match renamed {
+        Some(view) => Json(json!({"task": view})).into_response(),
+        None => not_found(),
     }
 }
 
@@ -1532,6 +1613,7 @@ mod tests {
             id: "0".repeat(32),
             folder: "/p".into(),
             title: "t".into(),
+            title_by: "words".into(),
             model: "steep-4b".into(),
             mode: Mode::Ask,
             web: false,
@@ -1580,6 +1662,7 @@ mod tests {
             id: "a".repeat(32),
             folder: "/p".into(),
             title: "t".into(),
+            title_by: "words".into(),
             model: "m".into(),
             mode: Mode::AutoEdits,
             web: true,
@@ -1613,6 +1696,37 @@ mod tests {
         assert_eq!(again.tasks.lock().unwrap().len(), 2);
         again.remove(&"b".repeat(32));
         assert_eq!(Agents::load(&root).tasks.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_task_is_named_after_its_first_turn_and_a_name_the_person_gave_stays() {
+        let mut task: Task = serde_json::from_value(json!({
+            "id": "0123456789abcdef0123456789abcdef", "folder": "/p", "title": "fix the login test", "model": "m", "mode": "ask",
+            "web": false, "state": "running", "created_ms": 1, "updated_ms": 1, "pending": null, "error": null,
+            "steps": [{"kind": "user", "text": "fix the login test, it fails on CI"}],
+        }))
+        .unwrap();
+        assert_eq!(task.title_by, "", "a task saved before titles said who wrote them still reads");
+        assert_eq!(named_after(&task), None, "not before the first turn is over");
+        task.turns = 1;
+        task.steps.push(Step::Model { text: "The test waits for a cookie that is never set.".into() });
+        let (request, said) = named_after(&task).unwrap();
+        assert_eq!(request, "fix the login test, it fails on CI");
+        assert!(said.starts_with("The test waits"));
+        // A task that ended before any turn is still named after its request.
+        task.steps.truncate(1);
+        task.turns = 0;
+        task.state = "failed".into();
+        assert_eq!(named_after(&task), Some(("fix the login test, it fails on CI".into(), String::new())));
+
+        assert!(retitle(&mut task, "Login test cookie fix".into()));
+        assert_eq!((task.title.as_str(), task.title_by.as_str()), ("Login test cookie fix", "model"));
+        assert!(!retitle(&mut task, "  ".into()));
+        task.title = "Mine".into();
+        task.title_by = "person".into();
+        assert!(!retitle(&mut task, "Something else".into()));
+        assert_eq!((task.title.as_str(), task.title_by.as_str()), ("Mine", "person"));
+        assert_eq!(task.summary()["title_by"], "person");
     }
 
     #[test]

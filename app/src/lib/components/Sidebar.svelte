@@ -7,6 +7,9 @@
 	import { code } from '#lib/code.svelte.ts';
 	import { connectors } from '#lib/connectors.svelte.ts';
 	import { guide } from '#lib/guide.svelte.ts';
+	import { codeRows, historyTabs, tabFrom, tabOf, type CodeRow, type HistoryTab } from '#lib/history.ts';
+	import { remembered } from '#lib/remember.ts';
+	import { studio } from '#lib/studio.svelte.ts';
 	import { skills } from '#lib/skills.svelte.ts';
 	import { mod } from '#lib/words.ts';
 	import AgentsSheet from './AgentsSheet.svelte';
@@ -15,7 +18,7 @@
 	import Mark from './Mark.svelte';
 	import SkillsSheet from './SkillsSheet.svelte';
 
-	// The one piece of chrome: a new chat, the few places, the chats, and who is using it.
+	// The one piece of chrome: a new chat, the few places, the history, and who is using it.
 	// Everything else is the conversation. It is also where the window is dragged from.
 	const places: { screen: Screen; name: string; icon: 'chat' | 'download' | 'video' | 'code' }[] = [
 		{ screen: 'code', name: 'Code', icon: 'code' },
@@ -61,6 +64,48 @@
 		app.go('chat');
 		chat.open(id, 'sidebar');
 	}
+
+	// The history: chats, the Code tasks of every folder, and films, one list at a time. The tab
+	// follows the screen, and the one chosen last is remembered.
+	onMount(() => void studio.refresh());
+	const tasks = $derived(codeRows(code.all));
+	const films = $derived(studio.films.filter((f) => !f.missing));
+	const shown = $derived(historyTabs.filter((t) => t.id === 'chat' || (t.id === 'code' ? tasks.length > 0 : films.length > 0)));
+	let chosen = $state<string | null>(remembered.get('sidebar.history'));
+	const tab = $derived(tabFrom(chosen, shown.map((t) => t.id)));
+	function choose(id: HistoryTab) {
+		chosen = id;
+		remembered.set('sidebar.history', id);
+	}
+	let screenBefore = app.screen;
+	$effect(() => {
+		const screen = app.screen;
+		if (screen === screenBefore) return;
+		screenBefore = screen;
+		const own = tabOf(screen);
+		if (own) choose(own);
+	});
+
+	/** Left and right move between the tabs, as in any row of tabs. */
+	function tabKey(event: KeyboardEvent) {
+		const step = event.key === 'ArrowRight' ? 1 : event.key === 'ArrowLeft' ? -1 : 0;
+		if (!step) return;
+		event.preventDefault();
+		const at = shown.findIndex((t) => t.id === tab);
+		const next = shown[(at + step + shown.length) % shown.length];
+		choose(next.id);
+		(event.currentTarget as HTMLElement).querySelector<HTMLButtonElement>(`[data-tab="${next.id}"]`)?.focus();
+	}
+
+	function openTask(row: CodeRow) {
+		app.go('code');
+		void code.show(row);
+	}
+
+	function openFilm(id: string) {
+		app.go('studio');
+		if (studio.id !== id) void studio.open(id);
+	}
 </script>
 
 <aside class="side" aria-label="Rigbrew">
@@ -70,7 +115,7 @@
 
 	<nav class="nav" aria-label="Places">
 		<button class="row strong" onclick={newChat} title="New chat ({mod}N)"><Icon name="compose" size={16} /><span>New chat</span></button>
-		<button class="row" onclick={() => (app.palette = true)} title="Search chats, models and actions ({mod}K)"><Icon name="search" size={16} /><span>Search</span></button>
+		<button class="row" onclick={() => (app.palette = true)} title="Search chats, tasks, models and actions ({mod}K)"><Icon name="search" size={16} /><span>Search</span></button>
 		{#each places as p (p.screen)}
 			<button class="row" class:current={app.screen === p.screen} aria-current={app.screen === p.screen ? 'page' : undefined} onclick={() => app.go(p.screen)}>
 				<Icon name={p.icon} size={16} /><span>{p.name}</span>
@@ -98,17 +143,51 @@
 	</nav>
 
 	<div class="chats scroll">
-		{#if chat.conversations.length > 0}
+		{#if shown.length > 1}
+			<!-- The tabs take the focus, not the row they are in. -->
+			<!-- svelte-ignore a11y_interactive_supports_focus -->
+			<div class="tabs" role="tablist" aria-label="History" onkeydown={tabKey}>
+				{#each shown as t (t.id)}
+					<button role="tab" id="history-{t.id}" data-tab={t.id} aria-selected={tab === t.id} aria-controls="history-list" tabindex={tab === t.id ? 0 : -1} onclick={() => choose(t.id)}>{t.name}</button>
+				{/each}
+			</div>
+		{:else if chat.conversations.length > 0}
 			<p class="head">Chats</p>
-			<ul>
+		{/if}
+		<ul id="history-list" aria-labelledby={shown.length > 1 ? `history-${tab}` : undefined}>
+			{#if tab === 'chat'}
 				{#each chat.conversations as c (c.id)}
 					<li>
 						<button class="row chat" class:current={app.screen === 'chat' && chat.activeId === c.id} onclick={() => open(c.id)} title={c.title}><span>{c.title}</span></button>
 						<button class="del" onclick={() => chat.remove(c.id)} disabled={chat.busy && chat.activeId === c.id} title="Delete this chat" aria-label="Delete chat “{c.title}”"><Icon name="trash" size={13} /></button>
 					</li>
 				{/each}
-			</ul>
-		{/if}
+			{:else if tab === 'code'}
+				{#each tasks as t (t.id)}
+					<li>
+						<button class="row chat" class:current={app.screen === 'code' && code.task?.id === t.id} onclick={() => openTask(t)} title="{t.title} · {t.folder}">
+							<span class="name">{t.title}</span>
+							<span class="where">{t.where}</span>
+							{#if t.mark === 'waiting'}
+								<span class="mark" title="Waits for your answer" role="img" aria-label="Waits for your answer"></span>
+							{:else if t.mark === 'working'}
+								<span class="mark live" title="Working" role="img" aria-label="Working"></span>
+							{/if}
+						</button>
+						<!-- A task that is working is stopped first, on its own screen. -->
+						{#if !t.mark}
+							<button class="del" onclick={() => code.remove(t.id)} title="Remove this task from the list" aria-label="Remove task “{t.title}”"><Icon name="trash" size={13} /></button>
+						{/if}
+					</li>
+				{/each}
+			{:else}
+				{#each films as f (f.id)}
+					<li>
+						<button class="row chat" class:current={app.screen === 'studio' && studio.id === f.id} onclick={() => openFilm(f.id)} title="{f.name} · {f.folder}"><span>{f.name}</span></button>
+					</li>
+				{/each}
+			{/if}
+		</ul>
 	</div>
 
 	<div class="foot">
@@ -247,6 +326,36 @@
 		color: var(--faint);
 	}
 
+	/* Which history is shown: a quiet row of two or three words. */
+	.tabs {
+		display: flex;
+		gap: 2px;
+		margin: 4px 2px 6px;
+		padding: 2px;
+		border-radius: 8px;
+		background: var(--hover);
+	}
+
+	.tabs button {
+		flex: 1;
+		min-width: 0;
+		height: 24px;
+		border-radius: 6px;
+		font-size: 12px;
+		color: var(--muted);
+	}
+
+	.tabs button:hover {
+		color: var(--ink);
+	}
+
+	.tabs button[aria-selected='true'] {
+		background: var(--side);
+		box-shadow: 0 0 0 1px var(--line-soft);
+		color: var(--ink);
+		font-weight: 600;
+	}
+
 	ul {
 		margin: 0;
 		padding: 0;
@@ -266,6 +375,32 @@
 
 	.chat.current {
 		color: var(--ink);
+	}
+
+	/* A Code task: its name, the folder it works in, and a dot while it works or waits. */
+	.chat .name {
+		flex: 1;
+	}
+
+	.chat .where {
+		flex: none;
+		max-width: 38%;
+		font-size: 11.5px;
+		color: var(--faint);
+	}
+
+	.chat .mark {
+		flex: none;
+		width: 6px;
+		height: 6px;
+		margin-right: -18px;
+		border-radius: 50%;
+		background: var(--accent);
+		overflow: visible;
+	}
+
+	.chat .mark.live {
+		animation: blink 1.2s steps(2, jump-none) infinite;
 	}
 
 	.del {

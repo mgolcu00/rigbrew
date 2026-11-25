@@ -1176,6 +1176,9 @@ class Studio {
 				shots: shots.map((s, i) => ({ prompt: s.prompt, frames, continues: carries && i > 0 && Boolean(s.continues), lines: (s.lines ?? []).map((l) => ({ who: l.who, text: l.text })) }))
 			});
 			this.adopt(await api.studioRender(id));
+			// A film that was not directed has only the first words as its name: the chat model
+			// writes one when it is in memory anyway. Making the film does not wait for it.
+			if (!brief.title) void this.#name(id, text, opened.project.name);
 			app.track('studio_quick_film', { seconds: brief.seconds ?? 0, shots: shots.length, shape: brief.shape ?? '', own_folder: Boolean(wish.folder?.trim()), cast: brief.cast?.length ?? 0, speech: Boolean(brief.speech), detailed: Object.keys(wish).length > 0 });
 			return true;
 		} catch (e) {
@@ -1185,6 +1188,16 @@ class Studio {
 			return false;
 		} finally {
 			this.refresh();
+		}
+	}
+
+	async #name(id: string, text: string, was: string) {
+		try {
+			const named = await api.title({ text, load: false });
+			// Only while the film is open and still has the name it started with.
+			if (named?.by === 'model' && this.id === id && this.doc?.name === was) this.edit('Name of the film', (d) => (d.name = named.title), 'film-name');
+		} catch {
+			// the first words stay
 		}
 	}
 

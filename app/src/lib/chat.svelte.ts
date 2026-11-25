@@ -7,6 +7,7 @@ import { connectors } from './connectors.svelte';
 import { ux } from './experience.svelte';
 import { installedVariant } from './format';
 import { guide } from './guide.svelte';
+import { mayRetitle, titleSource } from './history';
 import { skills } from './skills.svelte';
 import { app } from './state.svelte';
 import type { Package } from './types';
@@ -180,6 +181,10 @@ export interface Conversation {
 	/** Also the id the service stores it under: `[A-Za-z0-9_-]{1,64}`. */
 	id: string;
 	title: string;
+	/** Who wrote the title: "words" (its first words), "model" or "person". Empty for a chat from before this was kept. */
+	titleBy?: string;
+	/** The model named it from very little: it is named once more a few turns later. */
+	retitle?: boolean;
 	messages: Message[];
 	startedAt: number;
 	updatedAt: number;
@@ -198,6 +203,8 @@ interface Stored {
 	messages: Message[];
 	/** The id of the agent the chat used, when it used one. */
 	agentId?: string;
+	/** The title was written from very little and is written once more later. */
+	retitle?: boolean;
 }
 
 /** What the engine is doing for the app right now, for the bay. */
@@ -518,10 +525,10 @@ class ChatState {
 			if (this.#trash.has(row.id)) continue;
 			const known = this.conversations.find((c) => c.id === row.id);
 			if (known) {
-				if (!known.loaded) Object.assign(known, { title: row.title, updatedAt: row.updated_ms });
+				if (!known.loaded) Object.assign(known, { title: row.title, titleBy: row.title_by ?? '', updatedAt: row.updated_ms });
 				continue;
 			}
-			this.conversations.push({ id: row.id, title: row.title, messages: [], startedAt: row.created_ms, updatedAt: row.updated_ms, loaded: false });
+			this.conversations.push({ id: row.id, title: row.title, titleBy: row.title_by ?? '', messages: [], startedAt: row.created_ms, updatedAt: row.updated_ms, loaded: false });
 		}
 		this.#sort();
 	}
@@ -547,6 +554,7 @@ class ChatState {
 			conversation.messages = messages;
 			conversation.startedAt = data?.startedAt ?? conversation.startedAt;
 			conversation.agentId = typeof data?.agentId === 'string' && data.agentId ? data.agentId : undefined;
+			conversation.retitle = data?.retitle === true;
 			conversation.loaded = true;
 			// A clip may still be on its way: the service makes it whether or not the app is watching.
 			for (const m of conversation.messages) if (m.video?.state === 'waiting') this.#follow(conversation, m.video);
@@ -580,9 +588,9 @@ class ChatState {
 		if (!conversation.loaded || this.#trash.has(conversation.id)) return;
 		// Pixels stay out of the saved chat: a picture is kept as the id of the file the service saved.
 		const messages = $state.snapshot(conversation.messages).map((m) => (m.image ? { ...m, image: { ...m.image, base64: undefined } } : m));
-		const data: Stored = { v: 1, startedAt: conversation.startedAt, messages, ...(conversation.agentId ? { agentId: conversation.agentId } : {}) };
+		const data: Stored = { v: 1, startedAt: conversation.startedAt, messages, ...(conversation.agentId ? { agentId: conversation.agentId } : {}), ...(conversation.retitle ? { retitle: true } : {}) };
 		try {
-			await api.saveChat(conversation.id, conversation.title, data);
+			await api.saveChat(conversation.id, conversation.title, data, conversation.titleBy);
 			this.persist = 'yes';
 			this.saveProblem = '';
 		} catch (e) {
@@ -599,8 +607,45 @@ class ChatState {
 		const clean = titleOf(title);
 		if (!conversation || !clean || clean === conversation.title) return;
 		conversation.title = clean;
+		// The name is the person's now: the model does not write over it.
+		conversation.titleBy = 'person';
+		conversation.retitle = false;
 		this.saveSoon(conversation, 0);
 		app.track('chat_renamed');
+	}
+
+	/** How often each chat was sent to be named in this session: a model that cannot is not asked for ever. */
+	#naming = new Map<string, number>();
+
+	/**
+	 * Asks the chat model for a name once there is an answer to go by, and once more a few turns
+	 * later when the first name was made from very little. Nothing waits for it. The first words
+	 * stay when the model is not there to ask, and a name the person typed is never replaced.
+	 */
+	async #name(conversation: Conversation) {
+		if (!conversation.loaded || this.#trash.has(conversation.id)) return;
+		const sent = conversation.messages.filter((m) => m.role === 'user').length;
+		const why = mayRetitle(conversation.titleBy, conversation.retitle, sent);
+		const from = why && titleSource(conversation.messages, why === 'again');
+		const tries = this.#naming.get(conversation.id) ?? 0;
+		// Named after an answer: a chat with only pictures so far, or a stopped answer, waits for one.
+		if (!why || !from || !from.answer || tries >= 3) return;
+		this.#naming.set(conversation.id, tries + 1);
+		const before = conversation.title;
+		let named: Awaited<ReturnType<typeof api.title>> = null;
+		try {
+			named = await api.title({ text: from.text, answer: from.answer, ...(this.model ? { model: this.model } : {}) });
+		} catch {
+			return; // the first words stay
+		}
+		if (named?.by !== 'model' || !named.title.trim()) return;
+		// The person may have named or deleted it while the model wrote.
+		if (conversation.title !== before || mayRetitle(conversation.titleBy, conversation.retitle, sent) !== why || this.#trash.has(conversation.id)) return;
+		conversation.title = named.title.trim();
+		conversation.titleBy = 'model';
+		conversation.retitle = why === 'first' && from.thin;
+		// Saved as it is: a new name does not move the chat in the list.
+		if (this.persist !== 'no' && !this.#saveTimers.has(conversation.id)) void this.#save(conversation);
 	}
 
 	/** Deletes a chat after a few seconds; until then Undo brings it back. */
@@ -758,7 +803,7 @@ class ChatState {
 		// A saved chat whose messages are not read yet takes nothing: saving it would lose them.
 		if (this.activeId) return this.active?.loaded ? this.active : null;
 		const now = Date.now();
-		const conversation: Conversation = { id: newChatId(), title: titleOf(prompt) || 'Untitled chat', messages: [], startedAt: now, updatedAt: now, loaded: true, agentId: this.#nextAgent || undefined };
+		const conversation: Conversation = { id: newChatId(), title: titleOf(prompt) || 'Untitled chat', titleBy: 'words', messages: [], startedAt: now, updatedAt: now, loaded: true, agentId: this.#nextAgent || undefined };
 		this.#nextAgent = '';
 		this.conversations.unshift(conversation);
 		this.activeId = conversation.id;
@@ -781,6 +826,7 @@ class ChatState {
 			// Every completed turn is saved, stopped and failed ones too.
 			this.saveSoon(conversation);
 			this.syncEngine();
+			void this.#name(conversation);
 		}
 	}
 

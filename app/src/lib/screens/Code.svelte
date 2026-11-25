@@ -28,6 +28,23 @@
 	const task = $derived(code.task);
 	const working = $derived(isActive(task));
 	const model = $derived(app.chatPackages[0] ?? null);
+	// The name of the open task: click it to change it. A name typed here is never written over.
+	let renaming = $state(false);
+	let newTitle = $state('');
+	let titleField = $state<HTMLInputElement>();
+	async function startRename() {
+		if (!task) return;
+		newTitle = task.title;
+		renaming = true;
+		await tick();
+		titleField?.select();
+	}
+	function finishRename(keep: boolean) {
+		if (!renaming) return;
+		renaming = false;
+		if (keep && task) void code.rename(task.id, newTitle);
+	}
+
 	const folderName = $derived(code.folder.split(/[/\\]/).filter(Boolean).pop() ?? code.folder);
 	const mode = $derived(modes.find((m) => m.id === code.mode) ?? modes[0]);
 	const nameOf = (folder: string) => folder.split(/[/\\]/).filter(Boolean).pop() ?? folder;
@@ -349,7 +366,23 @@
 			<div class="column bar">
 				{#if task}
 					<button class="back" onclick={() => code.close()} title="Back to the tasks of this folder"><Icon name="back" size={15} />Tasks</button>
-					<span class="title" title={task.title}>{task.title}</span>
+					{#if renaming}
+						<input
+							class="title rename"
+							bind:this={titleField}
+							bind:value={newTitle}
+							aria-label="Name of the task"
+							maxlength="80"
+							onkeydown={(e) => {
+								e.stopPropagation();
+								if (e.key === 'Enter') finishRename(true);
+								else if (e.key === 'Escape') finishRename(false);
+							}}
+							onblur={() => finishRename(true)}
+						/>
+					{:else}
+						<button class="title" onclick={startRename} title="Rename this task" aria-label="Task name: {task.title}. Rename">{task.title}</button>
+					{/if}
 					<span class="state" class:live={working}>{states[task.state] ?? task.state}</span>
 				{:else}
 					<span class="where" title={code.folder}><Icon name="folder" size={15} /><span>{folderName}</span></span>
@@ -711,6 +744,34 @@
 		flex: 1;
 		font: 600 14px/1.3 var(--rb-text);
 		color: var(--muted);
+	}
+
+	button.title {
+		height: 28px;
+		margin: 0 -6px;
+		padding: 0 6px;
+		border-radius: 8px;
+		text-align: left;
+	}
+
+	button.title:hover {
+		background: var(--hover);
+		color: var(--ink);
+	}
+
+	.title.rename {
+		height: 28px;
+		margin: 0 -6px;
+		padding: 0 6px;
+		border: 0;
+		border-radius: 8px;
+		box-shadow: inset 0 0 0 1px var(--accent);
+		background: var(--bg);
+		color: var(--ink);
+	}
+
+	.title.rename:focus-visible {
+		outline: none;
 	}
 
 	.back {

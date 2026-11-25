@@ -61,6 +61,7 @@ Browsers are refused unless the request comes from the app's own origin.
 | `GET /v1/studio/projects/{id}/clips/{shot}.webm`, `.../clips/{shot}.jpg` | A made shot (the take in use; `{shot}.{n}.webm` and `{shot}.{n}.jpg` for one take), and one small picture of it (from its middle) for the timeline. A shot carries `made_frames`: the frames its clip really has. A made shot that continues another is marked `changed` when a save puts it behind a different shot. |
 | `POST /v1/agent/tasks` | Code: start a task on a folder. `{"folder", "prompt", "model", "mode", "web", "connectors"}`; see [Code tasks](#code-tasks). Answers `{"task"}`. |
 | `GET /v1/agent/tasks`, `GET /v1/agent/tasks/{id}` | Tasks, newest first (`?folder=` for one folder); one task with its state, its steps so far and what waits for an answer. |
+| `PUT /v1/agent/tasks/{id}` | `{"title"}`: the person names the task (80 characters at most). Answers `{"task"}`; see [Titles](#titles). |
 | `POST /v1/agent/tasks/{id}/approve` | `{"call", "allow": true or false, "always": false}`: answer the step that waits. |
 | `POST /v1/agent/tasks/{id}/message` | `{"text", "mode", "web", "connectors"}`: continue a task that is not working with a follow-up. |
 | `POST /v1/agent/tasks/{id}/undo` | Take back what the newest request changed in the folder; see [Undo](#undo). Answers `{"task", "restored", "removed"}`. `409` while the task works or when nothing is left to take back. |
@@ -77,7 +78,8 @@ Browsers are refused unless the request comes from the app's own origin.
 | `POST /v1/connectors/{id}/call` | `{"tool", "arguments"}`: call one tool. Answers `{"ok", "text"}`. With `"from": "chat"` the text is worded for a model. |
 | `POST /v1/connectors/{id}/allow` | `{"tool", "always": true or false}`: let a tool run without asking the person first, or ask again. |
 | `POST /v1/connectors/find` | `{"query"}`: the three tools that fit best across the running connectors, as `matches` and as `text` for a model. |
-| `GET/DELETE /v1/chats`, `GET/PUT/DELETE /v1/chats/{id}` | Saved conversations. `PUT {title, data}`; `data` is the app's own JSON, 8 MB at most. |
+| `GET/DELETE /v1/chats`, `GET/PUT/DELETE /v1/chats/{id}` | Saved conversations. `PUT {title, title_by, data}`; `data` is the app's own JSON, 8 MB at most. `title_by` says who wrote the title (`words`, `model` or `person`); left out, the chat keeps what it has. See [Titles](#titles). |
+| `POST /v1/title` | `{"text", "answer", "model", "load"}`: a name for a conversation that began with `text`. Answers `{"title", "by"}`; see [Titles](#titles). |
 | `GET/PUT/DELETE /v1/agents`, `GET/PUT/DELETE /v1/agents/{id}` | Agents the person made, kept in `agents.json` in the data folder. `PUT /v1/agents/{id}` takes `{name, instruction, tools, starter, connectors, skills}`: a name of at most 60 characters, an instruction of at most 4000, `tools` from `generate_image`, `read_aloud` and `generate_video`, an optional first message of at most 300, `connectors` (may it use connectors; off when left out) and `skills` (up to 12 names of skills pinned to it). The id is 1 to 40 of `a-z`, `0-9` and `-`. `PUT /v1/agents` takes `{agents: [...]}` and replaces the list. |
 | `GET /v1/artifacts/frame` | The empty page the app shows a chat artifact in. It allows inline styles and scripts and nothing from anywhere else, holds no data, and is the one address that needs no token. |
 | `GET /v1/usage` | Totals for today, the last 7 days and all time, disk used per package, and what is waiting to be sent. |
@@ -98,6 +100,21 @@ curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
 The first request for a model loads it into memory, which takes a few seconds. A chat model and a picture or video
 model share memory when both fit the budget; otherwise asking for the other one unloads the first.
 
+## Titles
+
+A chat, a Code task and a film start with their first words as their name. The chat model writes a better one
+when that costs nothing: `POST /v1/title` asks it for 3 to 6 words in the language of the conversation, with
+thinking off, and cleans what comes back (one line, no quotes, no punctuation at the end, 48 characters at most).
+`by` in the answer is `model` then. It is `words`, and `title` is the first words of `text`, when no chat model is
+installed, when the answer was no use, and whenever asking would mean moving a model: the chat model is asked only
+when it is in memory already, or when nothing is in memory and no clip, reading or recording is being made
+(`"load": false` leaves out that second case). Nothing of a title request is recorded as an event.
+
+`title_by` on a chat and on a task says who wrote its name: `words`, `model` or `person` (empty on one saved
+before this was kept). The service names a new task itself once its first turn is over, from the request and the
+start of the answer or the plan. The app asks for a chat's name after its first answer and saves it with
+`PUT /v1/chats/{id}`. A name the person typed (`person`) is never replaced.
+
 ## Code tasks
 
 A Code task is a chat model working on one folder with tools, in a loop that runs inside `rigbrewd`. It goes on when
@@ -116,6 +133,9 @@ while it waits for a yes or no to one step, `pending`. A step is one of `{"kind"
 [Pace](#pace)) or `{"kind": "tool", "call", "name", "arguments", "status", "result", "diff"}` with the
 status `running`, `waiting`, `done`, `failed`, `denied` or `stopped`. `pending` is `{"call", "tool", "path",
 "command", "diff"}`; answer it with `POST .../approve` and the same `call`.
+
+A task in a list is `{"id", "folder", "title", "title_by", "model", "mode", "state", "created_ms", "updated_ms",
+"request_ms", "steps"}` (`steps` is how many there are).
 
 | Mode | What it means |
 |---|---|

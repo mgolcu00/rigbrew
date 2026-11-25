@@ -2,6 +2,8 @@
 	import { onMount, tick } from 'svelte';
 	import { app, type Theme } from '#lib/state.svelte.ts';
 	import { chat } from '#lib/chat.svelte.ts';
+	import { code } from '#lib/code.svelte.ts';
+	import { codeRows } from '#lib/history.ts';
 	import { LEVELS, LEVEL_ORDER, TEXT_SIZES, ux } from '#lib/experience.svelte.ts';
 	import { guide } from '#lib/guide.svelte.ts';
 	import { articles } from '#lib/help.ts';
@@ -31,8 +33,8 @@
 
 	const flags = $derived(ux.flags);
 
-	type Group = 'Actions' | 'Go to' | 'Chats' | 'Models' | 'Settings' | 'Help';
-	const order: Group[] = ['Actions', 'Chats', 'Go to', 'Models', 'Settings', 'Help'];
+	type Group = 'Actions' | 'Go to' | 'Chats' | 'Code' | 'Models' | 'Settings' | 'Help';
+	const order: Group[] = ['Actions', 'Chats', 'Code', 'Go to', 'Models', 'Settings', 'Help'];
 
 	interface Item {
 		id: string;
@@ -144,6 +146,21 @@
 				run: () => {
 					chat.open(c.id, 'palette');
 					app.go('chat');
+				}
+			});
+		}
+
+		for (const t of codeRows(code.all)) {
+			out.push({
+				id: `task-${t.id}`,
+				group: 'Code',
+				title: t.title,
+				detail: `${t.where} · ${ago(t.at)}`,
+				icon: 'code',
+				words: `task ${t.where}`,
+				run: () => {
+					app.go('code');
+					void code.show(t);
 				}
 			});
 		}
@@ -268,7 +285,7 @@
 			.map((group) => {
 				let own = rows.filter((r) => r.item.group === group);
 				if (needle) own.sort((a, b) => b.score - a.score);
-				else if (group === 'Chats') own = own.slice(0, 6);
+				else if (group === 'Chats' || group === 'Code') own = own.slice(0, 6);
 				else if (group === 'Help') own = own.slice(0, 2);
 				else if (group === 'Settings') own = own.filter((r) => r.item.id.startsWith('level-'));
 				return { group, rows: own, best: Math.max(-Infinity, ...own.map((r) => r.score)) };
