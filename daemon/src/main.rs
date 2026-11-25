@@ -233,6 +233,8 @@ async fn packages(State(app): State<Shared>) -> Json<Value> {
                 "recommendation": recommend(&app.profile, p).verdict,
                 "installed": app.installed(p).iter().map(|v| v.id.clone()).collect::<Vec<_>>(),
                 "account_required": cloud::account_required(&app, p),
+                "defaults": p.defaults,
+                "terms": p.terms,
             })
         })
         .collect();
@@ -395,12 +397,24 @@ fn start_pull(app: &Shared, package: Package, variant: Variant) -> String {
 #[derive(Deserialize, Default)]
 struct PullBody {
     variant: Option<String>,
+    /// The person agreed to the package's licence terms (asked for when it has any).
+    #[serde(default)]
+    accept_terms: bool,
 }
 
 async fn pull(State(app): State<Shared>, Path(id): Path<String>, body: Option<Json<PullBody>>) -> Response {
     let Some(package) = app.manifest.package(&id).cloned() else {
         return fail(StatusCode::NOT_FOUND, format!("no package {id}"));
     };
+    // Some packages are only for signed-in accounts (the manifest or the server's app config says which).
+    if cloud::account_required(&app, &package) && !cloud::signed_in(&app) {
+        app.record("package_pull_refused", json!({"package": package.id, "reason": "account"}));
+        return fail(StatusCode::FORBIDDEN, format!("{} can only be downloaded with a Rigbrew account. Sign in, then install it.", package.name));
+    }
+    let agreed = body.as_ref().is_some_and(|b| b.0.accept_terms);
+    if package.terms.is_some() && !agreed {
+        return fail(StatusCode::CONFLICT, format!("{} has licence terms to agree to before it is downloaded", package.name));
+    }
     let wanted = body.and_then(|b| b.0.variant).or_else(|| match recommend(&app.profile, &package).verdict {
         Verdict::Run { variant, .. } => Some(variant),
         _ => None,
@@ -408,10 +422,8 @@ async fn pull(State(app): State<Shared>, Path(id): Path<String>, body: Option<Js
     let Some(variant) = wanted.and_then(|w| package.variants.iter().find(|v| v.id == w).cloned()) else {
         return fail(StatusCode::CONFLICT, format!("{} has no variant that fits this machine", package.name));
     };
-    // Some packages are only for signed-in accounts (the server's app config says which).
-    if cloud::account_required(&app, &package) && !cloud::signed_in(&app) {
-        app.record("package_pull_refused", json!({"package": package.id, "reason": "account"}));
-        return fail(StatusCode::FORBIDDEN, format!("{} can only be downloaded with a Rigbrew account. Sign in, then install it.", package.name));
+    if package.terms.is_some() {
+        app.record("package_terms_accepted", json!({"package": package.id}));
     }
     let job_id = start_pull(&app, package, variant);
     Json(json!({"job": job_id})).into_response()
@@ -780,15 +792,19 @@ async fn ensure_sd(app: &App, package: &Package) -> Result<(Arc<SdServer>, Strin
         )));
     };
     let binary = engine_program(app, EngineKind::Sdcpp).await.map_err(|e| Box::new(fail(StatusCode::SERVICE_UNAVAILABLE, e)))?;
-    let video = package.modality == Modality::Video;
+    let connector = file("connector");
+    // A video package with a T5 text encoder says so by having no connector; everything else is an LLM.
+    let t5 = package.modality == Modality::Video && connector.is_none();
     let cfg = SdConfig {
         binary,
         dit,
         text_encoder,
-        text_encoder_flag: if video { "--t5xxl" } else { "--llm" },
+        text_encoder_flag: if t5 { "--t5xxl" } else { "--llm" },
         vae,
         tae,
-        extra_args: vec![],
+        connector,
+        audio_vae: file("audio_vae"),
+        extra_args: package.engine_args.clone(),
         log: app.root.join("logs").join("sd-server.log"),
     };
     let server =

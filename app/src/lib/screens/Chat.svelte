@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { tick } from 'svelte';
 	import { app } from '#lib/state.svelte.ts';
-	import { chat, sizes, videoLengths, videoSizes, type Message, type Mode, type SizeName } from '#lib/chat.svelte.ts';
+	import { chat, sizes, videoLengthsOf, videoSizesOf, type Message, type Mode, type SizeName } from '#lib/chat.svelte.ts';
 	import { ux } from '#lib/experience.svelte.ts';
 	import { guide, type ChecklistId } from '#lib/guide.svelte.ts';
 	import { copyText, openExternal } from '#lib/api.ts';
@@ -805,18 +805,18 @@
 						{/if}
 						{#if chat.mode === 'video'}
 							<div class="chips" role="radiogroup" aria-label="Clip shape">
-								{#each Object.entries(videoSizes) as [name, shape] (name)}
+								{#each Object.entries(videoSizesOf(app.videoPackage)) as [name, shape] (name)}
 									<button type="button" role="radio" aria-checked={chat.videoSize === name} onclick={() => (chat.videoSize = name as SizeName)} disabled={chat.busy} title="{shape.label}{flags.techDetails ? `, ${shape.width} × ${shape.height}` : ''}" aria-label={shape.label}>
 										<span class="shape" style:aspect-ratio="{shape.width} / {shape.height}"></span>
 									</button>
 								{/each}
 							</div>
 							<div class="chips" role="radiogroup" aria-label="Clip length">
-								{#each videoLengths as l (l.frames)}
+								{#each videoLengthsOf(app.videoPackage) as l (l.frames)}
 									<button type="button" role="radio" class="num" aria-checked={chat.videoFrames === l.frames} onclick={() => (chat.videoFrames = l.frames)} disabled={chat.busy} title="{l.label}{flags.techDetails ? `, ${l.frames} frames` : ''}">{l.label}</button>
 								{/each}
 							</div>
-							<span class="to">{#if flags.techDetails}<span class="num">→ {app.videoPackage?.name} · {videoSizes[chat.videoSize].width}×{videoSizes[chat.videoSize].height} · {chat.videoFrames} frames</span>{:else}A few minutes{/if}</span>
+							<span class="to">{#if flags.techDetails}<span class="num">→ {app.videoPackage?.name} · {videoSizesOf(app.videoPackage)[chat.videoSize].width}×{videoSizesOf(app.videoPackage)[chat.videoSize].height} · {chat.videoFrames} frames</span>{:else}A few minutes{/if}</span>
 						{:else if chat.mode === 'image'}
 							<div class="chips" role="radiogroup" aria-label="Picture shape">
 								{#each Object.entries(sizes) as [name, shape] (name)}

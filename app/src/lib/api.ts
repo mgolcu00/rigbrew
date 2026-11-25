@@ -194,7 +194,8 @@ const enc = encodeURIComponent;
 
 export const system = () => json<System>('GET', '/v1/system');
 export const packages = async () => (await json<{ packages: Package[] }>('GET', '/v1/packages')).packages;
-export const pull = async (id: string, variant?: string) => (await json<{ job: string }>('POST', `/v1/packages/${enc(id)}/pull`, variant ? { variant } : {})).job;
+export const pull = async (id: string, variant?: string, acceptTerms = false) =>
+	(await json<{ job: string }>('POST', `/v1/packages/${enc(id)}/pull`, { ...(variant ? { variant } : {}), ...(acceptTerms ? { accept_terms: true } : {}) })).job;
 /** Removes one installed build, or every build of the package. Files another build still needs stay. */
 export const removePackage = (id: string, variant?: string) =>
 	json<{ removed: string[]; freed_bytes: number }>('DELETE', `/v1/packages/${enc(id)}${variant ? `?variant=${enc(variant)}` : ''}`);

@@ -52,6 +52,16 @@ export interface Package {
 	installed: string[];
 	/** Only signed-in accounts may download it (the server's app config decides). */
 	account_required?: boolean;
+	/** How to ask the package for its work, from the manifest (video: steps, sizes, lengths, sound). */
+	defaults?: {
+		steps?: number;
+		frames?: number;
+		audio?: boolean;
+		sizes?: Record<string, [number, number]>;
+		lengths?: { frames: number; label: string }[];
+	} | null;
+	/** Licence terms to agree to before the download. */
+	terms?: { summary: string; url: string } | null;
 }
 
 export interface Job {

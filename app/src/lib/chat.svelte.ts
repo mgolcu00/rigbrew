@@ -28,6 +28,20 @@ export const videoSizes: Record<SizeName, { label: string; width: number; height
 	square: { label: 'Square', width: 640, height: 640 }
 };
 
+const shapeLabels: Record<SizeName, string> = { landscape: 'Landscape', portrait: 'Portrait', square: 'Square' };
+
+/** The clip shapes of a video package: its own (the manifest's `defaults.sizes`), else the usual three. */
+export function videoSizesOf(pkg: Package | null | undefined): Record<SizeName, { label: string; width: number; height: number }> {
+	const own = pkg?.defaults?.sizes;
+	if (!own) return videoSizes;
+	const out = { ...videoSizes };
+	for (const name of Object.keys(shapeLabels) as SizeName[]) if (own[name]) out[name] = { label: shapeLabels[name], width: own[name][0], height: own[name][1] };
+	return out;
+}
+
+/** The clip lengths of a video package: its own, else the usual three. */
+export const videoLengthsOf = (pkg: Package | null | undefined): readonly { frames: number; label: string }[] => (pkg?.defaults?.lengths?.length ? pkg.defaults.lengths : videoLengths);
+
 /** Clip lengths: 4k+1 frames at 24 frames a second. Longer clips take disproportionately longer. */
 export const videoLengths = [
 	{ frames: 33, label: '1.4 s' },
@@ -973,7 +987,10 @@ class ChatState {
 	/** Starts one clip. The service makes it in the background; `#follow` keeps the card current. */
 	async #video(conversation: Conversation, prompt: string) {
 		const pkg = app.videoPackage!;
-		const { width, height } = videoSizes[this.videoSize];
+		const { width, height } = videoSizesOf(pkg)[this.videoSize];
+		// A length the package does not offer (the choice was made for another one) falls back to its own default.
+		const lengths = videoLengthsOf(pkg);
+		const frames = lengths.some((l) => l.frames === this.videoFrames) ? this.videoFrames : (pkg.defaults?.frames ?? lengths[0].frames);
 		conversation.messages.push({
 			id: nextId++,
 			role: 'video',
@@ -982,8 +999,8 @@ class ChatState {
 				prompt,
 				width,
 				height,
-				frames: this.videoFrames,
-				steps: VIDEO_STEPS,
+				frames,
+				steps: pkg.defaults?.steps ?? VIDEO_STEPS,
 				seed: randomSeed(),
 				package: pkg.id,
 				packageName: pkg.name,

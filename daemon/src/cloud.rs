@@ -263,9 +263,13 @@ fn config_cache(app: &App) -> std::path::PathBuf {
     app.root.join("state").join("app-config.json")
 }
 
-/// Whether the server's app config (the last copy kept on disk) says this package is only for
+/// Whether the manifest or the server's app config (the last copy kept on disk) says this package is only for
 /// signed-in accounts: `"account_required": ["video", "pour-5b"]` lists kinds of model and package ids.
 pub fn account_required(app: &App, package: &rigbrew_core::manifest::Package) -> bool {
+    // The manifest can say so itself; the server's config can add to it without a new manifest.
+    if package.access != rigbrew_core::manifest::Access::Public {
+        return true;
+    }
     let Some(cfg) = std::fs::read_to_string(config_cache(app)).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()) else {
         return false;
     };

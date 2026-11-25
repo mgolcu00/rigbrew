@@ -583,7 +583,8 @@ class AppState {
 	// --- downloads -------------------------------------------------------------------------------
 
 	/** Downloads a build of a package (the recommended one unless named) and follows the job. */
-	async install(pkg: Package, variant?: string) {
+	/** `acceptTerms`: the person agreed to the package's licence terms just now (asked by the install button). */
+	async install(pkg: Package, variant?: string, acceptTerms = false) {
 		const rec = pkg.recommendation;
 		const id = variant ?? (rec.verdict === 'run' ? rec.variant : '');
 		const build = pkg.variants.find((v) => v.id === id);
@@ -596,7 +597,7 @@ class AppState {
 			help: 'disk'
 		});
 		try {
-			entry.job = await api.pull(pkg.id, id);
+			entry.job = await api.pull(pkg.id, id, acceptTerms);
 			this.#follow(pkg.id, entry.job);
 		} catch (e) {
 			entry.state = 'failed';

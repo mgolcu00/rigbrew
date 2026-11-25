@@ -88,6 +88,24 @@ pub struct Package {
     /// The selector prefers the lightest variant at or above this quality (0 to 1).
     pub quality_floor: f32,
     pub variants: Vec<Variant>,
+    /// More startup flags for the engine, for packages that need them (a sampler schedule, memory mapping).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub engine_args: Vec<String>,
+    /// How to ask this package for its work: steps, guidance, sizes, lengths. Shown to the app as it is.
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+    pub defaults: serde_json::Value,
+    /// Licence terms the person has to agree to before the download starts (regions, permitted use).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terms: Option<Terms>,
+}
+
+/// What a licence asks of the person, said before the download.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Terms {
+    /// One or two plain sentences: what is not allowed and where.
+    pub summary: String,
+    /// The licence text.
+    pub url: String,
 }
 
 /// Where the weights came from. Shown in the app and required by the source licence.
@@ -127,7 +145,7 @@ impl Variant {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileRef {
-    /// What the file is: "model", "mmproj", "dit", "te", "vae", "voices", "data".
+    /// What the file is: "model", "mmproj", "dit", "te", "vae", "tae", "connector", "audio_vae", "voices", "data".
     pub role: String,
     /// Path relative to `Manifest::base_url`.
     pub path: String,

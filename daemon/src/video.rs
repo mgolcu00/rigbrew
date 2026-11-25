@@ -75,6 +75,7 @@ pub struct VideoBody {
     prompt: String,
     #[serde(default)]
     size: Option<String>,
+    /// Default and limits come from the package (`defaults` in the manifest).
     #[serde(default)]
     frames: Option<u32>,
     #[serde(default)]
@@ -104,11 +105,16 @@ pub async fn generate(State(app): State<Shared>, Json(body): Json<VideoBody>) ->
     if !(256..=1280).contains(&width) || !(256..=1280).contains(&height) || width % 32 != 0 || height % 32 != 0 {
         return fail(StatusCode::BAD_REQUEST, "size must be WIDTHxHEIGHT, each 256 to 1280 and a multiple of 32");
     }
-    let frames = body.frames.unwrap_or(33);
-    if !(5..=121).contains(&frames) || (frames - 1) % 4 != 0 {
-        return fail(StatusCode::BAD_REQUEST, "frames must be 4k+1 between 5 and 121 (for example 33 or 49)");
+    // What the package says about itself (the manifest's `defaults`), else what the first video package wanted.
+    let d = &package.defaults;
+    let num = |key: &str, fallback: u64| d[key].as_u64().unwrap_or(fallback) as u32;
+    let (frame_step, max_frames) = (num("frame_step", 4).max(1), num("max_frames", 121));
+    let frames = body.frames.unwrap_or_else(|| num("frames", 33));
+    if !(5..=max_frames).contains(&frames) || (frames - 1) % frame_step != 0 {
+        return fail(StatusCode::BAD_REQUEST, format!("frames must be {frame_step}k+1 between 5 and {max_frames}"));
     }
-    let steps = body.steps.unwrap_or(20).clamp(1, 50);
+    // A package with a fixed schedule (a distilled model) takes its own step count, whatever was asked.
+    let steps = if d["fixed_steps"].as_bool().unwrap_or(false) { num("steps", 20) } else { body.steps.unwrap_or_else(|| num("steps", 20)).clamp(1, 50) };
     if app.videos.lock().unwrap().values().any(VideoJob::active) {
         return fail(StatusCode::CONFLICT, "A video is already being made. Wait for it or stop it first.");
     }
@@ -143,11 +149,11 @@ pub async fn generate(State(app): State<Shared>, Json(body): Json<VideoBody>) ->
         width,
         height,
         frames,
-        fps: 24,
+        fps: num("fps", 24),
         steps,
         seed: body.seed.unwrap_or(-1),
-        cfg: 6.0,
-        flow_shift: 3.0,
+        cfg: d["cfg"].as_f64().unwrap_or(6.0) as f32,
+        flow_shift: if d["cfg"].is_null() { Some(3.0) } else { d["flow_shift"].as_f64().map(|v| v as f32) },
         tiling: false,
     };
     tokio::spawn(run(app.clone(), id.clone(), package, req));

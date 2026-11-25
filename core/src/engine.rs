@@ -215,7 +215,8 @@ pub struct VideoRequest {
     /// Negative means random.
     pub seed: i64,
     pub cfg: f32,
-    pub flow_shift: f32,
+    /// None leaves the schedule to the engine's own default for the model.
+    pub flow_shift: Option<f32>,
     /// Decode in spatial tiles: less memory.
     pub tiling: bool,
 }
@@ -307,6 +308,10 @@ pub struct SdConfig {
     pub vae: Option<PathBuf>,
     /// A tiny decoder (TAEHV): seconds instead of many minutes for a video clip.
     pub tae: Option<PathBuf>,
+    /// Joins the text encoder to the diffusion model, for packages that ship one.
+    pub connector: Option<PathBuf>,
+    /// Decodes the sound track, for video packages that make sound.
+    pub audio_vae: Option<PathBuf>,
     /// More startup flags (`--vae-tiling`, ...).
     pub extra_args: Vec<String>,
     pub log: PathBuf,
@@ -357,6 +362,12 @@ impl SdServer {
         }
         if let Some(tae) = &cfg.tae {
             command.arg("--tae").arg(tae);
+        }
+        if let Some(connector) = &cfg.connector {
+            command.arg("--embeddings-connectors").arg(connector);
+        }
+        if let Some(audio_vae) = &cfg.audio_vae {
+            command.arg("--audio-vae").arg(audio_vae);
         }
         let mut child = command
             .args(["--cfg-scale", "1.0"])
@@ -442,7 +453,7 @@ impl SdServer {
 
     /// Starts a video job in the engine's queue and returns its id. Poll it with [`SdServer::job`].
     pub async fn submit_video(&self, req: &VideoRequest) -> Result<String, EngineError> {
-        let body = json!({
+        let mut body = json!({
             "prompt": req.prompt,
             "negative_prompt": req.negative,
             "width": req.width,
@@ -453,12 +464,14 @@ impl SdServer {
             "sample_params": {
                 "sample_method": "euler",
                 "sample_steps": req.steps,
-                "flow_shift": req.flow_shift,
                 "guidance": {"txt_cfg": req.cfg},
             },
             "vae_tiling_params": {"enabled": req.tiling},
             "output_format": "webm",
         });
+        if let Some(shift) = req.flow_shift {
+            body["sample_params"]["flow_shift"] = json!(shift);
+        }
         self.submit("vid_gen", &body).await
     }
 

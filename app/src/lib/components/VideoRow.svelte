@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { copyText, saveVideo, videoFile } from '#lib/api.ts';
-	import { chat, clipUrl, videoSizes, type VideoJob } from '#lib/chat.svelte.ts';
+	import { chat, clipUrl, videoSizes, videoSizesOf, type VideoJob } from '#lib/chat.svelte.ts';
 	import { ux } from '#lib/experience.svelte.ts';
 	import { elapsed, variantName } from '#lib/format.ts';
 	import { app } from '#lib/state.svelte.ts';
@@ -16,7 +16,9 @@
 	const flags = $derived(ux.flags);
 	const pkg = $derived(app.packages.find((p) => p.id === job.package));
 	const waited = $derived(job.waited ?? Math.max(0, (now - job.startedAt) / 1000));
-	const shape = $derived(Object.values(videoSizes).find((s) => s.width === job.width && s.height === job.height)?.label ?? `${job.width}×${job.height}`);
+	const shape = $derived([...Object.values(videoSizesOf(pkg)), ...Object.values(videoSizes)].find((s) => s.width === job.width && s.height === job.height)?.label ?? `${job.width}×${job.height}`);
+	// A clip with a sound track starts on a click, with its sound; a silent one plays by itself.
+	const sound = $derived(Boolean(pkg?.defaults?.audio));
 	const length = $derived(`${(job.frames / 24).toFixed(1)} s`);
 	const share = $derived(job.step !== null && job.totalSteps ? job.step / job.totalSteps : 0);
 	let open = $state(false);
@@ -138,7 +140,7 @@
 	{:else if job.state === 'done' && src}
 		<div class="frame">
 			<!-- svelte-ignore a11y_media_has_caption -->
-			<video {src} width={job.width} height={job.height} controls loop muted autoplay playsinline aria-label={job.prompt}></video>
+			<video {src} width={job.width} height={job.height} controls loop muted={!sound} autoplay={!sound} playsinline aria-label={job.prompt}></video>
 		</div>
 	{:else if job.state === 'done' && missing}
 		<p class="gone">This clip is no longer on this machine.</p>

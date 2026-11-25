@@ -168,6 +168,9 @@ mod tests {
                 variant("q6", 3600, 0.973, true),
                 variant("q8", 4600, 0.991, true),
             ],
+            engine_args: vec![],
+            defaults: serde_json::Value::Null,
+            terms: None,
         }
     }
 

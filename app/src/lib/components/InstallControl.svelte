@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { ACCOUNTS, getAccount } from '#account';
+	import { openExternal } from '#lib/api.ts';
 	import { app } from '#lib/state.svelte.ts';
 	import { ux } from '#lib/experience.svelte.ts';
 	import { plain } from '#lib/errors.ts';
@@ -42,6 +43,19 @@
 		return Boolean(user && !user.anonymous);
 	});
 	const locked = $derived(Boolean(pkg.account_required) && !signedIn);
+
+	// A package with licence terms asks for agreement in place, before anything is downloaded.
+	let asking = $state(false);
+	function start() {
+		app.track('install_clicked', { package: pkg.id, variant: id, from, again: mine?.state === 'failed' });
+		if (pkg.terms && !asking) {
+			asking = true;
+			app.track('package_terms_shown', { package: pkg.id });
+			return;
+		}
+		asking = false;
+		app.install(pkg, id, Boolean(pkg.terms));
+	}
 
 	let cancelling = $state(false);
 	const failed = $derived(mine?.state === 'failed' ? plain(mine.error) : null);
@@ -88,11 +102,19 @@
 		{:else if noRoom}
 			<span class="muted num">needs {size(build.disk_mb)} of disk, {size(free ?? 0)} free</span>
 		{:else}
-			<button class="btn" class:primary onclick={() => (app.track('install_clicked', { package: pkg.id, variant: id, from, again: mine?.state === 'failed' }), app.install(pkg, id))} disabled={install?.state === 'running'} title="Downloads {size(build.disk_mb)}{free !== null ? `; ${size(free)} free on this disk` : ''}">
+			{#if asking && pkg.terms}
+				<span class="terms" role="group" aria-label="Licence terms of {pkg.name}">
+					<span class="terms-text selectable">{pkg.terms.summary} <button class="link" onclick={() => openExternal(pkg.terms!.url)}>Read the licence</button></span>
+					<button class="btn primary" onclick={start}>Agree and install</button>
+					<button class="btn quiet" onclick={() => (asking = false)}>Cancel</button>
+				</span>
+			{:else}
+			<button class="btn" class:primary onclick={start} disabled={install?.state === 'running'} title="Downloads {size(build.disk_mb)}{free !== null ? `; ${size(free)} free on this disk` : ''}">
 				<Icon name="download" size={14} />
 				{mine?.state === 'failed' ? 'Try again' : 'Install'}
 				<span class="num weight">{size(build.disk_mb)}</span>
 			</button>
+			{/if}
 		{/if}
 	</span>
 {/if}
@@ -104,6 +126,25 @@
 		align-items: center;
 		gap: 8px;
 		min-width: 0;
+	}
+
+	.terms {
+		display: inline-flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: 8px;
+		max-width: 62ch;
+		padding: 8px 10px;
+		border: 1px solid var(--line);
+		border-radius: 6px;
+		background: var(--panel);
+		white-space: normal;
+	}
+
+	.terms-text {
+		flex: 1 1 100%;
+		font-size: 12.5px;
+		color: var(--muted);
 	}
 
 	.weight {
