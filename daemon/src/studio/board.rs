@@ -1,15 +1,92 @@
 //! The storyboard: what the chat model is asked for, and how its answer is read.
 
 /// One shot as the chat model wrote it.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct Line {
     pub prompt: String,
     /// The shot carries on from the one before it (same scene); otherwise it starts with a cut.
     pub continues: bool,
+    /// What is said during the shot: who (a name of the cast, or empty for the narrator) and the words.
+    pub said: Vec<(String, String)>,
+}
+
+/// What a film brings to the writing of its shots.
+#[derive(Debug, Clone, Default)]
+pub struct Wants<'a> {
+    /// The names of the cast. The writer names them and never says how they look.
+    pub cast: &'a [String],
+    /// A few words on who each of them is ("a small grey cat"), in the order of the names, so
+    /// the writer knows whom a name stands for. May be shorter than the cast, or empty.
+    pub who: &'a [String],
+    /// The look every shot shares, so the writer does not write it into each one.
+    pub look: &'a str,
+    /// Whether the shots get spoken lines, and in which language.
+    pub speech: bool,
+    pub language: &'a str,
 }
 
 /// How many shots the chat model is asked for in one answer. A long film is written in parts.
 pub const PART: usize = 12;
+
+/// What the chat model is told for a film with a cast, a look or spoken lines.
+pub fn system_prompt_for(count: usize, wants: &Wants) -> String {
+    let mut text = format!(
+        "You plan films for a text-to-video model. A film is told in scenes. A scene is one place and one moment, shown in 2 to 4 shots that follow each other without a cut. \
+         Write exactly {count} shots as a numbered list, one line each. \
+         Start each line with (cut) when the shot begins a new scene, or with (continues) when it carries on from the shot before it in the same scene. The first shot of a film is (cut). \
+         After the marker, describe one continuous shot of about five seconds in English: who or what is seen, what moves, the place, the camera, the light, and the sound. \
+         Describe the same places with the same words in every shot so they look alike. No titles, no text on screen."
+    );
+    if !wants.cast.is_empty() {
+        let cast: Vec<String> = wants
+            .cast
+            .iter()
+            .enumerate()
+            .map(|(i, name)| match wants.who.get(i).filter(|w| !w.is_empty()) {
+                Some(who) => format!("{name} ({who})"),
+                None => name.clone(),
+            })
+            .collect();
+        text.push_str(&format!(
+            "\nThe cast of this film: {}. Call them by exactly these names, the name alone, every time they are in a shot: write \"{}\", never \"the woman\" or \"her cat\". \
+             Never say how they look: their age, face, hair and clothes are added for you.",
+            cast.join(", "),
+            wants.cast[0]
+        ));
+    }
+    if !wants.look.trim().is_empty() {
+        text.push_str("\nThe style, the colours and the lens of the film are added for you: do not write them into the shots.");
+    }
+    let example_names: (&str, &str) = match wants.cast {
+        [] => ("A red fox", "The red fox"),
+        [one, ..] => (one.as_str(), one.as_str()),
+    };
+    if wants.speech {
+        let language = if wants.language.trim().is_empty() { "English" } else { wants.language.trim() };
+        let speakers =
+            if wants.cast.is_empty() { "NARRATOR".to_string() } else { format!("NARRATOR or one of the cast ({})", wants.cast.join(", ")) };
+        text.push_str(&format!(
+            "\nUnder a shot you may write what is said during it, each on a line of its own that starts with the speaker and a colon: {speakers}. \
+             One short sentence a line, 14 words at most, in {language}: it has to be said in five seconds. Most shots have one line; a shot may have none."
+        ));
+    } else {
+        text.push_str("\nNo dialogue: nothing is said in this film.");
+    }
+    text.push_str(&format!(
+        "\nExample:\n\
+         1. (cut) {} trots through fresh snow between birch trees, the camera follows from the side, soft morning light, quiet wind.\n",
+        example_names.0
+    ));
+    if wants.speech {
+        text.push_str("NARRATOR: Nobody had walked here since the snow fell.\n");
+    }
+    text.push_str(&format!(
+        "2. (continues) {} stops between the birch trees and looks up as snow falls from a branch, the camera pushes in slowly, a soft thump of snow.\n\
+         3. (cut) A paper boat floats down a narrow stream between snowy banks, the camera moves with the boat, low sun, gentle running water.",
+        example_names.1
+    ));
+    text
+}
 
 pub fn system_prompt(count: usize) -> String {
     format!(
@@ -46,6 +123,24 @@ pub fn part_request(idea: &str, so_far: &[Line], count: usize, total: usize) -> 
         text.push_str(" These are the last shots: bring the film to its end.");
     } else {
         text.push_str(" The film goes on after these: do not end the story yet.");
+    }
+    text
+}
+
+/// The first words of a look, as a hint at who a name stands for: "a small grey tabby cat".
+pub fn who_is(look: &str) -> String {
+    let first = look.split([',', '.', ';']).next().unwrap_or("");
+    first.split_whitespace().take(7).collect::<Vec<_>>().join(" ")
+}
+
+/// What the chat model is told when it writes one description again in a film with a cast.
+pub fn rewrite_prompt_for(cast: &[String]) -> String {
+    let mut text = rewrite_prompt();
+    if !cast.is_empty() {
+        text.push_str(&format!(
+            " The cast of this film: {}. Call them by exactly these names and never say how they look: that is added for you.",
+            cast.join(", ")
+        ));
     }
     text
 }
@@ -141,13 +236,32 @@ fn marker(body: &str) -> (Option<bool>, &str) {
 
 /// The shots out of what the chat model wrote: numbered lines, each with an optional leading marker.
 /// Without markers, a "Scene" heading starts a scene and the shots under it carry on from each other.
+#[cfg(test)]
 pub fn shot_lines(text: &str, limit: usize) -> Vec<Line> {
-    let mut out = Vec::new();
+    shots_and_lines(text, limit, None)
+}
+
+/// Who a line under a shot is said by, and its words: "NARRATOR: ..." or "Mira: ...". `None` for
+/// a line that is not said by the narrator or one of `cast`.
+fn spoken(line: &str, cast: &[String]) -> Option<(String, String)> {
+    let line = line.trim().trim_start_matches(['-', '*', '•', '>', ' ']);
+    let (who, said) = line.split_once(':')?;
+    let who = who.trim_matches(|c: char| c.is_whitespace() || ['*', '_', '"', '(', ')', '[', ']'].contains(&c)).to_lowercase();
+    let who = match who.as_str() {
+        "narrator" | "narration" | "voice" | "voice-over" | "voice over" | "voiceover" | "vo" => String::new(),
+        name => cast.iter().find(|c| c.to_lowercase() == name)?.clone(),
+    };
+    let said = said.trim_matches(|c: char| c.is_whitespace() || ['"', '*', '`', '\u{201c}', '\u{201d}'].contains(&c));
+    (said.chars().count() >= 2)
+        .then(|| (who, said.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(super::words::MAX_LINE).collect()))
+}
+
+/// The shots as `shot_lines` reads them, and with `cast` given also what is said under each:
+/// the lines between two numbered shots that start with the narrator or a name of the cast.
+pub fn shots_and_lines(text: &str, limit: usize, cast: Option<&[String]>) -> Vec<Line> {
+    let mut out: Vec<Line> = Vec::new();
     let (mut scenes, mut fresh) = (false, true);
     for line in text.lines() {
-        if out.len() >= limit {
-            break;
-        }
         let line = line.trim().trim_start_matches(['-', '*', '•', '#']).trim();
         let rest = line.trim_start_matches(|c: char| c.is_ascii_digit());
         // Numbered ("3. ...", "3) ...") lines only; headings and chatter are dropped.
@@ -156,8 +270,16 @@ pub fn shot_lines(text: &str, limit: usize) -> Vec<Line> {
             if line.trim_start_matches(['*', '_']).to_ascii_lowercase().starts_with("scene") {
                 scenes = true;
                 fresh = true;
+            } else if let (Some(cast), Some(shot)) = (cast, out.last_mut()) {
+                if let Some(said) = spoken(line, cast).filter(|_| shot.said.len() < super::words::MAX_LINES) {
+                    shot.said.push(said);
+                }
             }
             continue;
+        }
+        // The lines under the last shot are still read; the shot after it is not.
+        if out.len() >= limit {
+            break;
         }
         let (said, body) = marker(rest[1..].trim());
         let body = body.trim().trim_matches(['"', '*', '`']).trim();
@@ -166,7 +288,7 @@ pub fn shot_lines(text: &str, limit: usize) -> Vec<Line> {
         }
         let continues = said.unwrap_or(scenes && !fresh);
         fresh = false;
-        out.push(Line { prompt: body.chars().take(super::MAX_PROMPT).collect(), continues });
+        out.push(Line { prompt: body.chars().take(super::MAX_PROMPT).collect(), continues, said: Vec::new() });
     }
     out
 }
@@ -244,10 +366,63 @@ mod tests {
     #[test]
     fn a_long_film_is_asked_for_in_parts() {
         assert_eq!(part_request("a fox", &[], 6, 6), "a fox");
-        let so_far: Vec<Line> = (0..20).map(|i| Line { prompt: format!("shot number {i} of the film"), continues: i % 3 != 0 }).collect();
+        let so_far: Vec<Line> =
+            (0..20).map(|i| Line { prompt: format!("shot number {i} of the film"), continues: i % 3 != 0, said: Vec::new() }).collect();
         let next = part_request("a fox", &so_far, 12, 60);
         assert!(next.contains("earlier shots left out") && !next.contains("\n8. (") && next.contains("\n9. (continues) shot number 8"));
         assert!(next.contains("Write shots 21 to 32 now") && next.contains("do not end the story yet"));
         assert!(part_request("a fox", &so_far, 4, 24).contains("bring the film to its end"));
+    }
+
+    #[test]
+    fn the_writer_is_given_the_cast_and_must_name_them() {
+        let cast = ["Mira".to_string(), "Fox".to_string()];
+        let who = [who_is("a girl of about eight, in a yellow raincoat"), who_is("")];
+        assert_eq!(who[0], "a girl of about eight");
+        let asked = system_prompt_for(6, &Wants { cast: &cast, who: &who, look: "soft watercolour", speech: false, language: "" });
+        assert!(asked.contains("exactly 6 shots"));
+        assert!(
+            asked.contains("The cast of this film: Mira (a girl of about eight), Fox. Call them by exactly these names, the name alone")
+                && asked.contains("write \"Mira\", never")
+                && asked.contains("Never say how they look")
+        );
+        assert!(asked.contains("do not write them into the shots") && asked.contains("nothing is said in this film"));
+        // The example uses a name of the cast and no words for how anyone looks.
+        assert!(asked.contains("1. (cut) Mira trots") && !asked.contains("red fox") && !asked.contains("NARRATOR"));
+        let plain = system_prompt_for(3, &Wants::default());
+        assert!(!plain.contains("The cast of this film") && !plain.contains("added for you") && plain.contains("A red fox trots"));
+        let said = system_prompt_for(3, &Wants { cast: &cast, speech: true, language: "Turkish", ..Wants::default() });
+        assert!(
+            said.contains("NARRATOR or one of the cast (Mira, Fox)")
+                && said.contains("in Turkish")
+                && said.contains("\nNARRATOR: Nobody had walked here")
+        );
+        assert!(rewrite_prompt_for(&cast).contains("Mira, Fox") && rewrite_prompt_for(&[]) == rewrite_prompt());
+    }
+
+    #[test]
+    fn what_is_said_is_read_from_under_its_shot() {
+        let cast = ["Mira".to_string(), "Old Tom".to_string()];
+        let text = "NARRATOR: said before any shot, dropped\n\
+                    1. (cut) Mira kneels by the stream and sets a paper boat on the water.\n\
+                    NARRATOR: \"She had folded it that morning.\"\n\
+                    - **Mira:** Go on, little boat!\n\
+                    Note: keep it calm.\n\
+                    2. (continues) The paper boat turns once and slides away under the bridge.\n\
+                    3. (cut) Old Tom looks up from his fishing rod on the far bank.\n\
+                       old tom: Well, look at that.\n\
+                    Stranger: I am not in the cast.\n\
+                    4. (cut) This shot is past the limit and so is its line.\n\
+                    NARRATOR: Not read.";
+        let shots = shots_and_lines(text, 3, Some(&cast));
+        assert_eq!(shots.len(), 3);
+        assert_eq!(
+            shots[0].said,
+            [(String::new(), "She had folded it that morning.".to_string()), ("Mira".to_string(), "Go on, little boat!".to_string())]
+        );
+        assert!(shots[1].said.is_empty());
+        assert_eq!(shots[2].said, [("Old Tom".to_string(), "Well, look at that.".to_string())]);
+        // Without a cast to read for, nothing under a shot is a line.
+        assert!(shot_lines(text, 3).iter().all(|s| s.said.is_empty()));
     }
 }

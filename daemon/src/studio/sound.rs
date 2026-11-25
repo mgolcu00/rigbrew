@@ -62,6 +62,9 @@ pub struct Region {
     /// How many times the stretch plays, one after another.
     #[serde(default = "once", skip_serializing_if = "is_once")]
     pub loops: u32,
+    /// For the reading of a spoken line: which one, as "<shot>/<line>". Subtitles follow it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub line: String,
 }
 
 /// A sound track: music, narration or effects, with its regions.
@@ -69,9 +72,13 @@ pub struct Region {
 pub struct Track {
     pub id: String,
     pub name: String,
-    /// "sound": the only kind the person adds.
+    /// "sound": the kind the person adds. "voice": the readings of the film's lines in one
+    /// language; the shots' own sound goes down under it.
     #[serde(default = "sound_kind")]
     pub kind: String,
+    /// The language of a voice track, by its name.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub lang: String,
     /// "#rrggbb"
     pub color: String,
     #[serde(default = "one", skip_serializing_if = "is_one")]
@@ -238,7 +245,11 @@ pub fn merge_tracks(
             let fade_in = level(r.fade_in, 0.0, span).max(0.0);
             let region_id = r.id.filter(|i| valid_id(i) && !region_ids.contains(i)).unwrap_or_else(&mut id);
             region_ids.push(region_id.clone());
+            // What a region is the reading of is the service's own note: it stays with the region.
+            let line =
+                old.iter().flat_map(|t| &t.regions).find(|o| o.id == region_id && o.file == file).map_or(String::new(), |o| o.line.clone());
             regions.push(Region {
+                line,
                 id: region_id,
                 file,
                 start: r.start.clamp(0.0, MAX_SECONDS),
@@ -251,10 +262,12 @@ pub fn merge_tracks(
                 loops,
             });
         }
+        let was = old.iter().find(|o| o.id == track_id);
         out.push(Track {
+            lang: was.map_or(String::new(), |o| o.lang.clone()),
             id: track_id,
             name: if name.is_empty() { format!("Track {}", n + 1) } else { name },
-            kind: sound_kind(),
+            kind: was.map_or_else(sound_kind, |o| o.kind.clone()),
             color: if valid_color(&t.color) { t.color.to_ascii_lowercase() } else { COLORS[n % COLORS.len()].into() },
             volume: level(t.volume.unwrap_or(1.0), 1.0, 2.0),
             pan: level(t.pan, 0.0, 1.0),
@@ -274,13 +287,17 @@ pub fn next_color(count: usize) -> String {
 /// What is heard: for the shots' sound its loudness as a whole, and every region of a track that
 /// is not muted (and, when anything is soloed, only of the soloed ones). Each region comes with
 /// its file; the caller gives every file an input.
-pub fn heard(strip: &Strip, tracks: &[Track], master: f32, mut input_of: impl FnMut(&str) -> Option<usize>) -> export::Mix {
+pub fn heard(strip: &Strip, tracks: &[Track], master: f32, duck_by: f32, mut input_of: impl FnMut(&str) -> Option<usize>) -> export::Mix {
     let soloed = strip.solo || tracks.iter().any(|t| t.solo);
     let on = |mute: bool, solo: bool| !mute && (!soloed || solo);
     let mut sounds = Vec::new();
+    let mut said: Vec<(f64, f64)> = Vec::new();
     for t in tracks.iter().filter(|t| on(t.mute, t.solo)) {
         for r in &t.regions {
             let Some(input) = input_of(&r.file) else { continue };
+            if t.kind == "voice" {
+                said.push((r.start as f64, (r.start + r.length * r.loops.max(1) as f32) as f64));
+            }
             sounds.push(export::Sound {
                 input,
                 offset: r.offset as f64,
@@ -299,6 +316,8 @@ pub fn heard(strip: &Strip, tracks: &[Track], master: f32, mut input_of: impl Fn
         shots_pan: strip.pan as f64,
         sounds,
         master: master as f64,
+        duck: super::words::duck_spans(&said),
+        duck_by: if duck_by.is_finite() { duck_by.clamp(0.0, 1.0) as f64 } else { 0.0 },
     }
 }
 
@@ -448,6 +467,7 @@ mod tests {
             id: id.into(),
             name: id.into(),
             kind: sound_kind(),
+            lang: String::new(),
             color: COLORS[0].into(),
             volume,
             pan: 0.5,
@@ -463,6 +483,7 @@ mod tests {
                 fade_in: 0.0,
                 fade_out: 0.0,
                 loops: 2,
+                line: String::new(),
             }],
         }
     }
@@ -471,27 +492,27 @@ mod tests {
     fn mute_and_solo_say_what_is_heard() {
         let files = |file: &str| Some(if file.ends_with("a.wav") { 4 } else { 5 });
         let strip = Strip::default();
-        let all = heard(&strip, &[track("a", 0.8, false, false), track("b", 1.0, false, false)], 1.0, files);
+        let all = heard(&strip, &[track("a", 0.8, false, false), track("b", 1.0, false, false)], 1.0, 0.5, files);
         assert_eq!(
             all.sounds.iter().map(|s| (s.input, s.gain, s.pan, s.loops)).collect::<Vec<_>>(),
             [(4, 0.4000000059604645, 0.5, 2), (5, 0.5, 0.5, 2)]
         );
         assert_eq!(all.shots_gain, 1.0);
         // A muted track is not in the mix at all.
-        let muted = heard(&strip, &[track("a", 1.0, true, false), track("b", 1.0, false, false)], 1.0, files);
+        let muted = heard(&strip, &[track("a", 1.0, true, false), track("b", 1.0, false, false)], 1.0, 0.5, files);
         assert_eq!(muted.sounds.iter().map(|s| s.input).collect::<Vec<_>>(), [5]);
         // A soloed track leaves the others out, the shots' own sound too; mute still wins.
-        let solo = heard(&strip, &[track("a", 1.0, false, true), track("b", 1.0, false, false)], 1.0, files);
+        let solo = heard(&strip, &[track("a", 1.0, false, true), track("b", 1.0, false, false)], 1.0, 0.5, files);
         assert_eq!((solo.sounds.iter().map(|s| s.input).collect::<Vec<_>>(), solo.shots_gain), (vec![4], 0.0));
-        let both = heard(&strip, &[track("a", 1.0, true, true), track("b", 1.0, false, true)], 1.0, files);
+        let both = heard(&strip, &[track("a", 1.0, true, true), track("b", 1.0, false, true)], 1.0, 0.5, files);
         assert_eq!(both.sounds.iter().map(|s| s.input).collect::<Vec<_>>(), [5]);
         // The shots' sound can be the soloed one.
-        let shots = heard(&Strip { solo: true, volume: 0.7, ..Strip::default() }, &[track("a", 1.0, false, false)], 1.0, files);
+        let shots = heard(&Strip { solo: true, volume: 0.7, ..Strip::default() }, &[track("a", 1.0, false, false)], 1.0, 0.5, files);
         assert!(shots.sounds.is_empty() && shots.shots_gain == 0.699999988079071);
         // A file that is gone is left out; with nothing to mix the film goes out as it is.
-        let gone = heard(&strip, &[track("a", 1.0, false, false)], 1.0, |_| None);
+        let gone = heard(&strip, &[track("a", 1.0, false, false)], 1.0, 0.5, |_| None);
         assert!(gone.is_plain());
-        assert!(!heard(&strip, &[], 0.5, files).is_plain());
+        assert!(!heard(&strip, &[], 0.5, 0.5, files).is_plain());
         assert!(Strip { volume: 9.0, pan: -9.0, ..Strip::default() }.tidy() == Strip { volume: 2.0, pan: -1.0, mute: false, solo: false });
     }
 

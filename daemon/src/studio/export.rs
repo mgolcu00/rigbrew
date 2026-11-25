@@ -45,6 +45,9 @@ pub struct Piece {
     pub has_sound: bool,
     /// Frames the join into this piece lasts: a dissolve for all of them, a fade through black in two halves.
     pub join_frames: u32,
+    /// The width and height the picture is brought to before it is joined: a film that holds
+    /// clips of two sizes (made ones, and larger ones brought in from a video) gives every piece one.
+    pub fit: Option<(u32, u32)>,
 }
 
 /// One region of a sound track as it goes into the film.
@@ -76,12 +79,20 @@ pub struct Mix {
     pub shots_pan: f64,
     pub sounds: Vec<Sound>,
     pub master: f64,
+    /// The stretches of the film in which the shots' own sound is turned down under what is
+    /// said, and by how much: 0.6 leaves 0.4 of it.
+    pub duck: Vec<(f64, f64)>,
+    pub duck_by: f64,
 }
 
 impl Mix {
     /// Nothing to mix: the film's sound goes out as it is.
     pub fn is_plain(&self) -> bool {
-        self.sounds.is_empty() && self.shots_gain == 1.0 && self.shots_pan == 0.0 && self.master == 1.0
+        self.sounds.is_empty() && self.shots_gain == 1.0 && self.shots_pan == 0.0 && self.master == 1.0 && !self.ducks()
+    }
+
+    fn ducks(&self) -> bool {
+        self.duck_by > 0.0 && !self.duck.is_empty()
     }
 }
 
@@ -96,6 +107,9 @@ pub struct Finish {
     pub music: Option<(usize, f32)>,
     /// The sound tracks and the master. `None` or a plain mix leaves the sound as it is.
     pub mix: Option<Mix>,
+    /// Pictures of the subtitles to lay over the film: the ffmpeg input that holds them (one
+    /// stream as wide as the finished film) and how far down it sits.
+    pub captions: Option<(usize, u32)>,
 }
 
 /// A filter graph and where its picture and its sound come out: a label such as `[v]`, or an
@@ -142,7 +156,7 @@ fn join_of(pieces: &[Piece], i: usize) -> Join {
 /// True when the film is its clips one after another and nothing else: every join a cut, every
 /// shot at its own volume. Such a film is joined without a filter graph, which is faster.
 pub fn plain(pieces: &[Piece]) -> bool {
-    pieces.iter().enumerate().all(|(i, p)| join_of(pieces, i) == Join::Cut && p.volume == 1.0 && p.has_sound)
+    pieces.iter().enumerate().all(|(i, p)| join_of(pieces, i) == Join::Cut && p.volume == 1.0 && p.has_sound && p.fit.is_none())
 }
 
 /// Frames of the whole film: every piece, less what dissolves share.
@@ -162,8 +176,10 @@ pub fn joined(pieces: &[Piece]) -> Graph {
         let (up, down) = (dip(p, p.join_frames), after.map_or(0.0, |next| dip(p, next.join_frames)));
         let goes_down = after.is_some();
         // Pictures: from the trim start, exactly `frames` of them (the last one held if the clip is short).
+        let fit =
+            p.fit.map_or(String::new(), |(w, h)| format!("scale={w}:{h}:force_original_aspect_ratio=increase:flags=lanczos,crop={w}:{h},"));
         let mut v = format!(
-            "[{i}:v]trim=start={:.3},setpts=PTS-STARTPTS,fps=24,tpad=stop=-1:stop_mode=clone,trim=end_frame={},format=yuv420p,setsar=1,settb=AVTB",
+            "[{i}:v]trim=start={:.3},setpts=PTS-STARTPTS,fps=24,tpad=stop=-1:stop_mode=clone,trim=end_frame={},{fit}format=yuv420p,setsar=1,settb=AVTB",
             p.start, p.frames
         );
         // Sound: the same stretch, padded with silence to the same length. A muted shot is silence.
@@ -236,8 +252,18 @@ pub fn finished(film: Graph, finish: &Finish) -> Graph {
     let mut steps: Vec<String> = if film.filter.is_empty() { Vec::new() } else { vec![film.filter.clone()] };
     let mut look: Vec<String> = Vec::new();
     let mut hear: Vec<String> = Vec::new();
-    if finish.scale == 2 {
+    let mut seen = film.video.clone();
+    if finish.scale == 2 && finish.captions.is_none() {
         look.push("scale=iw*2:ih*2:flags=lanczos".into());
+    }
+    if let Some((input, down)) = finish.captions {
+        // The subtitles are drawn for the finished size: over the enlarged picture, under the fades.
+        if finish.scale == 2 {
+            steps.push(format!("{}scale=iw*2:ih*2:flags=lanczos[big]", pad(&seen)));
+            seen = "[big]".into();
+        }
+        steps.push(format!("{}[{input}:v]overlay=x=0:y={down}:eof_action=pass:format=auto[sub]", pad(&seen)));
+        seen = "[sub]".into();
     }
     if finish.fade_in {
         look.push(format!("fade=t=in:st=0:d={edge:.4}"));
@@ -249,8 +275,10 @@ pub fn finished(film: Graph, finish: &Finish) -> Graph {
     }
     let mut out = film.clone();
     if !look.is_empty() {
-        steps.push(format!("{}{}[v]", pad(&film.video), look.join(",")));
+        steps.push(format!("{}{}[v]", pad(&seen), look.join(",")));
         out.video = "[v]".into();
+    } else {
+        out.video = seen;
     }
     let mix = finish.mix.as_ref().filter(|m| !m.is_plain());
     if finish.music.is_none() && mix.is_none() {
@@ -264,8 +292,9 @@ pub fn finished(film: Graph, finish: &Finish) -> Graph {
     // What is mixed, the shots' own sound first: the mix is as long as it is.
     let mut mixed = vec![pad(&film.audio)];
     if let Some(mix) = mix {
-        if mix.shots_gain != 1.0 || mix.shots_pan != 0.0 {
-            steps.push(format!("{}{SOUND},volume={:.3}{}[sa]", pad(&film.audio), mix.shots_gain.max(0.0), balance(mix.shots_pan)));
+        if mix.shots_gain != 1.0 || mix.shots_pan != 0.0 || mix.ducks() {
+            let under = if mix.ducks() { duck(&mix.duck, mix.duck_by) } else { String::new() };
+            steps.push(format!("{}{SOUND},volume={:.3}{}{under}[sa]", pad(&film.audio), mix.shots_gain.max(0.0), balance(mix.shots_pan)));
             mixed[0] = "[sa]".into();
         }
     }
@@ -316,6 +345,14 @@ pub fn finished(film: Graph, finish: &Finish) -> Graph {
     }
     out.filter = steps.join(";");
     out
+}
+
+/// Turns the shots' sound down while something is said: over a quarter of a second at each end
+/// of a stretch, so nothing clicks. `by` 0.6 leaves 0.4 of the sound.
+fn duck(spans: &[(f64, f64)], by: f64) -> String {
+    let ramp = super::words::DUCK_RAMP;
+    let down: Vec<String> = spans.iter().map(|(a, b)| format!("clip(min((t-{a:.3})/{ramp},({b:.3}-t)/{ramp}),0,1)")).collect();
+    format!(",volume=volume='1-{:.3}*min(1,{})':eval=frame", by.clamp(0.0, 1.0), down.join("+"))
 }
 
 /// Turns down the side a sound is panned away from. Nothing in the middle.
@@ -371,7 +408,7 @@ mod tests {
     const JOIN_FRAMES: u32 = 12;
 
     fn piece(frames: u32, join: Join) -> Piece {
-        Piece { start: 0.0, frames, join, volume: 1.0, has_sound: true, join_frames: JOIN_FRAMES }
+        Piece { start: 0.0, frames, join, volume: 1.0, has_sound: true, join_frames: JOIN_FRAMES, fit: None }
     }
 
     const PICTURE: &str = "setpts=PTS-STARTPTS,fps=24,tpad=stop=-1:stop_mode=clone";
@@ -512,7 +549,7 @@ mod tests {
     #[test]
     fn the_whole_film_fades_and_takes_the_sound_file() {
         let film = [piece(48, Join::Cut), piece(48, Join::Dissolve)];
-        let all = Finish { fade_in: true, fade_out: true, scale: 2, music: Some((2, 0.4)), mix: None };
+        let all = Finish { fade_in: true, fade_out: true, scale: 2, music: Some((2, 0.4)), mix: None, captions: None };
         let g = finished(joined(&film), &all);
         let steps: Vec<&str> = g.filter.split(';').collect();
         assert_eq!(steps[6], "[xv1]scale=iw*2:ih*2:flags=lanczos,fade=t=in:st=0:d=0.5000,fade=t=out:st=3.0000:d=0.5000[v]");
@@ -557,7 +594,7 @@ mod tests {
     }
 
     fn mix(sounds: Vec<Sound>) -> Mix {
-        Mix { shots_gain: 1.0, shots_pan: 0.0, sounds, master: 1.0 }
+        Mix { shots_gain: 1.0, shots_pan: 0.0, sounds, master: 1.0, duck: Vec::new(), duck_by: 0.0 }
     }
 
     const REGION: &str = "asetpts=PTS-STARTPTS,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo";
@@ -622,7 +659,7 @@ mod tests {
         let mut right = sound(3, 0.0, 0.5);
         right.pan = 0.5;
         let film = joined(&[piece(48, Join::Cut), piece(48, Join::Dissolve)]);
-        let shots = Mix { shots_gain: 0.8, shots_pan: 1.0, master: 1.2, sounds: vec![looped, right] };
+        let shots = Mix { shots_gain: 0.8, shots_pan: 1.0, master: 1.2, sounds: vec![looped, right], duck: Vec::new(), duck_by: 0.0 };
         let g = finished(film, &Finish { fade_out: true, music: Some((2, 0.4)), mix: Some(shots), ..Finish::default() });
         let steps: Vec<&str> = g.filter.split(';').collect();
         let tail = &steps[steps.len() - 7..];
@@ -657,5 +694,49 @@ mod tests {
         for n in 0..120 {
             assert_eq!(g.filter.matches(&format!("[s{n}]")).count(), 2);
         }
+    }
+
+    #[test]
+    fn clips_of_two_sizes_are_brought_to_one() {
+        let mut large = piece(48, Join::Cut);
+        large.fit = Some((1280, 768));
+        // A film that holds a clip of another size is never joined as a plain list.
+        assert!(!plain(&[piece(48, Join::Cut), large.clone()]));
+        let g = joined(&[large]);
+        assert!(g
+            .filter
+            .contains("trim=end_frame=48,scale=1280:768:force_original_aspect_ratio=increase:flags=lanczos,crop=1280:768,format=yuv420p"));
+    }
+
+    #[test]
+    fn the_shots_sound_goes_down_under_what_is_said() {
+        let said = Mix { duck: vec![(0.75, 3.25), (4.75, 6.25)], duck_by: 0.6, ..mix(vec![sound(1, 1.0, 2.0)]) };
+        assert!(!Mix { sounds: Vec::new(), ..said.clone() }.is_plain());
+        let g = finished(as_it_is(240), &Finish { mix: Some(said.clone()), ..Finish::default() });
+        let steps: Vec<&str> = g.filter.split(';').collect();
+        assert_eq!(
+            steps[0],
+            format!("[0:a]{SOUND},volume=1.000,volume=volume='1-0.600*min(1,clip(min((t-0.750)/0.25,(3.250-t)/0.25),0,1)+clip(min((t-4.750)/0.25,(6.250-t)/0.25),0,1))':eval=frame[sa]")
+        );
+        assert!(steps[2].starts_with("[sa][s0]amix=inputs=2"));
+        // No amount, or nothing said: the shots' sound is left alone.
+        let none = finished(as_it_is(240), &Finish { mix: Some(Mix { duck_by: 0.0, ..said.clone() }), ..Finish::default() });
+        assert!(!none.filter.contains("eval=frame"));
+        let silent = finished(as_it_is(240), &Finish { mix: Some(Mix { duck: Vec::new(), ..said }), ..Finish::default() });
+        assert!(!silent.filter.contains("eval=frame"));
+    }
+
+    #[test]
+    fn subtitles_are_laid_over_the_finished_picture() {
+        let plain = finished(as_it_is(96), &Finish { captions: Some((1, 292)), ..Finish::default() });
+        assert_eq!(plain.filter, "[0:v][1:v]overlay=x=0:y=292:eof_action=pass:format=auto[sub]");
+        assert_eq!((plain.video.as_str(), plain.audio.as_str()), ("[sub]", "0:a"));
+        // Over the enlarged picture, and under the film's own fades.
+        let all = finished(as_it_is(96), &Finish { captions: Some((3, 584)), scale: 2, fade_in: true, ..Finish::default() });
+        let steps: Vec<&str> = all.filter.split(';').collect();
+        assert_eq!(steps[0], "[0:v]scale=iw*2:ih*2:flags=lanczos[big]");
+        assert_eq!(steps[1], "[big][3:v]overlay=x=0:y=584:eof_action=pass:format=auto[sub]");
+        assert_eq!(steps[2], "[sub]fade=t=in:st=0:d=0.5000[v]");
+        assert_eq!(all.video, "[v]");
     }
 }

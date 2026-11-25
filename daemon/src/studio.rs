@@ -11,11 +11,22 @@
 //!                                                 "shot_track": {"volume", "pan", "mute", "solo"},
 //!                                                 "tracks": [{"id"?, "name", "color", "volume", "pan", "mute", "solo",
 //!                                                 "regions": [{"id"?, "file", "start", "offset", "length", "gain",
-//!                                                 "fade_in", "fade_out", "loops"}]}]}
+//!                                                 "fade_in", "fade_out", "loops"}]}],
+//!                                                 "look", "cast": [{"id"?, "name", "look", "voice"}], "seed",
+//!                                                 "speech", "language", "voice", "duck", "dub",
+//!                                                 "subtitles": {"show", "burn"}}; a shot also takes
+//!                                                 "lines": [{"id"?, "who", "text", "said": {language: text}}]
+//!                                                 and "from" (a cast member whose portrait it starts from)
 //!   DELETE /v1/studio/projects/{id}               forget the film (its folder stays)
 //!   POST   /v1/studio/projects/{id}/render        {"shots": [id]?, "model"?}: make the listed shots, or every shot not made yet
 //!   DELETE /v1/studio/projects/{id}/render        stop: the shot being made is stopped, the rest leave the queue
-//!   POST   /v1/studio/projects/{id}/storyboard    {"idea", "shots"}: the chat model writes the shots in scenes (not saved)
+//!   POST   /v1/studio/projects/{id}/storyboard    {"idea", "shots", "as_written"?}: the chat model writes the shots in
+//!                                                 scenes, for the film's cast, look and speech (not saved); with
+//!                                                 "as_written" every line of the idea is one shot as it stands
+//!   POST   /v1/studio/brief, /projects/{id}/cast/...           see `studio/direct.rs`: a film directed from plain words,
+//!                                                 the look of a character, portraits
+//!   POST   /v1/studio/projects/{id}/import        see `studio/bring.rs`: a video file cut into shots
+//!   POST   /v1/studio/projects/{id}/dub, /listen; GET /subtitles; PUT /captions    see `studio/dub.rs`
 //!   POST   /v1/studio/projects/{id}/export      join the made shots into `<folder>/<name>.mp4`, with the film's
 //!                                               sound tracks mixed in ({"music"?, "music_volume"?} lays one more
 //!                                               file under all of it; {"scale"?, "quality"?, "name"?} instead of
@@ -43,6 +54,13 @@
 //! the same path as `/v1/videos/generations`, so a long film renders unattended, shot by shot. A film
 //! with `auto_export` is exported by the same worker when its last shot is made. How long each shot
 //! took is kept in `<data dir>/studio-pace.json`, and a film says from it how long it will still take.
+//!
+//! Nothing is written or made without the model for it: writing shots needs the video model and
+//! the chat model, making them the video model, a dub a voice, a portrait the picture model. Each
+//! refuses with 409 and one short sentence (see `missing`). A film has a cast (see `studio/cast.rs`):
+//! a shot names its characters, and the fixed look of each one it names goes into what the video
+//! model is told, word for word, with the look of the film. What is said in a shot is its `lines`;
+//! a dub puts their readings on a voice track and the subtitles follow them (see `studio/words.rs`).
 
 use std::collections::VecDeque;
 use std::path::{Path as FsPath, PathBuf};
@@ -63,11 +81,19 @@ use crate::cloud::now_ms;
 use crate::{fail, video, App, Shared};
 
 mod board;
+mod brief;
+mod bring;
+mod cast;
+mod direct;
+mod dub;
 mod export;
 mod pace;
 mod sound;
+mod words;
 
+use cast::Member;
 use sound::{Region, Strip, Track};
+use words::Spoken;
 
 const FILE: &str = "rigbrew-film.json";
 const MAX_SHOTS: usize = 200;
@@ -129,6 +155,13 @@ pub struct Shot {
     /// shot that is changed back is made again without making it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub made_from: Option<String>,
+    /// What is said during the shot: by the narrator or by a character of the cast.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lines: Vec<Spoken>,
+    /// The id of a cast member whose portrait the shot starts from, when the video model can
+    /// start from a picture. Not looked at when the shot continues the one before.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub from: String,
 }
 
 fn is_none_yet(n: &u32) -> bool {
@@ -157,6 +190,8 @@ impl Default for Shot {
             take: 0,
             seed: None,
             made_from: None,
+            lines: Vec::new(),
+            from: String::new(),
         }
     }
 }
@@ -169,7 +204,7 @@ impl Shot {
 }
 
 /// One clip of a shot. Making a shot again keeps the clip before as a take.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct Take {
     pub n: u32,
     /// The seed it was made with: the same seed and description give the same clip again.
@@ -184,6 +219,12 @@ pub struct Take {
     /// Whether it started from the last picture of the shot before it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub continued: bool,
+    /// How the clip's file ends when it is not a made one: "mp4" for a clip brought in from a video.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub ext: String,
+    /// The clip has twice the film's width and height (a clip from a video that had the pictures for it).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub large: bool,
 }
 
 /// A shot keeps this many takes; the oldest one that is not in use goes when another is made.
@@ -323,7 +364,69 @@ pub struct Project {
     /// Shots that were taken out of the film and had a clip: one that is put back has it again.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub removed: Vec<Shot>,
+    /// One line every shot shares: the style, the colours, the light, the lens. Put behind the
+    /// description of every shot when it is made.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub look: String,
+    /// The characters of the film, each with a fixed look.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cast: Vec<Member>,
+    /// A seed every shot without one of its own is made with, so the shots start alike.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed: Option<i64>,
+    /// Whether the shot writer writes spoken lines for the shots.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub speech: bool,
+    /// The language the lines are written in, by its name; English when empty.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub language: String,
+    /// The speaker number of the voice that reads the narrator's lines.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voice: Option<u32>,
+    #[serde(default, skip_serializing_if = "Subtitles::is_usual")]
+    pub subtitles: Subtitles,
+    /// How far the shots' own sound goes down while a line is said: 0 not at all, 1 to silence.
+    #[serde(default = "usual_duck", skip_serializing_if = "is_usual_duck")]
+    pub duck: f32,
+    /// The language that is heard and read when it is not the film's own: the dub that was chosen.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub dub: String,
     pub updated_ms: i64,
+}
+
+fn usual_duck() -> f32 {
+    0.6
+}
+
+fn is_usual_duck(v: &f32) -> bool {
+    *v == 0.6
+}
+
+/// How the spoken lines of a film are shown as text.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Subtitles {
+    /// Shown in the viewer, and a subtitle track in the exported file that a player turns on and off.
+    #[serde(default = "yes")]
+    pub show: bool,
+    /// Drawn into the pictures of the exported file, where no player can turn them off.
+    #[serde(default)]
+    pub burn: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+impl Default for Subtitles {
+    fn default() -> Subtitles {
+        Subtitles { show: true, burn: false }
+    }
+}
+
+impl Subtitles {
+    fn is_usual(&self) -> bool {
+        *self == Subtitles::default()
+    }
 }
 
 impl Default for Project {
@@ -347,6 +450,15 @@ impl Default for Project {
             master: 1.0,
             sounds: Vec::new(),
             removed: Vec::new(),
+            look: String::new(),
+            cast: Vec::new(),
+            seed: None,
+            speech: false,
+            language: String::new(),
+            voice: None,
+            subtitles: Subtitles::default(),
+            duck: usual_duck(),
+            dub: String::new(),
             updated_ms: 0,
         }
     }
@@ -494,7 +606,22 @@ fn store(p: &mut Project) -> std::io::Result<()> {
 
 /// The clip of a shot: of the take in use, or the one clip of a shot from before takes.
 fn clip_path(p: &Project, shot: &str) -> PathBuf {
-    FsPath::new(&p.folder).join("clips").join(format!("{}.webm", clip_stem(p, shot)))
+    let ext = take_in_use(p, shot).map_or("webm", |t| clip_ext(t));
+    FsPath::new(&p.folder).join("clips").join(format!("{}.{ext}", clip_stem(p, shot)))
+}
+
+/// The take a shot has in use.
+fn take_in_use<'a>(p: &'a Project, shot: &str) -> Option<&'a Take> {
+    let s = p.shots.iter().find(|s| s.id == shot)?;
+    s.takes.iter().find(|t| t.n == s.take)
+}
+
+/// How the file of a take's clip ends: "webm" as the video model writes it, unless the take says otherwise.
+fn clip_ext(take: &Take) -> &str {
+    match take.ext.as_str() {
+        "mp4" => "mp4",
+        _ => "webm",
+    }
 }
 
 /// "<shot>.<take>" for the take in use; "<shot>" for a shot from before takes.
@@ -508,7 +635,8 @@ fn clip_stem(p: &Project, shot: &str) -> String {
 /// The clip of one take, and its small picture.
 fn take_files(p: &Project, shot: &str, n: u32) -> (PathBuf, PathBuf) {
     let dir = FsPath::new(&p.folder).join("clips");
-    (dir.join(format!("{shot}.{n}.webm")), dir.join(format!("{shot}.{n}.jpg")))
+    let ext = p.shots.iter().find(|s| s.id == shot).and_then(|s| s.takes.iter().find(|t| t.n == n)).map_or("webm", clip_ext);
+    (dir.join(format!("{shot}.{n}.{ext}")), dir.join(format!("{shot}.{n}.jpg")))
 }
 
 fn poster_path(p: &Project, shot: &str) -> PathBuf {
@@ -541,6 +669,82 @@ fn new_folder(home: &FsPath, name: &str) -> PathBuf {
 
 fn new_id() -> String {
     uuid::Uuid::new_v4().simple().to_string()[..12].to_string()
+}
+
+/// Long work on a film that is not making shots or exporting: bringing a video in ("import"),
+/// dubbing ("dub"), listening to clips ("listen"). Each is "working", "done" or "failed".
+static JOBS: Mutex<Vec<(String, &'static str, Value)>> = Mutex::new(Vec::new());
+
+fn job_of(id: &str, kind: &str) -> Value {
+    JOBS.lock()
+        .unwrap()
+        .iter()
+        .find(|(i, k, _)| i == id && *k == kind)
+        .map(|(_, _, v)| v.clone())
+        .unwrap_or_else(|| json!({"state": "none"}))
+}
+
+fn set_job(id: &str, kind: &'static str, value: Value) {
+    let mut all = JOBS.lock().unwrap();
+    all.retain(|(i, k, _)| !(i == id && *k == kind));
+    all.push((id.to_string(), kind, value));
+}
+
+fn job_running(id: &str, kind: &str) -> bool {
+    job_of(id, kind)["state"] == "working"
+}
+
+/// What Studio says when a model it needs for something is not installed.
+fn missing(modality: Modality) -> &'static str {
+    match modality {
+        Modality::Video => "Studio needs the video model. Add it under Models.",
+        Modality::Chat => "Studio needs the chat model to write. Add it under Models.",
+        Modality::Voice => "Studio needs a voice to read lines aloud. Add it under Models.",
+        Modality::Image => "Portraits need the picture model. Add it under Models.",
+        Modality::Listen => "No listening model is installed. Type the lines instead.",
+    }
+}
+
+/// The installed package of a kind, or why the work that needs it cannot start.
+fn installed_one(app: &App, modality: Modality) -> Result<&rigbrew_core::manifest::Package, (StatusCode, String)> {
+    app.manifest
+        .packages
+        .iter()
+        .find(|pk| pk.modality == modality && !app.installed(pk).is_empty())
+        .ok_or_else(|| (StatusCode::CONFLICT, missing(modality).to_string()))
+}
+
+/// The same as a refusal the app is answered with.
+fn need(app: &App, modality: Modality) -> Result<&rigbrew_core::manifest::Package, Box<Response>> {
+    installed_one(app, modality).map_err(|(status, why)| Box::new(fail(status, why)))
+}
+
+/// Asks the chat model one thing and answers with what it wrote.
+async fn ask(app: &Shared, system: &str, user: &str, max_tokens: u32, temperature: f32) -> Result<String, (StatusCode, String)> {
+    let chat = installed_one(app, Modality::Chat)?;
+    let port = own_port(app).ok_or((StatusCode::INTERNAL_SERVER_ERROR, "the service does not know its own address".to_string()))?;
+    let request = json!({
+        "model": chat.id,
+        "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "chat_template_kwargs": {"enable_thinking": false},
+    });
+    let answer = app
+        .http
+        .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
+        .bearer_auth(&app.token)
+        .json(&request)
+        .timeout(Duration::from_secs(300))
+        .send()
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
+    if !answer.status().is_success() {
+        let v: Value = answer.json().await.unwrap_or(Value::Null);
+        return Err((StatusCode::BAD_GATEWAY, v["error"]["message"].as_str().unwrap_or("the chat model could not answer").to_string()));
+    }
+    let v: Value = answer.json().await.unwrap_or(Value::Null);
+    Ok(v["choices"][0]["message"]["content"].as_str().unwrap_or_default().to_string())
 }
 
 /// Whether the installed video model can start a shot from a picture.
@@ -579,8 +783,38 @@ fn view(app: &App, mut p: Project) -> Value {
     let (all, left) = time_left(&p, &paces_for(app, &p), &waiting, mine);
     // The shots that were taken out are the service's own business.
     p.removed.clear();
+    // Which shots name which character, the subtitles as the timeline holds them, and what is heard.
+    let appears: serde_json::Map<String, Value> = p
+        .cast
+        .iter()
+        .map(|m| {
+            let shots: Vec<&str> =
+                p.shots.iter().filter(|s| cast::named(std::slice::from_ref(m), &s.prompt).len() == 1).map(|s| s.id.as_str()).collect();
+            (m.id.clone(), json!(shots))
+        })
+        .collect();
+    let cues = dub::subtitles(&p, false);
+    // The languages the film can be shown in: its own, every one with a voice track, every one its lines are translated into.
+    let mut languages = vec![dub::own_language(&p)];
+    let named = p
+        .tracks
+        .iter()
+        .filter(|t| t.kind == "voice")
+        .map(|t| &t.lang)
+        .chain(p.shots.iter().flat_map(|s| s.lines.iter().flat_map(|l| l.said.keys())));
+    for language in named {
+        if !language.is_empty() && !languages.iter().any(|l| l.eq_ignore_ascii_case(language)) {
+            languages.push(language.clone());
+        }
+    }
+    let installed = |modality: Modality| installed_one(app, modality).is_ok();
+    let jobs = json!({"import": job_of(&p.id, "import"), "dub": job_of(&p.id, "dub"), "listen": job_of(&p.id, "listen")});
     json!({"project": p, "progress": progress, "rendering": mine.is_some() || !waiting.is_empty(), "made": made, "seconds": seconds,
-           "can_continue": continues, "export": export, "estimate": {"all": all, "left": left}})
+           "can_continue": continues, "export": export, "estimate": {"all": all, "left": left},
+           "cast_in": appears, "cues": cues, "language": dub::shown_language(&p), "own_language": dub::own_language(&p),
+           "languages": languages, "spoken": dub::SPOKEN, "can_listen": dub::can_listen(app), "voices": dub::voices(app), "jobs": jobs,
+           "has": {"video": installed(Modality::Video), "chat": installed(Modality::Chat), "voice": installed(Modality::Voice),
+                   "image": installed(Modality::Image)}})
 }
 
 async fn list(State(app): State<Shared>) -> Json<Value> {
@@ -684,6 +918,7 @@ async fn with_tracks(app: &Shared, mut p: Project) -> Project {
         fade_in: 0.0,
         fade_out: 0.0,
         loops,
+        line: String::new(),
     };
     p.tracks.insert(
         0,
@@ -691,6 +926,7 @@ async fn with_tracks(app: &Shared, mut p: Project) -> Project {
             id: new_id(),
             name: "Music".into(),
             kind: "sound".into(),
+            lang: String::new(),
             color: sound::next_color(0),
             volume: 1.0,
             pan: 0.0,
@@ -729,10 +965,38 @@ struct ShotIn {
     mute: bool,
     #[serde(default)]
     seed: Option<i64>,
+    /// Without a list the shot keeps the lines it has.
+    #[serde(default)]
+    lines: Option<Vec<words::SpokenIn>>,
+    #[serde(default)]
+    from: Option<String>,
+}
+
+/// A value that may be left out (keep what is there), or be null (take it away).
+fn maybe<'de, T: Deserialize<'de>, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Option<T>>, D::Error> {
+    Option::<T>::deserialize(d).map(Some)
 }
 
 #[derive(Deserialize)]
 struct Save {
+    #[serde(default)]
+    look: Option<String>,
+    #[serde(default)]
+    cast: Option<Vec<cast::MemberIn>>,
+    #[serde(default, deserialize_with = "maybe")]
+    seed: Option<Option<i64>>,
+    #[serde(default)]
+    speech: Option<bool>,
+    #[serde(default)]
+    language: Option<String>,
+    #[serde(default, deserialize_with = "maybe")]
+    voice: Option<Option<u32>>,
+    #[serde(default)]
+    subtitles: Option<Subtitles>,
+    #[serde(default)]
+    duck: Option<f32>,
+    #[serde(default)]
+    dub: Option<String>,
     #[serde(default)]
     name: Option<String>,
     #[serde(default)]
@@ -779,25 +1043,49 @@ fn has_clip(shot: &Shot) -> bool {
     shot.state == "done" || shot.state == "changed" || !shot.takes.is_empty()
 }
 
-/// The new list of shots: a shot that keeps its id and its description keeps its clip; one whose
-/// description or length changed is marked "changed" until it is made again.
+/// What the clips of a film are made from besides each shot's own description: the film's
+/// shape, its look and its cast.
+struct Film<'a> {
+    size: &'a str,
+    look: &'a str,
+    cast: &'a [Member],
+}
+
+impl Film<'_> {
+    /// What the clip of a shot of this film is made from (see `made_key`): what the video model
+    /// is told (the description, the look of every character it names, the look of the film),
+    /// the length, and the picture it starts from: the shot before it, or a portrait.
+    fn key(&self, prompt: &str, frames: u32, before: Option<&str>, from: &str) -> String {
+        let told = cast::told(self.look, self.cast, prompt);
+        let portrait = self.cast.iter().find(|m| !from.is_empty() && m.id == from && m.portrait > 0);
+        let starts = match (before, portrait) {
+            (Some(shot), _) => shot.to_string(),
+            (None, Some(m)) => format!("portrait:{}:{}", m.id, m.portrait),
+            (None, None) => String::new(),
+        };
+        made_key(self.size, &told, frames, Some(&starts))
+    }
+}
+
+/// The new list of shots: a shot that keeps its id and what its clip is made from keeps its
+/// clip; one whose description, length, shape, or the look of a character it names changed is
+/// marked "changed" until it is made again.
 /// It also answers with the shots that are out of the film now and had a clip (`bin`, newest
 /// last): a shot that comes back by its id, after an undo, has its clip and its takes again.
-fn merge(old: &[Shot], bin: &[Shot], new: Vec<ShotIn>, sizes: (&str, &str)) -> Result<(Vec<Shot>, Vec<Shot>), String> {
+fn merge(old: &[Shot], bin: &[Shot], new: Vec<ShotIn>, films: (&Film, &Film)) -> Result<(Vec<Shot>, Vec<Shot>), String> {
     if new.len() > MAX_SHOTS {
         return Err(format!("a film has at most {MAX_SHOTS} shots"));
     }
-    let size_changed = sizes.0 != sizes.1;
-    // What the clip of a shot in the film was made from: for a made shot, the shot as it stands.
-    let was_key = |at: usize| {
+    let (was, now) = films;
+    // What the clip of a shot of the film as it was would be made from, as the shot stands.
+    let stands = |at: usize| {
         let o = &old[at];
-        if o.state == "done" {
-            let before = at.checked_sub(1).filter(|_| o.continues).map(|i| old[i].id.as_str());
-            Some(made_key(sizes.0, &o.prompt, o.frames, before))
-        } else {
-            o.made_from.clone()
-        }
+        let before = at.checked_sub(1).filter(|_| o.continues).map(|i| old[i].id.as_str());
+        was.key(&o.prompt, o.frames, before, &o.from)
     };
+    // What the clip of a shot in the film was made from: for a made shot, the shot as it stands.
+    let was_key = |at: usize| if old[at].state == "done" { Some(stands(at)) } else { old[at].made_from.clone() };
+    let cast_ids: Vec<String> = now.cast.iter().map(|m| m.id.clone()).collect();
     let mut out: Vec<Shot> = Vec::with_capacity(new.len());
     for s in new {
         let prompt: String = s.prompt.trim().chars().take(MAX_PROMPT).collect();
@@ -808,16 +1096,16 @@ fn merge(old: &[Shot], bin: &[Shot], new: Vec<ShotIn>, sizes: (&str, &str)) -> R
         let id = s.id.filter(|i| valid_id(i) && !out.iter().any(|o| o.id == *i)).unwrap_or_else(new_id);
         // The first shot has nothing to continue.
         let continues = s.continues && !out.is_empty();
-        let key = made_key(sizes.1, &prompt, frames, out.last().filter(|_| continues).map(|l| l.id.as_str()));
+        let from = s.from.filter(|f| cast_ids.contains(f)).unwrap_or_default();
+        let key = now.key(&prompt, frames, out.last().filter(|_| continues).map(|l| l.id.as_str()), &from);
         let again = |made_from: &Option<String>| if made_from.as_deref() == Some(key.as_str()) { "done" } else { "changed" };
         let mut shot = match (old.iter().position(|o| o.id == id), bin.iter().find(|o| o.id == id)) {
             (Some(at), _) => {
                 let o = &old[at];
-                // A shot that continues another was made from that shot's last picture: after a
-                // move it stands behind a different one and has to be made again.
-                let before = |list: &[Shot], at: usize| at.checked_sub(1).map(|i| list[i].id.clone());
-                let moved = continues && before(old, at) != out.last().map(|l| l.id.clone());
-                let same = o.prompt == prompt && o.frames == frames && o.continues == continues && !size_changed && !moved;
+                // Nothing its clip is made from changed. A shot that continues another was made
+                // from that shot's last picture: after a move it stands behind a different one,
+                // and that is a change too.
+                let same = stands(at) == key && o.continues == continues;
                 let made_from = was_key(at);
                 let state = if same {
                     o.state.clone()
@@ -833,7 +1121,13 @@ fn merge(old: &[Shot], bin: &[Shot], new: Vec<ShotIn>, sizes: (&str, &str)) -> R
             (None, Some(o)) => Shot { prompt, frames, state: again(&o.made_from).into(), error: None, continues, ..o.clone() },
             (None, None) => Shot { id, prompt, frames, state: empty(), continues, ..Shot::default() },
         };
-        // How a shot joins the film and how loud it is change nothing about its clip.
+        shot.from = from;
+        // What is said in a shot, how it joins the film and how loud it is change nothing about its clip.
+        if let Some(lines) = s.lines {
+            shot.lines = words::merge_lines(lines, &cast_ids, new_id);
+        } else {
+            shot.lines.iter_mut().filter(|l| !cast_ids.contains(&l.who)).for_each(|l| l.who.clear());
+        }
         shot.join = match s.join.as_str() {
             "dissolve" | "black" => s.join,
             _ => String::new(),
@@ -859,7 +1153,13 @@ fn merge(old: &[Shot], bin: &[Shot], new: Vec<ShotIn>, sizes: (&str, &str)) -> R
 
 #[cfg(test)]
 fn merge_shots(old: &[Shot], new: Vec<ShotIn>, size_changed: bool) -> Result<Vec<Shot>, String> {
-    merge(old, &[], new, ("640x384", if size_changed { "384x640" } else { "640x384" })).map(|(shots, _)| shots)
+    merge(old, &[], new, (&film("640x384"), &film(if size_changed { "384x640" } else { "640x384" }))).map(|(shots, _)| shots)
+}
+
+/// A film of a shape, without a look and without a cast.
+#[cfg(test)]
+fn film(size: &str) -> Film<'_> {
+    Film { size, look: "", cast: &[] }
 }
 
 async fn save(State(app): State<Shared>, Path(id): Path<String>, Json(body): Json<Save>) -> Response {
@@ -869,12 +1169,37 @@ async fn save(State(app): State<Shared>, Path(id): Path<String>, Json(body): Jso
     if let Some(name) = body.name.map(|n| n.trim().chars().take(80).collect::<String>()).filter(|n| !n.is_empty()) {
         p.name = name;
     }
-    let was = p.size.clone();
+    let was = (p.size.clone(), p.look.clone(), p.cast.clone());
     if let Some(size) = body.size {
         if !valid_size(&size) {
             return fail(StatusCode::BAD_REQUEST, "size must be WIDTHxHEIGHT, each 256 to 1280 and a multiple of 32");
         }
         p.size = size;
+    }
+    if let Some(look) = body.look {
+        p.look = look.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(300).collect();
+    }
+    if let Some(members) = body.cast {
+        match cast::merge_cast(&p.cast, members, new_id) {
+            Ok(list) => p.cast = list,
+            Err(e) => return fail(StatusCode::BAD_REQUEST, e),
+        }
+    }
+    if let Some(seed) = body.seed {
+        p.seed = seed.filter(|seed| (0..=u32::MAX as i64).contains(seed));
+    }
+    if let Some(voice) = body.voice {
+        p.voice = voice.filter(|v| *v < 1000);
+    }
+    p.speech = body.speech.unwrap_or(p.speech);
+    if let Some(language) = body.language {
+        p.language = words::language(&language);
+    }
+    if let Some(subtitles) = body.subtitles {
+        p.subtitles = subtitles;
+    }
+    if let Some(duck) = body.duck.filter(|v| v.is_finite()) {
+        p.duck = duck.clamp(0.0, 1.0);
     }
     // Without a list of shots the film keeps the ones it has, in a shape that may be new.
     let shots = body.shots.unwrap_or_else(|| {
@@ -890,10 +1215,13 @@ async fn save(State(app): State<Shared>, Path(id): Path<String>, Json(body): Jso
             volume: Some(s.volume),
             mute: s.mute,
             seed: s.seed,
+            lines: None,
+            from: Some(s.from.clone()),
         };
         p.shots.iter().map(as_it_is).collect()
     });
-    match merge(&p.shots, &p.removed, shots, (&was, &p.size)) {
+    let films = (Film { size: &was.0, look: &was.1, cast: &was.2 }, Film { size: &p.size, look: &p.look, cast: &p.cast });
+    match merge(&p.shots, &p.removed, shots, (&films.0, &films.1)) {
         Ok((list, removed)) => (p.shots, p.removed) = (list, removed),
         Err(e) => return fail(StatusCode::BAD_REQUEST, e),
     }
@@ -913,6 +1241,12 @@ async fn save(State(app): State<Shared>, Path(id): Path<String>, Json(body): Jso
     }
     if let Some(strip) = body.shot_track {
         p.shot_track = strip.tidy();
+    }
+    if let Some(chosen) = body.dub {
+        // One language is heard at a time: choosing it unmutes its voice track and mutes the others.
+        let chosen = words::language(&chosen);
+        p.dub = if chosen.eq_ignore_ascii_case(&dub::own_language(&p)) { String::new() } else { chosen };
+        dub::hear_one(&mut p);
     }
     if let Some(master) = body.master.filter(|v| v.is_finite()) {
         p.master = master.clamp(0.0, 2.0);
@@ -974,7 +1308,7 @@ async fn render(State(app): State<Shared>, Path(id): Path<String>, body: Option<
         .filter(|pk| pk.modality == Modality::Video && !app.installed(pk).is_empty())
         .find(|pk| body.model.as_deref().is_none_or(|m| m == pk.id))
     else {
-        return fail(StatusCode::CONFLICT, "No video model is installed. Add Video under Models first.");
+        return fail(StatusCode::CONFLICT, missing(Modality::Video));
     };
     let wanted: Vec<String> = match body.shots {
         Some(ids) => p.shots.iter().filter(|s| ids.contains(&s.id) && !s.prompt.is_empty()).map(|s| s.id.clone()).collect(),
@@ -1060,19 +1394,21 @@ async fn work(app: Shared) {
                 .map(|i| clip_path(&p, &p.shots[i].id))
                 .filter(|c| c.is_file());
             match before {
-                Some(clip) => last_picture(&app, &clip).await,
+                Some(clip) => last_picture(&app, &clip, &p.size).await,
                 None => None,
             }
         } else {
-            None
+            portrait_start(&app, &p, &s)
         };
-        // The seed the person asked for, else a new one: it is kept with the take.
-        let seed = s.seed.unwrap_or_else(|| uuid::Uuid::new_v4().as_u128() as u32 as i64);
+        // The seed the person asked for, for this shot or for the whole film, else a new one: it is kept with the take.
+        let seed = s.seed.or(p.seed).unwrap_or_else(|| uuid::Uuid::new_v4().as_u128() as u32 as i64);
+        // What the model is told: the description, the look of every character it names, the look of the film.
+        let told = cast::told(&p.look, &p.cast, &s.prompt);
         // Another clip (from the chat) may be in the making: wait for the engine to be free.
         let job = loop {
             let resp = video::generate(
                 State(app.clone()),
-                Json(video::VideoBody::new(&model, &s.prompt, &p.size, s.frames).with_seed(seed).starting_from(first.clone())),
+                Json(video::VideoBody::new(&model, &told, &p.size, s.frames).with_seed(seed).starting_from(first.clone())),
             )
             .await;
             let status = resp.status();
@@ -1137,6 +1473,7 @@ async fn work(app: Shared) {
                         frames: s.frames,
                         made_frames: None,
                         continued: first.is_some(),
+                        ..Take::default()
                     },
                 )
                 .await
@@ -1192,7 +1529,7 @@ async fn keep_take(app: &Shared, project: &str, shot: &str, from: &FsPath, mut t
         let (clip, picture) = take_files(&p, shot, 1);
         std::fs::rename(&old.0, clip).ok();
         std::fs::rename(&old.1, picture).ok();
-        Take { n: 1, seed: None, seconds: now.seconds, frames: now.frames, made_frames: now.made_frames, continued: now.continues }
+        Take { n: 1, seconds: now.seconds, frames: now.frames, made_frames: now.made_frames, continued: now.continues, ..Take::default() }
     });
     take.n = now.takes.iter().map(|t| t.n).max().unwrap_or(0).max(adopted.as_ref().map_or(0, |t| t.n)) + 1;
     let (clip, picture) = take_files(&p, shot, take.n);
@@ -1274,14 +1611,15 @@ async fn export_when_complete(app: &Shared, project: &str) {
 
 /// The last picture of a clip as base64 JPEG, or `None` when the tool for it is missing or fails
 /// (the shot is then made without it, with a cut).
-async fn last_picture(app: &Shared, clip: &FsPath) -> Option<String> {
+async fn last_picture(app: &Shared, clip: &FsPath, size: &str) -> Option<String> {
     use base64::Engine as _;
     let ffmpeg = crate::engine_tool(app, crate::EngineKind::Ffmpeg, "ffmpeg").await.ok()?;
     let out = std::env::temp_dir().join(format!("rigbrew-last-{}.jpg", uuid::Uuid::new_v4().simple()));
     let status = tokio::process::Command::new(ffmpeg)
         .args(["-hide_banner", "-loglevel", "error", "-y", "-sseof", "-0.2", "-i"])
         .arg(clip)
-        .args(["-frames:v", "1", "-update", "1", "-q:v", "2"])
+        // A clip brought in from a video can be larger than the film: the picture is the film's size.
+        .args(["-frames:v", "1", "-update", "1", "-vf", &format!("scale={}", size.replace('x', ":")), "-q:v", "2"])
         .arg(&out)
         .stdin(std::process::Stdio::null())
         .status()
@@ -1291,6 +1629,20 @@ async fn last_picture(app: &Shared, clip: &FsPath) -> Option<String> {
     std::fs::remove_file(&out).ok();
     status.success().then_some(())?;
     Some(base64::engine::general_purpose::STANDARD.encode(bytes?))
+}
+
+/// Where the newest portrait of a cast member is kept.
+fn portrait_path(p: &Project, member: &Member) -> PathBuf {
+    FsPath::new(&p.folder).join("cast").join(format!("{}.{}.png", member.id, member.portrait))
+}
+
+/// The portrait a shot starts from, as base64: the shot names a member for it, that member has
+/// one, and the installed video model can start a clip from a picture.
+fn portrait_start(app: &App, p: &Project, shot: &Shot) -> Option<String> {
+    use base64::Engine as _;
+    let member = p.cast.iter().find(|m| !shot.from.is_empty() && m.id == shot.from && m.portrait > 0)?;
+    can_continue(app).then_some(())?;
+    Some(base64::engine::general_purpose::STANDARD.encode(std::fs::read(portrait_path(p, member)).ok()?))
 }
 
 /// The number after the last "frame=" in what ffmpeg printed while it read a clip.
@@ -1352,6 +1704,12 @@ async fn clip(State(app): State<Shared>, Path((id, name)): Path<(String, String)
         None => (clip_path(&p, shot), poster_path(&p, shot)),
     };
     let file = if picture { poster } else { clip.clone() };
+    // A clip is asked for as ".webm" whatever it is: one brought in from a video is an MP4, and says so.
+    let kind = match (picture, file.extension().and_then(|e| e.to_str())) {
+        (true, _) => "image/jpeg",
+        (false, Some("mp4")) => "video/mp4",
+        (false, _) => "video/webm",
+    };
     // A film made before pictures were kept gets them when they are first asked for.
     if picture && !file.is_file() && clip.is_file() {
         let frames = look_at(&app, &clip, &file).await;
@@ -1361,7 +1719,7 @@ async fn clip(State(app): State<Shared>, Path((id, name)): Path<(String, String)
     }
     match tokio::fs::read(file).await {
         Ok(bytes) => Response::builder()
-            .header(header::CONTENT_TYPE, if picture { "image/jpeg" } else { "video/webm" })
+            .header(header::CONTENT_TYPE, kind)
             .header(header::CACHE_CONTROL, "no-store")
             .body(Body::from(bytes))
             .unwrap(),
@@ -1622,64 +1980,72 @@ struct Idea {
     idea: String,
     #[serde(default)]
     shots: Option<u32>,
+    /// Every line of the idea is one shot, as it is written: nothing is asked of the chat model.
+    #[serde(default)]
+    as_written: bool,
 }
 
-async fn storyboard(State(app): State<Shared>, Path(_id): Path<String>, Json(body): Json<Idea>) -> Response {
-    let idea: String = body.idea.trim().chars().take(2000).collect();
+/// The shots of a film, written by the chat model for the film as it is saved: with its cast
+/// (named, never described), without its look (that is added when a shot is made), and with
+/// spoken lines when the film has speech. Nothing is saved.
+async fn storyboard(State(app): State<Shared>, Path(id): Path<String>, Json(body): Json<Idea>) -> Response {
+    let idea: String = body.idea.trim().chars().take(4000).collect();
     if idea.is_empty() {
         return fail(StatusCode::BAD_REQUEST, "say what the film is about in \"idea\"");
     }
     let count = body.shots.unwrap_or(6).clamp(1, MAX_STORYBOARD as u32) as usize;
-    let Some(chat) = app.manifest.packages.iter().find(|p| p.modality == Modality::Chat && !app.installed(p).is_empty()) else {
-        return fail(StatusCode::CONFLICT, "No chat model is installed. Add Chat under Models first.");
+    // Shots are written to be made: without the video model nothing is written.
+    if let Err(refusal) = need(&app, Modality::Video) {
+        return *refusal;
+    }
+    let p = load(&app, &id).unwrap_or_default();
+    let names: Vec<String> = p.cast.iter().map(|m| m.name.clone()).collect();
+    let answer = |shots: Vec<board::Line>| {
+        let list: Vec<Value> = shots
+            .into_iter()
+            .map(|s| {
+                let lines: Vec<Value> = s
+                    .said
+                    .into_iter()
+                    .map(|(who, text)| json!({"who": p.cast.iter().find(|m| m.name == who).map_or("", |m| m.id.as_str()), "text": text}))
+                    .collect();
+                json!({"prompt": s.prompt, "continues": s.continues, "lines": lines})
+            })
+            .collect();
+        Json(json!({"shots": list})).into_response()
     };
-    let Some(port) = own_port(&app) else {
-        return fail(StatusCode::INTERNAL_SERVER_ERROR, "the service does not know its own address");
-    };
+    if body.as_written {
+        let shots: Vec<board::Line> =
+            brief::as_written(&idea, count).into_iter().map(|prompt| board::Line { prompt, ..board::Line::default() }).collect();
+        if shots.is_empty() {
+            return fail(StatusCode::BAD_REQUEST, "Write at least one shot, one on each line.");
+        }
+        app.record("studio_storyboard_written", json!({"shots": shots.len(), "scenes": shots.len(), "asked": count, "as_written": true}));
+        return answer(shots);
+    }
+    if let Err(refusal) = need(&app, Modality::Chat) {
+        return *refusal;
+    }
+    let language = dub::own_language(&p);
+    let who: Vec<String> = p.cast.iter().map(|m| board::who_is(&m.look)).collect();
+    let wants = board::Wants { cast: &names, who: &who, look: &p.look, speech: p.speech, language: &language };
+    let plain = names.is_empty() && p.look.is_empty() && !p.speech;
     // A long film is written in parts, each part told what came before it.
     let mut shots: Vec<board::Line> = Vec::new();
     for _ in 0..count / board::PART + 3 {
-        let ask = (count - shots.len()).min(board::PART);
-        if ask == 0 {
+        let wanted = (count - shots.len()).min(board::PART);
+        if wanted == 0 {
             break;
         }
-        let request = json!({
-            "model": chat.id,
-            "messages": [
-                {"role": "system", "content": board::system_prompt(ask)},
-                {"role": "user", "content": board::part_request(&idea, &shots, ask, count)},
-            ],
-            "max_tokens": 140 * ask + 200,
-            "temperature": 0.7,
-            "chat_template_kwargs": {"enable_thinking": false},
-        });
-        let answer = app
-            .http
-            .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
-            .bearer_auth(&app.token)
-            .json(&request)
-            .timeout(Duration::from_secs(300))
-            .send()
-            .await;
-        let text = match answer {
-            Ok(r) if r.status().is_success() => r
-                .json::<Value>()
-                .await
-                .ok()
-                .and_then(|v| v["choices"][0]["message"]["content"].as_str().map(str::to_string))
-                .unwrap_or_default(),
+        let system = if plain { board::system_prompt(wanted) } else { board::system_prompt_for(wanted, &wants) };
+        let tokens = (if p.speech { 190 } else { 140 }) * wanted as u32 + 200;
+        let text = match ask(&app, &system, &board::part_request(&idea, &shots, wanted, count), tokens, 0.7).await {
+            Ok(text) => text,
             // What is written so far is still a film.
-            _ if !shots.is_empty() => break,
-            Ok(r) => {
-                let v: Value = r.json().await.unwrap_or(Value::Null);
-                return fail(
-                    StatusCode::BAD_GATEWAY,
-                    v["error"]["message"].as_str().unwrap_or("the chat model could not answer").to_string(),
-                );
-            }
-            Err(e) => return fail(StatusCode::BAD_GATEWAY, e.to_string()),
+            Err(_) if !shots.is_empty() => break,
+            Err((status, why)) => return fail(status, why),
         };
-        let part = board::shot_lines(&text, ask);
+        let part = board::shots_and_lines(&text, wanted, p.speech.then_some(names.as_slice()));
         if part.is_empty() {
             break;
         }
@@ -1691,9 +2057,12 @@ async fn storyboard(State(app): State<Shared>, Path(_id): Path<String>, Json(bod
     // A film starts with a cut.
     shots[0].continues = false;
     let scenes = shots.iter().filter(|s| !s.continues).count();
-    app.record("studio_storyboard_written", json!({"shots": shots.len(), "scenes": scenes, "asked": count}));
-    Json(json!({"shots": shots.into_iter().map(|s| json!({"prompt": s.prompt, "continues": s.continues})).collect::<Vec<_>>()}))
-        .into_response()
+    let lines: usize = shots.iter().map(|s| s.said.len()).sum();
+    app.record(
+        "studio_storyboard_written",
+        json!({"shots": shots.len(), "scenes": scenes, "asked": count, "cast": names.len(), "lines": lines, "look": !p.look.is_empty()}),
+    );
+    answer(shots)
 }
 
 #[derive(Deserialize, Default)]
@@ -1720,45 +2089,14 @@ async fn rewrite(State(app): State<Shared>, Path((id, shot)): Path<(String, Stri
     if now.is_empty() && hint.is_empty() {
         return fail(StatusCode::BAD_REQUEST, "Write a few words about the shot first.");
     }
-    let Some(chat) = app.manifest.packages.iter().find(|p| p.modality == Modality::Chat && !app.installed(p).is_empty()) else {
-        return fail(StatusCode::CONFLICT, "No chat model is installed. Add Chat under Models first.");
-    };
-    let Some(port) = own_port(&app) else {
-        return fail(StatusCode::INTERNAL_SERVER_ERROR, "the service does not know its own address");
-    };
     // The shots around it say who and where: up to three before it and one after.
     let before: Vec<&str> = p.shots[at.saturating_sub(3)..at].iter().map(|s| s.prompt.as_str()).filter(|t| !t.is_empty()).collect();
     let after = p.shots.get(at + 1).map(|s| s.prompt.as_str()).filter(|t| !t.is_empty());
-    let request = json!({
-        "model": chat.id,
-        "messages": [
-            {"role": "system", "content": board::rewrite_prompt()},
-            {"role": "user", "content": board::rewrite_request(&before, after, &now, &hint, p.shots[at].continues && at > 0)},
-        ],
-        "max_tokens": 320,
-        "temperature": 0.6,
-        "chat_template_kwargs": {"enable_thinking": false},
-    });
-    let answer = app
-        .http
-        .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
-        .bearer_auth(&app.token)
-        .json(&request)
-        .timeout(Duration::from_secs(180))
-        .send()
-        .await;
-    let text = match answer {
-        Ok(r) if r.status().is_success() => r
-            .json::<Value>()
-            .await
-            .ok()
-            .and_then(|v| v["choices"][0]["message"]["content"].as_str().map(str::to_string))
-            .unwrap_or_default(),
-        Ok(r) => {
-            let v: Value = r.json().await.unwrap_or(Value::Null);
-            return fail(StatusCode::BAD_GATEWAY, v["error"]["message"].as_str().unwrap_or("the chat model could not answer").to_string());
-        }
-        Err(e) => return fail(StatusCode::BAD_GATEWAY, e.to_string()),
+    let names: Vec<String> = p.cast.iter().map(|m| m.name.clone()).collect();
+    let asked = board::rewrite_request(&before, after, &now, &hint, p.shots[at].continues && at > 0);
+    let text = match ask(&app, &board::rewrite_prompt_for(&names), &asked, 320, 0.6).await {
+        Ok(text) => text,
+        Err((status, why)) => return fail(status, why),
     };
     match board::one_description(&text) {
         Some(prompt) => {
@@ -1838,7 +2176,7 @@ fn concat_list(p: &Project, shots: &[&Shot]) -> String {
 }
 
 /// The shots as the pieces of the film: what is kept of each clip, how it joins, how loud it is.
-fn pieces(shots: &[&Shot], sounds: &[bool]) -> Vec<export::Piece> {
+fn pieces(shots: &[&Shot], sounds: &[bool], fit: Option<(u32, u32)>) -> Vec<export::Piece> {
     shots
         .iter()
         .enumerate()
@@ -1854,6 +2192,7 @@ fn pieces(shots: &[&Shot], sounds: &[bool]) -> Vec<export::Piece> {
                 volume: if s.mute { 0.0 } else { s.volume.clamp(0.0, 1.5) },
                 has_sound: sounds.get(i).copied().unwrap_or(true),
                 join_frames: ((s.join_seconds.clamp(0.25, 2.0) * 24.0).round() as u32).max(2),
+                fit,
             }
         })
         .collect()
@@ -1914,23 +2253,30 @@ async fn begin_export(app: &Shared, p: Project, body: Export) -> Result<usize, (
     for clip in &clips {
         sounds.push(has_sound(&ffmpeg, clip).await);
     }
-    let pieces = pieces(&shots, &sounds);
-    // A film of plain cuts is read as one list; anything more is a filter graph over every clip.
-    let simple = export::plain(&pieces);
-    let film = if simple { export::as_it_is(export::film_frames(&pieces)) } else { export::joined(&pieces) };
-    let volume = body.music_volume.unwrap_or(p.sound_volume).clamp(0.0, 1.0);
     let options = ExportOptions {
         scale: body.scale.unwrap_or(p.export.scale),
         quality: body.quality.clone().unwrap_or_else(|| p.export.quality.clone()),
         name: body.name.clone().unwrap_or_else(|| p.export.name.clone()),
     }
     .tidy();
+    // A film that holds clips brought in from a video holds clips of another kind, and maybe of
+    // twice the size: every clip is brought to one size as it is joined. An enlarged export keeps
+    // what the larger clips have.
+    let takes: Vec<&Take> = shots.iter().filter_map(|s| take_in_use(&p, &s.id)).collect();
+    let brought = takes.iter().any(|t| !t.ext.is_empty());
+    let keeps_large = options.scale == 2 && takes.iter().any(|t| t.large);
+    let fit = brought.then(|| dub::export_size(&p, if keeps_large { 2 } else { 0 }));
+    let pieces = pieces(&shots, &sounds, fit);
+    // A film of plain cuts is read as one list; anything more is a filter graph over every clip.
+    let simple = export::plain(&pieces);
+    let film = if simple { export::as_it_is(export::film_frames(&pieces)) } else { export::joined(&pieces) };
+    let volume = body.music_volume.unwrap_or(p.sound_volume).clamp(0.0, 1.0);
     let (video_bits, sound_bits) = options.bitrates(&p.size);
     // The files the sound tracks play come after the clips (and the one sound file, when there is one).
     let first_sound = if simple { 1 } else { count } + usize::from(music.is_some());
     let mut sound_files: Vec<PathBuf> = Vec::new();
     let mut missing: Option<String> = None;
-    let mix = sound::heard(&p.shot_track, &p.tracks, p.master, |file| {
+    let mix = sound::heard(&p.shot_track, &p.tracks, p.master, p.duck, |file| {
         let path = sound::place(FsPath::new(&p.folder), file).filter(|path| path.is_file());
         let Some(path) = path else {
             missing.get_or_insert_with(|| file.rsplit(['/', '\\']).next().unwrap_or(file).to_string());
@@ -1948,16 +2294,46 @@ async fn begin_export(app: &Shared, p: Project, body: Export) -> Result<usize, (
         return Err((StatusCode::BAD_REQUEST, why));
     }
     let (track_count, region_count) = (p.tracks.len(), mix.sounds.len());
+    let folder = PathBuf::from(&p.folder);
+    let out = export_path(&p, &options);
+    // The subtitles: always a file next to the film; drawn into the pictures when that was asked
+    // for and the app drew them for this film at this size; else a track a player turns on.
+    let cues = dub::subtitles(&p, true);
+    let size = dub::export_size(&p, options.scale);
+    let burned = if p.subtitles.burn { dub::drawn(&p, &cues, size) } else { None };
+    let track = p.subtitles.show && burned.is_none() && !cues.is_empty();
+    let srt_path = out.with_extension("srt");
+    let captions_input = first_sound + sound_files.len();
     let finish = export::Finish {
         fade_in: p.fade_in,
         fade_out: p.fade_out,
-        scale: options.scale,
+        scale: if keeps_large { 0 } else { options.scale },
         music: music.as_ref().map(|_| (if simple { 1 } else { count }, volume)),
         mix: Some(mix),
+        captions: burned.as_ref().map(|(_, note)| (captions_input, size.1.saturating_sub(note.height))),
     };
+    let film_seconds = film.frames as f32 / 24.0;
     let graph = export::finished(film, &finish);
-    let folder = PathBuf::from(&p.folder);
-    let out = export_path(&p, &options);
+    let captions_list = burned.as_ref().map(|(dir, _)| dir.join("list.txt"));
+    if let Some(list) = &captions_list {
+        std::fs::write(list, dub::caption_list(&cues, film_seconds)).ok();
+    }
+    if cues.is_empty() {
+        std::fs::remove_file(&srt_path).ok();
+    } else if let Err(e) = std::fs::write(&srt_path, words::srt(&cues)) {
+        set_export(&id, json!({"state": "failed", "error": format!("the film's folder cannot be written to: {e}")}));
+        return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("the film's folder cannot be written to: {e}")));
+    }
+    let subtitles = if cues.is_empty() {
+        "none"
+    } else if burned.is_some() {
+        "burned"
+    } else if track {
+        "track"
+    } else {
+        "file"
+    };
+    let language = words::language_code(&dub::shown_language(&p));
     let list_path = folder.join(".rigbrew-export.txt");
     let graph_path = folder.join(".rigbrew-export-graph.txt");
     let written = if simple { std::fs::write(&list_path, concat_list(&p, &shots)) } else { Ok(()) }.and_then(|()| {
@@ -1999,10 +2375,23 @@ async fn begin_export(app: &Shared, p: Project, body: Export) -> Result<usize, (
         for file in &sound_files {
             cmd.arg("-i").arg(file);
         }
+        if let Some(list) = &captions_list {
+            cmd.args(["-f", "concat", "-safe", "0", "-i"]).arg(list);
+        }
+        if track {
+            cmd.arg("-i").arg(&srt_path);
+        }
         if !graph.filter.is_empty() {
             // The graph of a long film is longer than a command line may be: it is read from a file.
             cmd.arg("-/filter_complex").arg(&graph_path);
+        }
+        if !graph.filter.is_empty() || track {
             cmd.args(["-map", &graph.video, "-map", &graph.audio]);
+        }
+        if track {
+            // The subtitle file is the last input: one text track, named by its language.
+            let input = captions_input + usize::from(captions_list.is_some());
+            cmd.args(["-map", &format!("{input}:0"), "-c:s", "mov_text", "-metadata:s:s:0", &format!("language={language}")]);
         }
         // Apple's own encoders: H.264 in hardware and AAC. Plays everywhere.
         cmd.args([
@@ -2045,12 +2434,13 @@ async fn begin_export(app: &Shared, p: Project, body: Export) -> Result<usize, (
                     "studio_exported",
                     json!({"shots": count, "seconds": started.elapsed().as_secs_f32(), "bytes": bytes, "music": music.is_some(),
                            "film_seconds": graph.frames as f32 / 24.0, "dissolves": joins.0, "through_black": joins.1, "plain": simple,
-                           "tracks": track_count, "regions": region_count,
+                           "tracks": track_count, "regions": region_count, "subtitles": subtitles,
                            "scale": options.scale.max(1), "quality": if options.quality.is_empty() { "balanced" } else { options.quality.as_str() }}),
                 );
                 set_export(
                     &id,
-                    json!({"state": "done", "file": out.to_string_lossy(), "bytes": bytes, "shots": count, "seconds": graph.frames as f32 / 24.0}),
+                    json!({"state": "done", "file": out.to_string_lossy(), "bytes": bytes, "shots": count, "seconds": graph.frames as f32 / 24.0,
+                           "subtitles": subtitles}),
                 );
             }
             Err(e) => {
@@ -2134,8 +2524,9 @@ async fn narration(State(app): State<Shared>, Path(id): Path<String>, Json(body)
     if text.is_empty() {
         return fail(StatusCode::BAD_REQUEST, "write what is to be said in \"text\"");
     }
-    let Some(voice) = app.manifest.packages.iter().find(|pk| pk.modality == Modality::Voice && !app.installed(pk).is_empty()) else {
-        return fail(StatusCode::CONFLICT, "No voice is installed. Add a voice under Models first.");
+    let voice = match need(&app, Modality::Voice) {
+        Ok(package) => package,
+        Err(refusal) => return *refusal,
     };
     let Some(port) = own_port(&app) else {
         return fail(StatusCode::INTERNAL_SERVER_ERROR, "the service does not know its own address");
@@ -2144,7 +2535,7 @@ async fn narration(State(app): State<Shared>, Path(id): Path<String>, Json(body)
         .http
         .post(format!("http://127.0.0.1:{port}/v1/audio/speech"))
         .bearer_auth(&app.token)
-        .json(&json!({"model": voice.id, "input": text}))
+        .json(&json!({"model": voice.id, "input": text, "voice": p.voice.unwrap_or(0)}))
         .timeout(Duration::from_secs(900))
         .send()
         .await;
@@ -2187,6 +2578,7 @@ async fn narration(State(app): State<Shared>, Path(id): Path<String>, Json(body)
                 id: new_id(),
                 name: "Narration".into(),
                 kind: "sound".into(),
+                lang: String::new(),
                 color: sound::next_color(p.tracks.len()),
                 volume: 1.0,
                 pan: 0.0,
@@ -2207,6 +2599,7 @@ async fn narration(State(app): State<Shared>, Path(id): Path<String>, Json(body)
         fade_in: 0.0,
         fade_out: 0.0,
         loops: 1,
+        line: String::new(),
     };
     let placed = json!({"track": p.tracks[at].id, "id": region.id, "seconds": seconds});
     p.tracks[at].regions.push(region);
@@ -2240,6 +2633,17 @@ pub fn router() -> Router<Shared> {
         .route("/v1/studio/projects/{id}/shots/{shot}/take", post(use_take))
         .route("/v1/studio/projects/{id}/shots/{shot}/takes/{n}", axum::routing::delete(delete_take))
         .route("/v1/studio/projects/{id}/clips/{name}", get(clip))
+        .route("/v1/studio/brief", post(direct::brief))
+        .route("/v1/studio/projects/{id}/import", get(bring::state).post(bring::import))
+        .route("/v1/studio/projects/{id}/cast/look", post(direct::look))
+        .route("/v1/studio/projects/{id}/cast/{member}/portrait", get(direct::portrait).post(direct::make_portrait))
+        .route("/v1/studio/projects/{id}/dub", get(dub::dub_state).post(dub::dub))
+        .route("/v1/studio/projects/{id}/listen", get(dub::listen_state).post(dub::listen))
+        .route("/v1/studio/projects/{id}/subtitles", get(dub::subtitles_get))
+        .route(
+            "/v1/studio/projects/{id}/captions",
+            axum::routing::put(dub::caption_put).layer(axum::extract::DefaultBodyLimit::max(12 * 1024 * 1024)),
+        )
 }
 
 #[cfg(test)]
@@ -2475,7 +2879,7 @@ mod tests {
         c.mute = true;
         let mut d = a.clone();
         d.join = "black".into();
-        let made = pieces(&[&a, &b, &c, &d], &[true, true, true, false]);
+        let made = pieces(&[&a, &b, &c, &d], &[true, true, true, false], None);
         // The first shot has no join; a shot that continues the one before it is always a cut.
         assert_eq!(
             made.iter().map(|x| x.join).collect::<Vec<_>>(),
@@ -2500,7 +2904,15 @@ mod tests {
     }
 
     fn take(n: u32, frames: u32) -> Take {
-        Take { n, seed: Some(n as i64 * 11), seconds: Some(n as f32 * 10.0), frames, made_frames: Some(frames + 7), continued: false }
+        Take {
+            n,
+            seed: Some(n as i64 * 11),
+            seconds: Some(n as f32 * 10.0),
+            frames,
+            made_frames: Some(frames + 7),
+            continued: false,
+            ..Take::default()
+        }
     }
 
     #[test]
@@ -2630,7 +3042,8 @@ mod tests {
 
     #[test]
     fn a_shot_changed_back_is_made_again_without_making_it() {
-        let size = ("640x384", "640x384");
+        let (wide, tall) = (film("640x384"), film("384x640"));
+        let size = (&wide, &wide);
         let mut b = shot("b2", "the fox stops", "done");
         b.continues = true;
         let old = vec![shot("a1", "a fox", "done"), b, shot("c3", "a boat", "failed")];
@@ -2643,10 +3056,10 @@ mod tests {
         let (back, _) = merge(&changed, &[], ask("a fox", "the fox stops"), size).unwrap();
         assert_eq!(back.iter().map(|s| s.state.as_str()).collect::<Vec<_>>(), ["done", "done", "empty"]);
         // Another shape and back again: the same.
-        let (tall, _) = merge(&old, &[], ask("a fox", "the fox stops"), ("640x384", "384x640")).unwrap();
-        assert_eq!(tall.iter().map(|s| s.state.as_str()).collect::<Vec<_>>(), ["changed", "changed", "empty"]);
-        let (wide, _) = merge(&tall, &[], ask("a fox", "the fox stops"), ("384x640", "640x384")).unwrap();
-        assert_eq!(wide.iter().map(|s| s.state.as_str()).collect::<Vec<_>>(), ["done", "done", "empty"]);
+        let (tall_film, _) = merge(&old, &[], ask("a fox", "the fox stops"), (&wide, &tall)).unwrap();
+        assert_eq!(tall_film.iter().map(|s| s.state.as_str()).collect::<Vec<_>>(), ["changed", "changed", "empty"]);
+        let (again, _) = merge(&tall_film, &[], ask("a fox", "the fox stops"), (&tall, &wide)).unwrap();
+        assert_eq!(again.iter().map(|s| s.state.as_str()).collect::<Vec<_>>(), ["done", "done", "empty"]);
         // A film from before this was kept does not know what its changed shots were made from.
         let legacy = vec![shot("a1", "a fox in rain", "changed")];
         let (still, _) = merge(&legacy, &[], vec![asked("a1", "a fox", false)], size).unwrap();
@@ -2655,7 +3068,8 @@ mod tests {
 
     #[test]
     fn a_shot_taken_out_of_the_film_comes_back_with_its_clip() {
-        let size = ("640x384", "640x384");
+        let wide = film("640x384");
+        let size = (&wide, &wide);
         let mut b = shot("b2", "the fox stops", "done");
         b.continues = true;
         b.takes = vec![take(1, 49), take(2, 49)];
@@ -2696,7 +3110,7 @@ mod tests {
         slow.made_frames = Some(96);
         slow.join = "dissolve".into();
         slow.join_seconds = 1.25;
-        assert_eq!(pieces(&[&shot("a1", "fox", "done"), &slow], &[true, true])[1].join_frames, 30);
+        assert_eq!(pieces(&[&shot("a1", "fox", "done"), &slow], &[true, true], None)[1].join_frames, 30);
         // A film without tracks is stored as before, and one from before tracks is read as it is.
         let p = Project { id: "p".into(), name: "Film".into(), folder: "/films/fox".into(), ..Project::default() };
         let text = serde_json::to_string(&p).unwrap();
@@ -2752,5 +3166,231 @@ mod tests {
         assert_eq!(new_folder(&home, "The fox: a film"), home.join("The fox a film 2"));
         assert_eq!(new_folder(&home, ""), home.join("film"));
         std::fs::remove_dir_all(home).ok();
+    }
+
+    fn member(id: &str, name: &str, look: &str) -> Member {
+        Member { id: id.into(), name: name.into(), look: look.into(), voice: None, portrait: 0 }
+    }
+
+    #[test]
+    fn a_new_look_marks_the_shots_it_is_in() {
+        let cast = [member("m1", "Mira", "a girl of eight in a yellow raincoat"), member("f1", "Fox", "a small red fox")];
+        let was = Film { size: "640x384", look: "soft watercolour", cast: &cast };
+        let old = vec![
+            shot("a1", "Mira kneels by the stream", "done"),
+            shot("b2", "Fox watches from the trees", "done"),
+            shot("c3", "the forest from above", "done"),
+        ];
+        let same = |list: &[Shot]| list.iter().map(|s| asked(&s.id, &s.prompt, false)).collect::<Vec<_>>();
+        // Nothing changed: every shot keeps its clip.
+        let (kept, _) = merge(&old, &[], same(&old), (&was, &was)).unwrap();
+        assert!(kept.iter().all(|s| s.state == "done"));
+        // Mira gets red boots: the shot that names her is changed, the others are not.
+        let boots = [member("m1", "Mira", "a girl of eight in a yellow raincoat and red boots"), cast[1].clone()];
+        let now = Film { cast: &boots, ..was };
+        let (changed, _) = merge(&old, &[], same(&old), (&was, &now)).unwrap();
+        assert_eq!(changed.iter().map(|s| s.state.as_str()).collect::<Vec<_>>(), ["changed", "done", "done"]);
+        // The look back as it was: the clip is the one that was made from it.
+        let (back, _) = merge(&changed, &[], same(&changed), (&now, &was)).unwrap();
+        assert!(back.iter().all(|s| s.state == "done"));
+        // Another look for the whole film changes every shot.
+        let ink = Film { look: "black ink on paper", ..was };
+        let (all, _) = merge(&old, &[], same(&old), (&was, &ink)).unwrap();
+        assert!(all.iter().all(|s| s.state == "changed"));
+        // A film without a cast and without a look is made from what it always was.
+        assert_eq!(film("640x384").key("a fox", 121, None, ""), made_key("640x384", "a fox", 121, None));
+        assert_eq!(film("640x384").key("a fox", 121, Some("a1"), "m1"), made_key("640x384", "a fox", 121, Some("a1")));
+    }
+
+    #[test]
+    fn a_shot_keeps_its_lines_and_where_it_starts_from() {
+        let mut portrayed = member("m1", "Mira", "a girl of eight");
+        portrayed.portrait = 1;
+        let cast = [portrayed.clone()];
+        let now = Film { size: "640x384", look: "", cast: &cast };
+        let said = |text: &str| words::SpokenIn { who: "m1".into(), text: text.into(), ..words::SpokenIn::default() };
+        let mut new = asked("a1", "Mira kneels by the stream", false);
+        new.lines = Some(vec![
+            said("Go on, little boat!"),
+            words::SpokenIn { who: "gone".into(), text: "And it went.".into(), ..words::SpokenIn::default() },
+        ]);
+        new.from = Some("m1".into());
+        let old = vec![shot("a1", "Mira kneels by the stream", "done")];
+        let (out, _) = merge(&old, &[], vec![new], (&now, &now)).unwrap();
+        assert_eq!(
+            out[0].lines.iter().map(|l| (l.who.as_str(), l.text.as_str())).collect::<Vec<_>>(),
+            [("m1", "Go on, little boat!"), ("", "And it went.")]
+        );
+        // Starting from the portrait is another picture to start from: the shot is made again.
+        assert_eq!((out[0].from.as_str(), out[0].state.as_str()), ("m1", "changed"));
+        // A save without lines keeps them; what is said changes nothing about the clip.
+        let mut again = asked("a1", "Mira kneels by the stream", false);
+        again.from = Some("m1".into());
+        let done = vec![Shot { state: "done".into(), ..out[0].clone() }];
+        let (kept, _) = merge(&done, &[], vec![again], (&now, &now)).unwrap();
+        assert_eq!((kept[0].lines.len(), kept[0].state.as_str()), (2, "done"));
+        // A new portrait is another picture again; a member who left the cast is nobody to start from, and says nothing.
+        portrayed.portrait = 2;
+        let redone = [portrayed];
+        let mut third = asked("a1", "Mira kneels by the stream", false);
+        third.from = Some("m1".into());
+        let (remade, _) = merge(&done, &[], vec![third], (&now, &Film { cast: &redone, ..now })).unwrap();
+        assert_eq!(remade[0].state, "changed");
+        let mut fourth = asked("a1", "Mira kneels by the stream", false);
+        fourth.from = Some("m1".into());
+        let (alone, _) = merge(&done, &[], vec![fourth], (&now, &film("640x384"))).unwrap();
+        assert!(alone[0].from.is_empty() && alone[0].lines.iter().all(|l| l.who.is_empty()));
+    }
+
+    #[test]
+    fn a_clip_brought_in_is_found_by_its_own_ending() {
+        let mut brought = shot("a1", "", "done");
+        brought.takes = vec![
+            Take { n: 1, frames: 96, ext: "mp4".into(), large: true, ..Take::default() },
+            Take { n: 2, frames: 121, ..Take::default() },
+        ];
+        brought.take = 1;
+        let mut p = Project { folder: "/films/fox".into(), shots: vec![brought, shot("b2", "a fox", "done")], ..Project::default() };
+        assert!(clip_path(&p, "a1").ends_with("clips/a1.1.mp4") && clip_path(&p, "b2").ends_with("clips/b2.webm"));
+        assert!(take_files(&p, "a1", 1).0.ends_with("a1.1.mp4") && take_files(&p, "a1", 2).0.ends_with("a1.2.webm"));
+        assert!(take_files(&p, "a1", 1).1.ends_with("a1.1.jpg"));
+        p.shots[0].take = 2;
+        assert!(clip_path(&p, "a1").ends_with("clips/a1.2.webm"));
+        // Only the endings Studio writes itself are ever looked for.
+        p.shots[0].takes[1].ext = "../../etc/passwd".into();
+        assert!(clip_path(&p, "a1").ends_with("clips/a1.2.webm"));
+    }
+
+    /// A service with nothing in it, or with a video model that counts as installed.
+    fn bare_app(video: bool) -> (Shared, PathBuf) {
+        use std::collections::HashMap;
+        let dir = std::env::temp_dir().join(format!("rigbrewd-studio-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let packages = if video {
+            r#"[{"id":"pour-test","name":"Pour","modality":"video","version":1,"engine":"sdcpp","access":"public",
+                 "source":{"name":"s","url":"u","license":"l","changes":"c"},"quality_floor":0.5,
+                 "variants":[{"id":"q4","accel_mem_mb":1,"backends":[],"quality":1.0,"files":[{"role":"dit","path":"pour-test/dit.gguf","size":1,
+                 "sha256":"0000000000000000000000000000000000000000000000000000000000000000"}]}]}]"#
+        } else {
+            "[]"
+        };
+        // The one file of the video model is there: that is what "installed" means.
+        std::fs::create_dir_all(dir.join("packages").join("pour-test")).unwrap();
+        std::fs::write(dir.join("packages").join("pour-test").join("dit.gguf"), "x").unwrap();
+        let manifest = format!(r#"{{"schema":1,"generated":"2026-11-20","base_url":"http://127.0.0.1:9/","packages":{packages}}}"#);
+        let app = App {
+            profile: rigbrew_core::hardware::scan_with_data_dir(&dir),
+            manifest: rigbrew_core::Manifest::parse(&manifest).unwrap(),
+            community: Mutex::new(rigbrew_core::community::Store::load(&dir)),
+            root: dir.clone(),
+            token: "t".into(),
+            events: Mutex::new(rigbrew_core::events::EventStore::open(&dir.join("events.db")).unwrap()),
+            chats: Mutex::new(rigbrew_core::chats::ChatStore::in_memory().unwrap()),
+            jobs: Mutex::new(HashMap::new()),
+            tasks: Mutex::new(HashMap::new()),
+            wanted_lock: Mutex::new(()),
+            engine: tokio::sync::Mutex::new(Vec::new()),
+            http: reqwest::Client::new(),
+            net: reqwest::Client::new(),
+            server: String::new(),
+            session: Mutex::new(None),
+            sync: Mutex::new(crate::cloud::SyncState::default()),
+            sync_now: tokio::sync::Notify::new(),
+            telemetry_off: true,
+            voice: tokio::sync::Mutex::new(()),
+            listen: tokio::sync::Mutex::new(()),
+            videos: Mutex::new(HashMap::new()),
+            image_progress: Mutex::new(None),
+            agent: crate::agent::Agents::load(&dir),
+            connectors: crate::connectors::Connectors::new(&dir),
+        };
+        (std::sync::Arc::new(app), dir)
+    }
+
+    async fn said(response: Response) -> (StatusCode, String) {
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+        (status, v["error"]["message"].as_str().unwrap_or("").to_string())
+    }
+
+    #[tokio::test]
+    async fn nothing_is_written_or_made_without_the_model_for_it() {
+        let (app, dir) = bare_app(false);
+        let folder = dir.join("film").to_string_lossy().to_string();
+        let made = create(State(app.clone()), Json(NewProject { folder, name: "Fox".into() })).await;
+        assert_eq!(made.status(), StatusCode::OK);
+        let id = index(&app)[0].0.clone();
+        let saved = save(
+            State(app.clone()),
+            Path(id.clone()),
+            Json(
+                serde_json::from_value(json!({
+                    "cast": [{"id": "m1", "name": "Mira", "look": "a girl of eight"}],
+                    "shots": [{"id": "a1", "prompt": "Mira kneels by the stream", "lines": [{"who": "m1", "text": "Go on, little boat!"}]}],
+                }))
+                .unwrap(),
+            ),
+        )
+        .await;
+        assert_eq!(saved.status(), StatusCode::OK);
+        let video = (StatusCode::CONFLICT, missing(Modality::Video).to_string());
+        let chat = (StatusCode::CONFLICT, missing(Modality::Chat).to_string());
+        let idea = |as_written: bool| Json(Idea { idea: "a fox finds a paper boat".into(), shots: Some(3), as_written });
+        // No video model: no brief, no shots written (not even as written), nothing made.
+        assert_eq!(
+            said(direct::brief(State(app.clone()), Json(serde_json::from_value(json!({"text": "a fox"})).unwrap())).await).await,
+            video
+        );
+        assert_eq!(said(storyboard(State(app.clone()), Path(id.clone()), idea(false)).await).await, video);
+        assert_eq!(said(storyboard(State(app.clone()), Path(id.clone()), idea(true)).await).await, video);
+        assert_eq!(said(render(State(app.clone()), Path(id.clone()), None).await).await, video);
+        // No chat model: no description written again, no look written.
+        assert_eq!(said(rewrite(State(app.clone()), Path((id.clone(), "a1".into())), None).await).await, chat);
+        let look = Json(serde_json::from_value(json!({"name": "Mira", "words": "curious"})).unwrap());
+        assert_eq!(said(direct::look(State(app.clone()), Path(id.clone()), look).await).await, chat);
+        // No voice, no picture model, no listening model: no dub, no portrait, nothing written down.
+        assert_eq!(
+            said(dub::dub(State(app.clone()), Path(id.clone()), None).await).await,
+            (StatusCode::CONFLICT, missing(Modality::Voice).to_string())
+        );
+        assert_eq!(
+            said(direct::make_portrait(State(app.clone()), Path((id.clone(), "m1".into()))).await).await,
+            (StatusCode::CONFLICT, missing(Modality::Image).to_string())
+        );
+        assert_eq!(
+            said(dub::listen(State(app.clone()), Path(id.clone()), None).await).await,
+            (StatusCode::CONFLICT, missing(Modality::Listen).to_string())
+        );
+        // The film says what it has, so the app can say what is missing before anything is asked.
+        let seen = view(&app, load(&app, &id).unwrap());
+        assert_eq!(seen["has"], json!({"video": false, "chat": false, "voice": false, "image": false}));
+        assert_eq!(seen["cast_in"], json!({"m1": ["a1"]}));
+        assert_eq!(seen["cues"][0]["text"], "Go on, little boat!");
+        assert_eq!((seen["can_listen"].as_bool(), seen["voices"].as_u64()), (Some(false), Some(0)));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[tokio::test]
+    async fn with_the_video_model_the_chat_model_is_asked_for_next() {
+        let (app, dir) = bare_app(true);
+        let folder = dir.join("film").to_string_lossy().to_string();
+        create(State(app.clone()), Json(NewProject { folder, name: "Fox".into() })).await;
+        let id = index(&app)[0].0.clone();
+        let chat = (StatusCode::CONFLICT, missing(Modality::Chat).to_string());
+        assert_eq!(
+            said(direct::brief(State(app.clone()), Json(serde_json::from_value(json!({"text": "a fox"})).unwrap())).await).await,
+            chat
+        );
+        let idea =
+            |as_written: bool| Json(Idea { idea: "A fox walks through snow.\nA boat floats by.".into(), shots: Some(3), as_written });
+        assert_eq!(said(storyboard(State(app.clone()), Path(id.clone()), idea(false)).await).await, chat);
+        // Shots used as written ask nothing of the chat model.
+        let written = storyboard(State(app.clone()), Path(id.clone()), idea(true)).await;
+        assert_eq!(written.status(), StatusCode::OK);
+        let body: Value = serde_json::from_slice(&axum::body::to_bytes(written.into_body(), 1024 * 1024).await.unwrap()).unwrap();
+        assert_eq!(body["shots"].as_array().map(Vec::len), Some(2));
+        assert_eq!(body["shots"][1]["prompt"], "A boat floats by.");
+        std::fs::remove_dir_all(dir).ok();
     }
 }
