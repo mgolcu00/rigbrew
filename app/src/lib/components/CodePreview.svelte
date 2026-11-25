@@ -3,7 +3,6 @@
 	import { code } from '#lib/code.svelte.ts';
 	import { ago } from '#lib/format.ts';
 	import { remembered } from '#lib/remember.ts';
-	import ErrorLine from './ErrorLine.svelte';
 	import Icon from './Icon.svelte';
 	import Shot from './Shot.svelte';
 
@@ -112,8 +111,6 @@
 			</div>
 		{/if}
 	</div>
-
-	{#if code.problem}<div class="said"><ErrorLine error={code.problem} where="code" compact /></div>{/if}
 
 	{#if view === 'page' && running}
 		<details class="console" open={found > 0}>
@@ -280,11 +277,6 @@
 	.phone {
 		height: 100%;
 		padding: 14px;
-	}
-
-	.said {
-		flex: none;
-		padding: 6px 14px;
 	}
 
 	.console {

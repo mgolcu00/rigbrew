@@ -320,9 +320,9 @@ pub mod api {
         let found = devices::list().await;
         // The device the task looked at last, when it is still there.
         let wanted = task.extra.device.as_ref().map(|d| d.id.clone()).filter(|id| found.iter().any(|d| d.id == *id));
-        let device = match devices::pick(&found, wanted.as_deref()) {
-            Ok(d) => d,
-            Err(e) => return fail(StatusCode::CONFLICT, e),
+        // Said to the person, not to the model: no word about skills.
+        let Ok(device) = devices::pick(&found, wanted.as_deref()) else {
+            return fail(StatusCode::CONFLICT, "No simulator is booted and no Android device is connected.");
         };
         let png = match devices::screenshot(device, &app.agent.dir.join("shots")).await {
             Ok(png) => png,
