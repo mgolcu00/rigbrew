@@ -87,6 +87,34 @@ pub fn check_url(raw: &str) -> Result<Url, String> {
     }
 }
 
+/// An address on this computer, the only kind `look_at_page` opens: http or https, and
+/// `localhost`, a name under it, or a loopback address. "0.0.0.0", which servers print for
+/// "every address", is read as this computer.
+pub fn local_url(raw: &str) -> Result<Url, String> {
+    let raw = raw.trim();
+    let mut url = Url::parse(raw)
+        .map_err(|_| format!("{raw} is not a web address. Use the address of the running app, like http://localhost:5173/."))?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err("Only http pages on this computer can be looked at, like http://localhost:5173/.".into());
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err("Addresses with a user name or password in them are not opened.".into());
+    }
+    if matches!(url.host(), Some(url::Host::Ipv4(ip)) if ip.is_unspecified()) {
+        url.set_host(Some("localhost")).map_err(|_| "That address cannot be opened.".to_string())?;
+    }
+    let local = match url.host() {
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        Some(url::Host::Domain(name)) => name.eq_ignore_ascii_case("localhost") || name.to_ascii_lowercase().ends_with(".localhost"),
+        None => false,
+    };
+    if !local {
+        return Err("look_at_page only opens pages on this computer, like http://localhost:5173/. A page on the internet is read with fetch_url, when the person allowed the web.".into());
+    }
+    Ok(url)
+}
+
 /// The addresses of the URL's host, all of them public, or an error.
 async fn public_addrs(url: &Url) -> Result<Vec<SocketAddr>, String> {
     let host = url.host_str().ok_or("The address has no host.")?;
@@ -418,6 +446,42 @@ mod tests {
         assert!(err.contains("private network"), "{err}");
         let err = fetch_url("http://127.0.0.1:1/").await.unwrap_err();
         assert!(err.contains("private network"), "{err}");
+    }
+
+    #[test]
+    fn a_look_only_opens_this_computer() {
+        for ok in [
+            "http://localhost:5173/",
+            "http://localhost:5173/cart?x=1#top",
+            " http://127.0.0.1:8000 ",
+            "http://127.8.9.1:3000/",
+            "http://[::1]:3000/",
+            "https://localhost:8443/",
+            "http://shop.localhost:5173/",
+            "http://LOCALHOST:5173/",
+        ] {
+            assert!(local_url(ok).is_ok(), "{ok}");
+        }
+        // What a server prints for "every address" is this computer.
+        assert_eq!(local_url("http://0.0.0.0:8000/a").unwrap().as_str(), "http://localhost:8000/a");
+        for refused in [
+            "https://example.com/",
+            "http://localhost.example.com/",
+            "http://example.com@localhost:5173/",
+            "http://user:pw@localhost:5173/",
+            "http://192.168.1.20:5173/",
+            "http://10.0.0.1/",
+            "http://169.254.169.254/latest/meta-data/",
+            "http://[::ffff:8.8.8.8]/",
+            "http://2130706433.example/",
+            "file:///etc/passwd",
+            "javascript:alert(1)",
+            "localhost:5173",
+            "",
+        ] {
+            assert!(local_url(refused).is_err(), "{refused}");
+        }
+        assert!(local_url("https://example.com/").unwrap_err().contains("only opens pages on this computer"));
     }
 
     #[test]

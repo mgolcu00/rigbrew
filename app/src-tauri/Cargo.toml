@@ -27,6 +27,14 @@ dirs = "6"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# A picture of the page a Code task looks at (src/look.rs). The versions the webview itself uses.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+block2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSData", "NSDictionary", "NSError", "NSString", "NSValue"] }
+objc2-app-kit = { version = "0.3", features = ["NSBitmapImageRep", "NSImage", "NSImageRep"] }
+objc2-web-kit = { version = "0.3", features = ["WKSnapshotConfiguration", "WKWebView", "block2", "objc2-app-kit"] }
+
 [features]
 # Official builds only: needs src/account.rs, which is not in the public source.
 account = []

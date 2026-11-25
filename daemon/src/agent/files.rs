@@ -467,6 +467,8 @@ pub struct Ran {
     /// What the model reads: how it ended, then the capped output.
     pub text: String,
     pub ok: bool,
+    /// Everything the command wrote, as far as it was kept.
+    pub output: String,
 }
 
 /// Kills the command's whole process group when the task is stopped or the time is up.
@@ -507,11 +509,24 @@ async fn drain(mut pipe: impl tokio::io::AsyncRead + Unpin) -> Vec<u8> {
     kept
 }
 
+/// What a command may do on the network.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Net {
+    /// The whole network: the task was given the web.
+    pub web: bool,
+    /// Listening on this computer's own address: a server the task starts with `start_app`.
+    pub listen: bool,
+    /// The port of the task's own running app, which its commands may talk to.
+    pub app_port: Option<u16>,
+}
+
 /// The macOS sandbox profile a command runs under: it may read anything the person can, write
 /// only inside the folder and the temporary folders, and reach the network only when the task
-/// was given the web. The last matching rule wins.
+/// was given the web. Without the web, a server the task starts may still listen on this
+/// computer's own address, and a command may talk to that server's port and nothing else.
+/// The last matching rule wins.
 #[cfg(target_os = "macos")]
-fn seatbelt_profile(folder: &Path, network: bool) -> String {
+fn seatbelt_profile(folder: &Path, net: Net) -> String {
     // A path inside a profile string: backslash and quote are the only characters to escape.
     let quoted = |p: &Path| p.to_string_lossy().replace('\\', "\\\\").replace('"', "\\\"");
     let mut profile = String::from("(version 1)\n(allow default)\n(deny file-write*)\n");
@@ -519,8 +534,14 @@ fn seatbelt_profile(folder: &Path, network: bool) -> String {
     for tmp in ["/private/tmp", "/private/var/folders", "/dev"] {
         profile.push_str(&format!("(allow file-write* (subpath \"{tmp}\"))\n"));
     }
-    if !network {
+    if !net.web {
         profile.push_str("(deny network*)\n(allow network* (local unix))\n");
+        if net.listen {
+            profile.push_str("(allow network-bind (local ip \"localhost:*\"))\n(allow network-inbound (local ip \"localhost:*\"))\n");
+        }
+        if let Some(port) = net.app_port {
+            profile.push_str(&format!("(allow network-outbound (remote ip \"localhost:{port}\"))\n"));
+        }
     }
     profile
 }
@@ -538,7 +559,7 @@ pub fn confined(folder: &Path, program: &str) -> std::process::Command {
     #[cfg(target_os = "macos")]
     let mut cmd = if sandboxed() {
         let mut c = std::process::Command::new("/usr/bin/sandbox-exec");
-        c.arg("-p").arg(seatbelt_profile(folder, false)).arg(program);
+        c.arg("-p").arg(seatbelt_profile(folder, Net::default())).arg(program);
         c
     } else {
         std::process::Command::new(program)
@@ -557,18 +578,24 @@ pub fn confined(folder: &Path, program: &str) -> std::process::Command {
     cmd
 }
 
-/// `run_command`: one shell command with the folder as its working directory. On macOS it runs
-/// in a sandbox: it cannot write outside the folder, and has no network unless `network` is set.
-pub async fn run(folder: &Folder, command: &str, timeout: Duration, network: bool) -> Ran {
-    use std::process::Stdio;
+/// One shell command with the folder as its working directory, not started yet. On macOS it
+/// runs in a sandbox: it cannot write outside the folder, and reaches only what `net` allows.
+/// It is the head of its own process group, so everything it starts can be stopped with it.
+pub fn shell(folder: &Folder, command: &str, net: Net, env: &[(&str, String)]) -> tokio::process::Command {
+    // Only macOS has a sandbox to tell this to.
     #[cfg(not(target_os = "macos"))]
-    let _ = network;
+    let _ = (net.web, net.listen, net.app_port);
     #[cfg(unix)]
     let mut cmd = {
         #[cfg(target_os = "macos")]
         let mut c = if sandboxed() {
             let mut c = tokio::process::Command::new("/usr/bin/sandbox-exec");
-            c.arg("-p").arg(seatbelt_profile(folder.root(), network)).arg("sh");
+            c.arg("-p").arg(seatbelt_profile(folder.root(), net)).arg("sh");
+            // Go keeps what it builds in the person's cache folder, which a command cannot write
+            // to: without a cache of its own in the temporary folder `go test` does not even start.
+            if std::env::var_os("GOCACHE").is_none() {
+                c.env("GOCACHE", std::env::temp_dir().join("rigbrew-go-build"));
+            }
             c
         } else {
             tokio::process::Command::new("sh")
@@ -593,11 +620,32 @@ pub async fn run(folder: &Folder, command: &str, timeout: Duration, network: boo
         c.arg("/C").arg(command);
         c
     };
-    cmd.current_dir(folder.root()).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
+    // An app opened from the Dock has a short PATH: the usual places programs are installed to
+    // are added, so `npm` or `cargo` is found as it is in a terminal.
+    if let Ok(path) = std::env::join_paths(crate::connectors::search_dirs()) {
+        cmd.env("PATH", path);
+    }
+    for (name, value) in env {
+        cmd.env(name, value);
+    }
+    cmd.current_dir(folder.root());
+    cmd
+}
+
+/// `run_command`: one shell command in the folder, waited for until it ends or the time is up.
+pub async fn run(folder: &Folder, command: &str, timeout: Duration, net: Net) -> Ran {
+    run_with(folder, command, timeout, net, &[]).await
+}
+
+/// `run` with variables added to the command's environment.
+pub async fn run_with(folder: &Folder, command: &str, timeout: Duration, net: Net, env: &[(&str, String)]) -> Ran {
+    use std::process::Stdio;
+    let mut cmd = shell(folder, command, net, env);
+    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
     let started = std::time::Instant::now();
     let mut child = match cmd.spawn() {
         Ok(c) => c,
-        Err(e) => return Ran { text: format!("The command could not be started: {e}"), ok: false },
+        Err(e) => return Ran { text: format!("The command could not be started: {e}"), ok: false, output: String::new() },
     };
     let mut group = Group(child.id());
     let out = tokio::spawn(drain(child.stdout.take().expect("piped")));
@@ -627,11 +675,19 @@ pub async fn run(folder: &Folder, command: &str, timeout: Duration, network: boo
     let output = output.trim_end();
     let shown = if output.is_empty() { "(no output)".to_string() } else { cap_ends(output, RESULT_CHARS) };
     match status {
-        Err(_) => Ran { text: format!("Stopped after {} seconds without finishing.\n{shown}", timeout.as_secs()), ok: false },
-        Ok(Err(e)) => Ran { text: format!("The command failed to run: {e}"), ok: false },
+        Err(_) => Ran {
+            text: format!("Stopped after {} seconds without finishing.\n{shown}", timeout.as_secs()),
+            ok: false,
+            output: output.to_string(),
+        },
+        Ok(Err(e)) => Ran { text: format!("The command failed to run: {e}"), ok: false, output: String::new() },
         Ok(Ok(status)) => {
             let code = status.code().map(|c| c.to_string()).unwrap_or_else(|| "none (killed)".into());
-            Ran { text: format!("exit code {code} after {:.1} s\n{shown}", started.elapsed().as_secs_f64()), ok: status.success() }
+            Ran {
+                text: format!("exit code {code} after {:.1} s\n{shown}", started.elapsed().as_secs_f64()),
+                ok: status.success(),
+                output: output.to_string(),
+            }
         }
     }
 }
@@ -865,7 +921,7 @@ mod tests {
     #[tokio::test]
     async fn commands_run_in_the_folder_with_capped_output_and_a_time_limit() {
         let (f, inside, _) = folder();
-        let ran = run(&f, "pwd; echo to-stderr 1>&2", Duration::from_secs(10), false).await;
+        let ran = run(&f, "pwd; echo to-stderr 1>&2", Duration::from_secs(10), Net::default()).await;
         assert!(ran.ok);
         assert!(ran.text.contains(std::fs::canonicalize(&inside).unwrap().to_str().unwrap()), "{}", ran.text);
         assert!(ran.text.contains("to-stderr"));
@@ -873,9 +929,13 @@ mod tests {
         #[cfg(target_os = "macos")]
         {
             let outside = std::env::var("HOME").unwrap_or_default() + "/rigbrew-sandbox-probe";
-            let ran =
-                run(&f, &format!("echo inside > made-here.txt && cat made-here.txt; echo x > {outside}"), Duration::from_secs(10), false)
-                    .await;
+            let ran = run(
+                &f,
+                &format!("echo inside > made-here.txt && cat made-here.txt; echo x > {outside}"),
+                Duration::from_secs(10),
+                Net::default(),
+            )
+            .await;
             assert!(ran.text.contains("inside"), "{}", ran.text);
             assert!(!std::path::Path::new(&outside).exists(), "a command wrote outside the folder");
             assert!(ran.text.contains("not permitted") || ran.text.contains("denied"), "{}", ran.text);
@@ -883,17 +943,17 @@ mod tests {
                 &f,
                 "curl -s -m 5 -o /dev/null -w '%{http_code}' https://example.com || echo no-network",
                 Duration::from_secs(15),
-                false,
+                Net::default(),
             )
             .await;
             assert!(net.text.contains("no-network"), "{}", net.text);
         }
-        let ran = run(&f, "exit 3", Duration::from_secs(10), false).await;
+        let ran = run(&f, "exit 3", Duration::from_secs(10), Net::default()).await;
         assert!(!ran.ok && ran.text.starts_with("exit code 3"), "{}", ran.text);
-        let ran = run(&f, "i=0; while [ $i -lt 3000 ]; do echo line-$i; i=$((i+1)); done", Duration::from_secs(20), false).await;
+        let ran = run(&f, "i=0; while [ $i -lt 3000 ]; do echo line-$i; i=$((i+1)); done", Duration::from_secs(20), Net::default()).await;
         assert!(ran.text.contains("[truncated:") && ran.text.contains("line-2999") && ran.text.chars().count() < RESULT_CHARS + 200);
         let started = std::time::Instant::now();
-        let ran = run(&f, "sleep 30", Duration::from_millis(300), false).await;
+        let ran = run(&f, "sleep 30", Duration::from_millis(300), Net::default()).await;
         assert!(!ran.ok && ran.text.starts_with("Stopped after"));
         assert!(started.elapsed() < Duration::from_secs(5));
     }

@@ -8,10 +8,13 @@
 //! - saving a file the person asked to keep (`save_image`, `save_text`): a save dialog and a write;
 //! - choosing the folder a Code task works in (`pick_folder`), or a video or sound file for a film
 //!   (`pick_file`): the system's own dialogs;
-//! - signing in through the system browser: `account.rs`, only present in official builds (feature `account`).
+//! - signing in through the system browser: `account.rs`, only present in official builds (feature `account`);
+//! - looking at a page for a Code task (`look.rs`): a hidden window opens an address on this
+//!   computer and says what is on it.
 
 #[cfg(feature = "account")]
 mod account;
+mod look;
 
 use std::net::{SocketAddr, TcpStream};
 use std::path::PathBuf;
@@ -352,6 +355,8 @@ pub fn run() {
                     eprintln!("rigbrew: {e}");
                 }
             });
+            // The service has no browser: pages a Code task wants to see are opened by this app.
+            look::serve(app.handle().clone(), || live_info().map(|info| (info.port, info.token)));
             Ok(())
         })
         .build(tauri::generate_context!())

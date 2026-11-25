@@ -81,6 +81,10 @@ const BUILT_IN: &[(&str, &str)] = &[
     ("plan-a-project", include_str!("../../skills/plan-a-project/SKILL.md")),
     ("research-a-topic", include_str!("../../skills/research-a-topic/SKILL.md")),
     ("storyboard-a-film", include_str!("../../skills/storyboard-a-film/SKILL.md")),
+    ("preview-and-fix", include_str!("../../skills/preview-and-fix/SKILL.md")),
+    ("ui-test-web", include_str!("../../skills/ui-test-web/SKILL.md")),
+    ("ios-simulator", include_str!("../../skills/ios-simulator/SKILL.md")),
+    ("android-emulator", include_str!("../../skills/android-emulator/SKILL.md")),
 ];
 
 /// Whether a skill with this name comes with Rigbrew.
@@ -571,9 +575,9 @@ mod tests {
     }
 
     #[test]
-    fn the_twelve_built_in_skills_parse_and_are_short() {
+    fn the_built_in_skills_parse_and_are_short() {
         let all = load_all(Path::new("/nonexistent-rigbrew-data"), None);
-        assert_eq!(all.len(), 12);
+        assert_eq!(all.len(), BUILT_IN.len());
         for (skill, (name, text)) in all.iter().zip(BUILT_IN) {
             assert_eq!(skill.name, *name);
             assert!(skill.source == "built-in" && skill.enabled && skill.dir.is_none());
@@ -620,7 +624,7 @@ mod tests {
         std::fs::write(project.join(".rigbrew/skills/write-readme/SKILL.md"), "---\nname: write-readme\ndescription: Ours.\n---\nOurs.")
             .unwrap();
         let all = load_all(&data, Some(&project));
-        assert_eq!(all.len(), 13);
+        assert_eq!(all.len(), BUILT_IN.len() + 1);
         assert_eq!(all.iter().find(|s| s.name == "mine").unwrap().source, "yours");
         let readme = all.iter().find(|s| s.name == "write-readme").unwrap();
         assert_eq!((readme.source, readme.body.as_str()), ("folder", "Ours."));

@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use super::files::Folder;
-use super::{outline, plan, undo, verify, Mode, Task};
+use super::{devices, look, outline, plan, see, undo, Mode, Task};
 use crate::Shared;
 
 /// Saved with the task and shown by the API next to its other fields.
@@ -18,6 +18,15 @@ pub struct Extra {
     /// The folder before each request that changed it, oldest first.
     #[serde(default)]
     pub undo: Vec<undo::Snapshot>,
+    /// The page the task looked at last: what the preview shows under the running app.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page: Option<look::Page>,
+    /// The last picture of the phone's screen.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device: Option<devices::Screen>,
+    /// The picture the model is shown on its next turns. Not shown by the API.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub eye: Option<look::Eye>,
 }
 
 /// Tools of the harness itself. They change nothing in the folder, so every mode has them.
@@ -44,7 +53,7 @@ pub fn rules(mode: Mode) -> Vec<String> {
     ];
     if mode != Mode::ReadOnly {
         lines.push("Commands already run inside the folder. Do not use cd or absolute paths in a command.".to_string());
-        lines.push("After a change, run the project's tests or build, unless the person said not to. Never say that something works, passes or is fixed unless a command you ran after your last change showed it. If you could not check, say so.".to_string());
+        lines.push("After a change, check it (check_project, or the project's own test command), unless the person said not to. Never say that something works, passes or is fixed unless a command you ran after your last change showed it. If you could not check, say so.".to_string());
     }
     lines
 }
@@ -53,10 +62,8 @@ pub fn rules(mode: Mode) -> Vec<String> {
 /// when older messages are left out.
 pub fn context(task: &Task) -> String {
     let mut out = String::new();
-    if task.mode != Mode::ReadOnly {
-        if let Some(check) = verify::commands(std::path::Path::new(&task.folder)).first() {
-            out.push_str(&format!("\n\nThe command that checks this project: {check}"));
-        }
+    if let Some(checks) = see::context(task.mode, std::path::Path::new(&task.folder)) {
+        out.push_str(&format!("\n\n{checks}"));
     }
     if let Some(note) = undo::context(task) {
         out.push_str("\n\n");
@@ -117,7 +124,10 @@ mod tests {
         let root = files::scratch("extra");
         std::fs::write(root.join("Cargo.toml"), "[package]\n").unwrap();
         let mut t = task(&root, "ask");
-        assert_eq!(context(&t), "\n\nThe command that checks this project: cargo test");
+        let checked = super::super::checks::has_fast(&root);
+        if checked {
+            assert!(context(&t).starts_with("\n\ncheck_project checks this project. It runs: cargo check"), "{}", context(&t));
+        }
         t.extra.plan = plan::parse(&json!({"steps": [{"text": "Read", "status": "done"}, {"text": "Fix"}]})).unwrap();
         assert!(context(&t).ends_with("\n\nYour plan so far ([x] done, [>] doing now, [ ] to do):\n[x] Read\n[>] Fix"), "{}", context(&t));
         // After an undo the next request is told, and only that one.

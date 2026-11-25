@@ -895,6 +895,39 @@ export interface AgentToolStep {
 	status: 'running' | 'waiting' | 'done' | 'failed' | 'denied' | 'stopped';
 	result: string | null;
 	diff: string | null;
+	/** The picture the step took (a page, a phone's screen): see `agentShot`. Missing from an older service. */
+	image?: string | null;
+}
+
+/** The app a task started with `start_app`, while the service runs it. */
+export interface AgentApp {
+	url: string;
+	port: number;
+	command: string;
+	alive: boolean;
+	started_ms: number;
+	/** The last lines it wrote. */
+	lines: string[];
+}
+
+/** The page a task looked at last: what the preview shows under the running app. */
+export interface AgentPage {
+	url: string;
+	title: string;
+	errors: string[];
+	failed: string[];
+	/** False when no browser opened it and only its HTML was read. */
+	rendered: boolean;
+	shot: string | null;
+	note: string;
+	at_ms: number;
+}
+
+/** The last picture of the phone's screen a task took. */
+export interface AgentScreen {
+	shot: string;
+	name: string;
+	at_ms: number;
 }
 
 export type AgentStep = { kind: 'user' | 'model' | 'note' | 'question'; text: string } | AgentToolStep;
@@ -954,6 +987,9 @@ export interface AgentTask extends AgentTaskRow {
 	undo?: AgentUndo[];
 	/** The answer the model is writing right now, as far as it got. Empty between turns. */
 	writing?: string;
+	app?: AgentApp | null;
+	page?: AgentPage;
+	device?: AgentScreen;
 }
 
 export interface AgentSkill {
@@ -981,6 +1017,13 @@ export const stopAgentTask = (id: string) => taskOf(json('DELETE', `/v1/agent/ta
 /** The person names a task; nothing else changes the name after that. */
 export const renameAgentTask = (id: string, title: string) => taskOf(json('PUT', `/v1/agent/tasks/${enc(id)}`, { title }));
 export const removeAgentTask = (id: string) => json<{ removed: string }>('DELETE', `/v1/agent/tasks/${enc(id)}?remove=true`);
+/** Looks at the task's running app the way the model does, and keeps what was seen with the task. */
+export const lookAtAgentApp = async (task: string, size = 'desktop') => (await json<{ page: AgentPage }>('POST', '/v1/agent/look', { task, size })).page;
+export const stopAgentApp = (id: string) => taskOf(json('DELETE', `/v1/agent/tasks/${enc(id)}/app`));
+/** Takes a new picture of the phone's screen. */
+export const agentDeviceShot = (id: string) => taskOf(json('POST', `/v1/agent/tasks/${enc(id)}/device`));
+/** A picture a task took. It needs the token, so it is fetched and shown through an object URL. */
+export const agentShot = async (task: string, name: string) => (await send('GET', `/v1/agent/tasks/${enc(task)}/shots/${enc(name)}.png`)).blob();
 export const agentSkills = (folder: string) => optional<{ skills: AgentSkill[]; dir: string; folder_dir: string }>('GET', `/v1/agent/skills?folder=${enc(folder)}`);
 
 /** Asks for one video or sound file with the system's own dialog. `null` when cancelled, or outside the app. */

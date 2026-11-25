@@ -11,8 +11,10 @@
 	import { skills } from '#lib/skills.svelte.ts';
 	import { app } from '#lib/state.svelte.ts';
 	import { isMac, machine, mod } from '#lib/words.ts';
+	import CodePreview from '#lib/components/CodePreview.svelte';
 	import ErrorLine from '#lib/components/ErrorLine.svelte';
 	import Icon from '#lib/components/Icon.svelte';
+	import Shot from '#lib/components/Shot.svelte';
 
 	// Code: pick a folder, say what should be done, and watch a model on this computer do it one
 	// step at a time. It reads like a good terminal agent: what you said, then one compact line
@@ -54,6 +56,8 @@
 	const rows = $derived(task ? fold(task.steps) : []);
 	/** The model is at work right now: not waiting for a yes, not finished. */
 	const busy = $derived(task?.state === 'running');
+	/** The task has something to show next to it: an app it started, or a phone's screen. */
+	const previewable = $derived(Boolean(task && (task.app || task.device)));
 
 	onMount(() => {
 		code.enter();
@@ -204,7 +208,8 @@
 	const text = (step: AgentToolStep, key: string) => (typeof step.arguments[key] === 'string' ? (step.arguments[key] as string) : '');
 
 	/** The tools whose line does not say everything that was asked for. */
-	const showsArguments = (step: AgentToolStep) => !['read_file', 'list_files', 'search', 'outline', 'web_search', 'fetch_url', 'run_command', 'edit_file', 'write_file', 'append_file', 'use_skill', 'read_skill_file'].includes(step.name);
+	const showsArguments = (step: AgentToolStep) =>
+		step.name === 'look_at_page' ? Array.isArray(step.arguments.do) : !['start_app', 'check_project', 'simulator', 'read_file', 'list_files', 'search', 'outline', 'web_search', 'fetch_url', 'run_command', 'edit_file', 'write_file', 'append_file', 'use_skill', 'read_skill_file'].includes(step.name);
 
 	const states: Record<string, string> = {
 		running: 'Working',
@@ -269,9 +274,10 @@
 					<span class="plus" aria-label="{l.plus} lines added">+{l.plus}</span>
 					<span class="minus" aria-label="{l.minus} lines removed">−{l.minus}</span>
 				{/if}
-				{#if tails[step.status]}<span class="tail">{tails[step.status]}</span>{/if}
+				{#if tails[step.status] && !l.quiet}<span class="tail">{tails[step.status]}</span>{/if}
 			</summary>
 			<div class="inside">
+				{#if step.image && task}<Shot task={task.id} name={step.image} alt="What it saw" small />{/if}
 				{#if step.diff}{@render diffView(step.diff)}{/if}
 				{#if showsArguments(step)}<pre class="raw selectable">{step.name} {shown(step)}</pre>{/if}
 				{#if step.result}<pre class="raw selectable">{step.result}</pre>{/if}
@@ -327,7 +333,7 @@
 	</div>
 {/snippet}
 
-<section class="screen code" aria-label="Code">
+<section class="screen code" class:split={previewable && code.preview} aria-label="Code">
 	{#if !code.available}
 		<div class="thread scroll">
 			<div class="column home">
@@ -384,6 +390,9 @@
 						<button class="title" onclick={startRename} title="Rename this task" aria-label="Task name: {task.title}. Rename">{task.title}</button>
 					{/if}
 					<span class="state" class:live={working}>{states[task.state] ?? task.state}</span>
+					{#if previewable && !code.preview}
+						<button class="back" onclick={() => code.setPreview(true)} title="Show what the task made"><Icon name="pane" size={15} />Preview</button>
+					{/if}
 				{:else}
 					<span class="where" title={code.folder}><Icon name="folder" size={15} /><span>{folderName}</span></span>
 					<span class="grow"></span>
@@ -463,7 +472,7 @@
 						{@const p = task.pending}
 						<div class="ask" role="group" aria-label="Waiting for your answer">
 							{#if p.command}
-								<h2>Run this command?</h2>
+								<h2>{p.tool === 'start_app' ? 'Start the app with this command?' : p.tool === 'check_project' ? 'Run the checks of this project?' : 'Run this command?'}</h2>
 								<pre class="raw selectable">{p.command}</pre>
 								{#if purposeOf(p.command)}<p class="purpose">{purposeOf(p.command)}</p>{/if}
 								{#if !isMac}<p class="why">It runs with your own rights.</p>{/if}
@@ -613,11 +622,26 @@
 			</div>
 		{/if}
 	{/if}
+	{#if task && previewable && code.preview}
+		<div class="side"><CodePreview {task} /></div>
+	{/if}
 </section>
 
 <style>
 	.code {
+		position: relative;
 		font-family: var(--rb-text);
+	}
+
+	/* The preview stands to the right of the work; the work keeps the rest. */
+	.code.split {
+		padding-right: min(46%, 640px);
+	}
+
+	.side {
+		position: absolute;
+		inset: 0 0 0 auto;
+		width: min(46%, 640px);
 	}
 
 	.column {
