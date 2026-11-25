@@ -9,7 +9,10 @@
 
 	// The one piece of chrome: a new chat, the few places, the chats, and who is using it.
 	// Everything else is the conversation. It is also where the window is dragged from.
-	const places: { screen: Screen; name: string; icon: 'chat' | 'download' }[] = [{ screen: 'models', name: 'Models', icon: 'download' }];
+	const places: { screen: Screen; name: string; icon: 'chat' | 'download' | 'video' }[] = [
+		{ screen: 'studio', name: 'Studio', icon: 'video' },
+		{ screen: 'models', name: 'Models', icon: 'download' }
+	];
 	const account = $derived(getAccount());
 	const signedIn = $derived(Boolean(account.user && !account.user.anonymous));
 

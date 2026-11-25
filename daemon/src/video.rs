@@ -84,6 +84,13 @@ pub struct VideoBody {
     seed: Option<i64>,
 }
 
+impl VideoBody {
+    /// A request made inside the service (Studio makes its shots this way).
+    pub fn new(model: &str, prompt: &str, size: &str, frames: u32) -> VideoBody {
+        VideoBody { model: model.into(), prompt: prompt.into(), size: Some(size.into()), frames: Some(frames), steps: None, seed: None }
+    }
+}
+
 const NEGATIVE: &str = "blurry, static, low quality, jpeg artifacts, deformed, extra limbs, text, subtitles, watermark";
 
 pub async fn generate(State(app): State<Shared>, Json(body): Json<VideoBody>) -> Response {

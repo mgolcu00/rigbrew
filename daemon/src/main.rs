@@ -38,10 +38,12 @@
 //!   POST   /v1/videos/generations         {"model", "prompt", "size", "frames", "steps", "seed"}: a clip, made in the background
 //!   GET    /v1/videos/jobs[/{id}]         progress of clips; DELETE /v1/videos/jobs/{id} stops one
 //!   GET    /v1/videos/files/{id}.webm     a saved clip; DELETE removes it
+//!   ...    /v1/studio/...                 films made of shots in a folder (see `studio.rs`)
 
 mod cloud;
 mod library;
 mod speech;
+mod studio;
 mod video;
 
 use std::collections::HashMap;
@@ -1148,6 +1150,7 @@ async fn main() {
         .route("/v1/activity", get(cloud::activity))
         .route("/v1/sync", post(cloud::sync_now))
         .route("/v1/app/config", get(cloud::app_config))
+        .merge(studio::router())
         .route("/v1/chats", get(library::chats_list).delete(library::chats_delete_all))
         .route(
             "/v1/chats/{id}",

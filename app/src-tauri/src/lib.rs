@@ -263,6 +263,23 @@ async fn save_text(app: tauri::AppHandle, name: String, text: String) -> Result<
     .map_err(|e| e.to_string())?
 }
 
+/// Asks for a folder with the system's dialog (a film's folder, a project to work in).
+/// Returns its path, or `None` when the dialog was cancelled.
+#[tauri::command]
+async fn pick_folder(app: tauri::AppHandle, title: String) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let Some(target) = app.dialog().file().set_title(&title).set_can_create_directories(true).blocking_pick_folder() else {
+            return Ok(None);
+        };
+        let path = target.into_path().map_err(|e| e.to_string())?;
+        Ok(Some(path.display().to_string()))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     #[cfg(unix)]
@@ -280,12 +297,13 @@ pub fn run() {
         save_image,
         save_video,
         save_text,
+        pick_folder,
         account::signin_listen,
         account::signin_wait,
         account::signin_cancel
     ]);
     #[cfg(not(feature = "account"))]
-    let builder = builder.invoke_handler(tauri::generate_handler![daemon_info, save_image, save_video, save_text]);
+    let builder = builder.invoke_handler(tauri::generate_handler![daemon_info, save_image, save_video, save_text, pick_folder]);
     builder
         .setup(|app| {
             // Start the service while the window is still loading.

@@ -17,6 +17,7 @@
 	import Models from '#lib/screens/Models.svelte';
 	import Profile from '#lib/screens/Profile.svelte';
 	import Settings from '#lib/screens/Settings.svelte';
+	import Studio from '#lib/screens/Studio.svelte';
 	import Welcome from '#lib/screens/Welcome.svelte';
 
 	// The shell: a sidebar (new chat, the places, the chats, the account) and the current screen.
@@ -158,6 +159,8 @@
 				<Models />
 			{:else if app.screen === 'device'}
 				<Device />
+			{:else if app.screen === 'studio'}
+				<Studio />
 			{:else}
 				<Profile />
 			{/if}

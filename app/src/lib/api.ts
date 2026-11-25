@@ -445,3 +445,60 @@ export async function openExternal(url: string) {
 		window.open(url, '_blank', 'noopener');
 	}
 }
+
+// --- Studio: films made of shots, kept in a folder ----------------------------------------------
+
+export interface StudioShot {
+	id: string;
+	prompt: string;
+	frames: number;
+	/** empty, queued, making, done, failed, or changed (made, then the description changed). */
+	state: 'empty' | 'queued' | 'making' | 'done' | 'failed' | 'changed';
+	error?: string;
+	seconds?: number;
+}
+
+export interface StudioProject {
+	id: string;
+	name: string;
+	folder: string;
+	size: string;
+	shots: StudioShot[];
+	updated_ms: number;
+}
+
+export interface StudioView {
+	project: StudioProject;
+	progress: { shot: string; stage: string; step: number | null; steps: number | null; elapsed_ms: number } | null;
+	rendering: boolean;
+	made: number;
+	seconds: number;
+}
+
+export interface StudioListing {
+	id: string;
+	name: string;
+	folder: string;
+	shots?: number;
+	made?: number;
+	missing?: boolean;
+}
+
+export const studioList = async () => (await json<{ projects: StudioListing[] }>('GET', '/v1/studio/projects')).projects;
+export const studioOpen = (folder: string, name = '') => json<StudioView>('POST', '/v1/studio/projects', { folder, name });
+export const studioRead = (id: string) => json<StudioView>('GET', `/v1/studio/projects/${enc(id)}`);
+export const studioSave = (id: string, body: { name?: string; size?: string; shots?: { id?: string; prompt: string; frames: number }[] }) =>
+	json<StudioView>('PUT', `/v1/studio/projects/${enc(id)}`, body);
+export const studioForget = (id: string) => json<unknown>('DELETE', `/v1/studio/projects/${enc(id)}`);
+export const studioRender = (id: string, shots?: string[]) => json<StudioView>('POST', `/v1/studio/projects/${enc(id)}/render`, shots ? { shots } : {});
+export const studioStop = (id: string) => json<StudioView>('DELETE', `/v1/studio/projects/${enc(id)}/render`);
+export const studioStoryboard = async (id: string, idea: string, shots: number) =>
+	(await json<{ shots: { prompt: string }[] }>('POST', `/v1/studio/projects/${enc(id)}/storyboard`, { idea, shots })).shots;
+export const studioClip = async (id: string, shot: string) => (await send('GET', `/v1/studio/projects/${enc(id)}/clips/${enc(shot)}.webm`)).blob();
+
+/** Asks for a folder with the system's own dialog. Null when nothing was chosen, or in the browser preview. */
+export async function pickFolder(title: string): Promise<string | null> {
+	if (!isTauri) return null;
+	const { invoke } = await import('@tauri-apps/api/core');
+	return (await invoke<string | null>('pick_folder', { title })) ?? null;
+}
