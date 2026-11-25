@@ -1,8 +1,10 @@
 <script lang="ts">
-	import { onMount, tick } from 'svelte';
+	import { onMount, tick, untrack } from 'svelte';
 	import { copyText, isTauri, openExternal, type AgentToolStep } from '#lib/api.ts';
 	import { shownArguments } from '#lib/chattools.ts';
 	import { code, isActive, modes, purposeOf } from '#lib/code.svelte.ts';
+	import { activityOf, diffCount, fold, lineOf, summary, tails } from '#lib/code-view.ts';
+	import { WORD_MIN_MS, WORD_MS, elapsed, nextWord, type Activity } from '#lib/code-words.ts';
 	import { connectors } from '#lib/connectors.svelte.ts';
 	import { ago } from '#lib/format.ts';
 	import { renderMarkdown } from '#lib/markdown.ts';
@@ -13,9 +15,10 @@
 	import Icon from '#lib/components/Icon.svelte';
 
 	// Code: pick a folder, say what should be done, and watch a model on this computer do it one
-	// step at a time. The same column as the chat: what you said on the right, the answer as
-	// plain text, and between them one quiet line for each thing the model did. A change to a
-	// file or a command stops at a card and waits for a yes.
+	// step at a time. It reads like a good terminal agent: what you said, then one compact line
+	// per thing done (a run of look-ups is a single line that opens), the plan as a checklist,
+	// the answer as prose, and while it works one line above the box with a word, the time so
+	// far and how to stop. A change to a file or a command stops at a card and waits for a yes.
 
 	let draft = $state('');
 	let typed = $state(code.folder);
@@ -31,6 +34,9 @@
 	const others = $derived(code.recent.filter((f) => f !== code.folder));
 	const plan = $derived(task?.plan ?? []);
 	const planDone = $derived(plan.filter((s) => s.status === 'done').length);
+	const rows = $derived(task ? fold(task.steps) : []);
+	/** The model is at work right now: not waiting for a yes, not finished. */
+	const busy = $derived(task?.state === 'running');
 
 	onMount(() => {
 		code.enter();
@@ -71,14 +77,49 @@
 		}
 	}
 
-	/** Esc asks before it stops the work: shown as a line above the box to type in. */
+	/** Esc was pressed once: the line above the box says to press it again. It forgets after a moment. */
 	let stopping = $state(false);
+	let forget: ReturnType<typeof setTimeout> | undefined;
 	$effect(() => {
 		if (!working) stopping = false;
 	});
 
+	// --- the line above the box while it works: a word, the time so far, how to stop -----------
+
+	let word = $state('');
+	let now = $state(Date.now());
+	/** When the request being worked on was sent. */
+	let started = $state(0);
+	$effect(() => {
+		if (!busy) {
+			word = '';
+			return;
+		}
+		const since = Date.now();
+		const recent: string[] = [];
+		let shownFor: Activity = 'thinking';
+		let wordAt = 0;
+		// The word changes every few seconds, and a little sooner when something else starts
+		// happening. The steps themselves come and go much faster than anyone could read.
+		const turn = () => {
+			// Written, never read here: reading it would make this effect start over on every tick.
+			const at = Date.now();
+			now = at;
+			const doing = untrack(() => (task ? activityOf(task.steps) : 'thinking'));
+			if (wordAt && at - wordAt < (doing === shownFor ? WORD_MS : WORD_MIN_MS)) return;
+			word = nextWord(doing, recent);
+			recent.push(word);
+			shownFor = doing;
+			wordAt = at;
+		};
+		started = untrack(() => task?.request_ms) || since;
+		turn();
+		const timer = setInterval(turn, 500);
+		return () => clearInterval(timer);
+	});
+
 	// Keys that work anywhere on the screen: Cmd or Ctrl with Enter allows the step that waits,
-	// Esc asks whether to stop (and a second Esc takes the question back).
+	// Esc pressed twice stops the work.
 	function onkey(event: KeyboardEvent) {
 		if (event.isComposing || !task) return;
 		if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
@@ -91,12 +132,19 @@
 			}
 		} else if (event.key === 'Escape' && working) {
 			event.preventDefault();
-			stopping = !stopping;
+			clearTimeout(forget);
+			if (stopping) {
+				stop();
+			} else {
+				stopping = true;
+				forget = setTimeout(() => (stopping = false), 3000);
+			}
 		}
 	}
 
 	async function stop() {
 		stopping = false;
+		clearTimeout(forget);
 		await code.stop();
 	}
 
@@ -122,10 +170,9 @@
 			if (step.kind !== 'tool' || step.status !== 'done' || !step.diff || (step.name !== 'edit_file' && step.name !== 'write_file' && step.name !== 'append_file')) continue;
 			const path = text(step, 'path');
 			const file = files.get(path) ?? { path, plus: 0, minus: 0, created: false, diffs: [] };
-			for (const l of step.diff.split('\n')) {
-				if (l.startsWith('+') && !l.startsWith('+++')) file.plus++;
-				else if (l.startsWith('-') && !l.startsWith('---')) file.minus++;
-			}
+			const lines = diffCount(step.diff);
+			file.plus += lines.plus;
+			file.minus += lines.minus;
 			if (step.diff.startsWith('--- /dev/null') && file.diffs.length === 0) file.created = true;
 			file.diffs.push(step.diff);
 			files.set(path, file);
@@ -138,63 +185,14 @@
 	const takenBack = $derived((task?.undo ?? []).some((u) => u.undone && u.request === requests));
 
 	const text = (step: AgentToolStep, key: string) => (typeof step.arguments[key] === 'string' ? (step.arguments[key] as string) : '');
-	const short = (value: string, max = 64) => (value.length > max ? `${value.slice(0, max - 1)}…` : value);
 
-	/** What a step did, as one plain line. */
-	function line(step: AgentToolStep): string {
-		const path = text(step, 'path');
-		// Something that waits is wanted; something that never ran was only asked for.
-		const wants = step.status === 'waiting';
-		const asked = step.status === 'denied' || (step.status === 'stopped' && !step.result);
-		const verb = (did: string, bare: string) => (wants ? `Wants to ${bare}` : asked ? `Asked to ${bare}` : did);
-		switch (step.name) {
-			case 'list_files':
-				return `Looked in ${!path || path === '.' ? 'the folder' : path}`;
-			case 'read_file':
-				return `Read ${path}`;
-			case 'search':
-				return `Searched for “${short(text(step, 'pattern'), 48)}”`;
-			case 'edit_file':
-				return `${verb('Changed', 'change')} ${path}`;
-			case 'write_file':
-				return `${verb('Wrote', 'write')} ${path}`;
-			case 'append_file':
-				return `${verb('Added to', 'add to')} ${path}`;
-			case 'run_command':
-				return `${verb('Ran', 'run')} ${short(text(step, 'command'))}`;
-			case 'web_search':
-				return `Searched the web for “${short(text(step, 'query'), 48)}”`;
-			case 'fetch_url':
-				return `Opened ${short(text(step, 'url').replace(/^https?:\/\//, ''), 56)}`;
-			case 'outline':
-				return `Looked at what is in ${!path || path === '.' ? 'the folder' : path}`;
-			case 'update_plan':
-				return 'Updated the plan';
-			case 'use_skill':
-				return `Read the skill ${text(step, 'name')}`;
-			case 'read_skill_file':
-				return `Read ${short(text(step, 'path'), 40)} of the skill ${text(step, 'name')}`;
-			case 'find_tool':
-				return `Looked for a tool: “${short(text(step, 'query'), 48)}”`;
-			case 'call_tool':
-				return `${step.status === 'failed' ? 'Tried to use' : verb('Used', 'use')} ${short(text(step, 'tool'), 40)} from the connector ${short(text(step, 'connector'), 30)}`;
-			default:
-				return step.name;
-		}
-	}
-
-	const tails: Record<AgentToolStep['status'], string> = {
-		running: 'working',
-		waiting: 'waiting for you',
-		done: '',
-		failed: 'did not work',
-		denied: 'not allowed',
-		stopped: 'stopped'
-	};
+	/** The tools whose line does not say everything that was asked for. */
+	const showsArguments = (step: AgentToolStep) => !['read_file', 'list_files', 'search', 'outline', 'web_search', 'fetch_url', 'run_command', 'edit_file', 'write_file', 'append_file', 'use_skill', 'read_skill_file'].includes(step.name);
 
 	const states: Record<string, string> = {
 		running: 'Working',
 		waiting: 'Waiting for you',
+		asking: 'Waiting for you',
 		done: 'Done',
 		failed: 'Did not finish',
 		stopped: 'Stopped',
@@ -242,6 +240,29 @@
 </span>{/each}</pre>
 {/snippet}
 
+{#snippet stepRow(step: AgentToolStep)}
+	{@const l = lineOf(step)}
+	<li class="step {step.status}">
+		<details>
+			<summary>
+				<span class="mark" aria-hidden="true"></span>
+				<span class="verb">{l.verb}</span>
+				{#if l.code}<code class="what">{l.code}</code>{/if}
+				{#if l.plus !== undefined}
+					<span class="plus" aria-label="{l.plus} lines added">+{l.plus}</span>
+					<span class="minus" aria-label="{l.minus} lines removed">−{l.minus}</span>
+				{/if}
+				{#if tails[step.status]}<span class="tail">{tails[step.status]}</span>{/if}
+			</summary>
+			<div class="inside">
+				{#if step.diff}{@render diffView(step.diff)}{/if}
+				{#if showsArguments(step)}<pre class="raw selectable">{step.name} {shown(step)}</pre>{/if}
+				{#if step.result}<pre class="raw selectable">{step.result}</pre>{/if}
+			</div>
+		</details>
+	</li>
+{/snippet}
+
 {#snippet folders(list: string[])}
 	<ul class="recent">
 		{#each list as f (f)}
@@ -287,9 +308,6 @@
 			{/if}
 		</div>
 	</div>
-	{#if code.mode === 'bypass'}
-		<p class="fine warn">It will change files and run commands without asking.</p>
-	{/if}
 {/snippet}
 
 <section class="screen code" aria-label="Code">
@@ -348,7 +366,7 @@
 		{#if task && plan.length}
 			<div class="column">
 				<details class="plan" open>
-					<summary>Plan <span class="count">{planDone} of {plan.length} done</span></summary>
+					<summary>Plan <span class="count">{planDone}/{plan.length}</span></summary>
 					<ol>
 						{#each plan as s, i (i)}
 							<li class={s.status} aria-current={s.status === 'doing' ? 'step' : undefined}>
@@ -366,35 +384,39 @@
 			<div class="thread scroll" bind:this={thread}>
 				<div class="column">
 					<ol class="turns">
-						{#each task.steps as step, i (i)}
-							{#if step.kind === 'user'}
-								<li class="turn you"><p class="said selectable">{step.text}</p></li>
-							{:else if step.kind === 'model'}
-								<li class="turn model">
+						{#each rows as row (row.at)}
+							{#if row.kind === 'user'}
+								<li class="turn you"><p class="said selectable">{row.text}</p></li>
+							{:else if row.kind === 'model' || row.kind === 'question'}
+								<li class="turn model" class:question={row.kind === 'question'}>
 									<!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-									<div class="prose selectable" onclick={onanswerclick}>{@html renderMarkdown(step.text)}</div>
+									<div class="prose selectable" onclick={onanswerclick}>{@html renderMarkdown(row.text)}</div>
 								</li>
-							{:else if step.kind === 'note'}
-								<li class="note">{step.text}</li>
-							{:else if step.kind === 'tool'}
-								<li class="step {step.status}">
+							{:else if row.kind === 'note'}
+								<li class="note">{row.text}</li>
+							{:else if row.kind === 'lookups'}
+								{@const sum = summary(row.steps)}
+								<li class="step" class:running={sum.running}>
 									<details>
 										<summary>
 											<span class="mark" aria-hidden="true"></span>
-											<span class="did">{line(step)}</span>
-											{#if tails[step.status]}<span class="tail">{tails[step.status]}</span>{/if}
-										</summary>
-										<div class="inside">
-											{#if step.diff}{@render diffView(step.diff)}{/if}
-											<p class="cap">Asked for</p>
-											<pre class="raw selectable">{step.name} {shown(step)}</pre>
-											{#if step.result}
-												<p class="cap">Result</p>
-												<pre class="raw selectable">{step.result}</pre>
+											{#if sum.running}
+												<span class="verb">{sum.label}</span>
+												{#if row.steps.length > 1}<span class="n">{row.steps.length}</span>{/if}
+											{:else}
+												{#each sum.parts as part (part.label)}
+													<span class="part"><span class="verb">{part.label}</span>{#if part.count}<span class="n">{part.count}</span>{/if}</span>
+												{/each}
+												{#if sum.failed}<span class="tail">{sum.failed} failed</span>{/if}
 											{/if}
-										</div>
+										</summary>
+										<ol class="sub">
+											{#each row.steps as step (step.call)}{@render stepRow(step)}{/each}
+										</ol>
 									</details>
 								</li>
+							{:else if row.kind === 'step'}
+								{@render stepRow(row.step)}
 							{/if}
 						{/each}
 						{#if working && code.writing}
@@ -414,7 +436,6 @@
 								{#if !isMac}<p class="why">It runs with your own rights.</p>{/if}
 							{:else if p.tool === 'call_tool'}
 								<h2>Use {asked?.kind === 'tool' ? String(asked.arguments.tool ?? 'a tool') : 'a tool'} from the connector {p.path}?</h2>
-								<p class="cap">With these arguments</p>
 								<pre class="raw selectable">{shownArguments(asked?.kind === 'tool' ? asked.arguments.arguments : undefined)}</pre>
 								<p class="why">This tool comes from a connector and works outside this folder.</p>
 							{:else}
@@ -434,10 +455,7 @@
 									{p.command ? 'Always allow this command' : p.tool === 'call_tool' ? 'Always allow this tool' : 'Always allow file changes'}
 								</button>
 							</div>
-							<p class="keys">{mod}Enter allows it.</p>
 						</div>
-					{:else if task.state === 'running'}
-						<p class="working"><span class="dot"></span>{code.writing ? 'Writing' : 'Working'}</p>
 					{/if}
 
 					{#if !working && !takenBack && (changed.length || (undoable && undoable.request === requests))}
@@ -460,47 +478,49 @@
 									{/each}
 								</ul>
 							{:else}
-								<p class="fine">No file was changed with the model's own tools. A command ran, and it may have changed files.</p>
+								<p class="fine">A command ran. It may have changed files.</p>
 							{/if}
 							{#if undoable && undoable.request === requests}
 								<div class="answers">
-									<button class="plainbtn" onclick={() => code.undo()} disabled={code.busy} title="Puts the files back as they were before this request">Undo this request</button>
-									<span class="fine">
-										{#if undoable.kind === 'git'}
-											Every file goes back to how it was before this request. Files that git ignores stay as they are.
-										{:else if undoable.commands}
-											The files above go back to how they were. What commands changed cannot be undone, because this folder is not a git repository.
-										{:else}
-											The files above go back to how they were before this request.
-										{/if}
-									</span>
+									<button
+										class="plainbtn"
+										onclick={() => code.undo()}
+										disabled={code.busy}
+										title={undoable.kind === 'git'
+											? 'Every file goes back to how it was before this request. Files that git ignores stay as they are.'
+											: undoable.commands
+												? 'The files above go back to how they were. What commands changed cannot be undone, because this folder is not a git repository.'
+												: 'The files above go back to how they were before this request.'}>Undo</button
+									>
+									{#if undoable.kind !== 'git' && undoable.commands}<span class="fine">Not what commands changed</span>{/if}
 								</div>
 							{/if}
 						</div>
 					{:else if !working && undoable && undoable.request !== requests}
 						<div class="answers earlier">
-							<button class="plainbtn" onclick={() => code.undo()} disabled={code.busy}>Undo the earlier changes</button>
-							<span class="fine">Takes back what request {undoable.request} of this task changed.</span>
+							<button class="plainbtn" onclick={() => code.undo()} disabled={code.busy} title="Takes back what request {undoable.request} of this task changed">Undo the earlier changes</button>
 						</div>
 					{/if}
 
 					{#if task.error}{#if task.state === 'failed'}<ErrorLine error={task.error} where="code" />{:else}<p class="ended selectable">{task.error}</p>{/if}
-					{:else if task.state === 'stopped'}<p class="ended">Stopped. Nothing more will be changed. Send a message to go on.</p>{/if}
+					{:else if task.state === 'stopped'}<p class="ended">Stopped</p>{/if}
 					{#if code.problem}<ErrorLine error={code.problem} where="code" />{/if}
 				</div>
 			</div>
 			<div class="dock">
 				<div class="column">
-					{#if stopping}
-						<div class="stopask" role="alertdialog" aria-label="Stop the work?">
-							<span>Stop the work? What is already changed stays changed.</span>
+					<!-- Said once to a screen reader; the words that change are for the eye only. -->
+					<span class="sr" role="status">{busy ? 'Working' : ''}</span>
+					{#if busy}
+						<div class="status">
+							<span class="brew" aria-hidden="true"><i></i><i></i><i></i></span>
+							<span class="word" aria-hidden="true">{word}</span>
+							<span class="time" aria-hidden="true">{elapsed(now - started)}</span>
 							<span class="grow"></span>
-							<!-- svelte-ignore a11y_autofocus -->
-							<button class="plainbtn" onclick={stop} autofocus>Stop</button>
-							<button class="plainbtn" onclick={() => (stopping = false)}>Keep going</button>
+							<span class="esc" class:armed={stopping} aria-hidden="true">{stopping ? 'esc again to stop' : 'esc to stop'}</span>
 						</div>
 					{/if}
-					{@render composer(task.pending ? 'Answer the question above first' : working ? 'It is working. Press Esc to stop it.' : 'Ask for the next thing', false)}
+					{@render composer(task.pending ? 'Answer above first' : working ? '' : task.state === 'asking' ? 'Your answer' : 'Ask for the next thing', false)}
 				</div>
 			</div>
 		{:else}
@@ -1121,16 +1141,53 @@
 		background: var(--warn);
 	}
 
-	.did {
+	.verb {
+		flex: none;
+	}
+
+	/* What the step was about: a path, a command, a query. Cut with an ellipsis, never wrapped. */
+	.what {
 		min-width: 0;
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
+		font: 12.5px var(--rb-data);
+		color: var(--ink);
 	}
 
-	.tail {
+	.n,
+	.tail,
+	.step .plus,
+	.step .minus {
 		flex: none;
 		font-size: 12px;
+		color: var(--faint);
+		font-variant-numeric: tabular-nums;
+	}
+
+	.step .plus,
+	.step .minus {
+		font-family: var(--rb-data);
+	}
+
+	.step .plus {
+		color: var(--fit);
+	}
+
+	.step .minus {
+		color: var(--fail);
+	}
+
+	.part {
+		display: inline-flex;
+		align-items: baseline;
+		gap: 6px;
+		min-width: 0;
+		white-space: nowrap;
+	}
+
+	.part + .part::before {
+		content: '·';
 		color: var(--faint);
 	}
 
@@ -1142,9 +1199,23 @@
 		border-left: 1px solid var(--line-soft);
 	}
 
-	.cap {
-		font-size: 12px;
-		color: var(--faint);
+	/* The look-ups of one run, each its own line that opens. */
+	.sub {
+		display: grid;
+		grid-template-columns: minmax(0, 1fr);
+		margin: 2px 0 6px 2px;
+		padding: 0 0 0 13px;
+		border-left: 1px solid var(--line-soft);
+		list-style: none;
+	}
+
+	.sub .step {
+		margin: 0;
+	}
+
+	.question .prose {
+		padding-left: 12px;
+		border-left: 2px solid var(--accent);
 	}
 
 	.raw,
@@ -1232,17 +1303,12 @@
 		opacity: 0.4;
 	}
 
-	.purpose,
-	.keys {
+	.purpose {
 		font-size: 13px;
 		line-height: 1.45;
 		color: var(--muted);
 	}
 
-	.keys {
-		font-size: 12px;
-		color: var(--faint);
-	}
 
 	/* --- what the request changed, and the way back --- */
 	.changed {
@@ -1345,69 +1411,82 @@
 		padding: 0;
 	}
 
-	.stopask {
+	/* --- while it works: a small mark, a word that changes, the time so far, how to stop --- */
+	.status {
 		display: flex;
-		flex-wrap: wrap;
 		align-items: center;
-		gap: 8px;
-		margin-bottom: 8px;
-		padding: 8px 8px 8px 14px;
-		border: 1px solid var(--line);
-		border-radius: 14px;
-		background: var(--bg);
-		font-size: 13.5px;
-		animation: appear 0.15s var(--ease) both;
-	}
-
-	/* --- the three modes, each in one line --- */
-	.modes {
-		display: grid;
-		gap: 3px;
-		margin: 10px 0 0;
+		gap: 9px;
+		min-height: 24px;
+		margin-bottom: 6px;
 		padding: 0 10px;
-		font-size: 12.5px;
-		line-height: 1.45;
-		color: var(--faint);
-	}
-
-	.modes div {
-		display: grid;
-		grid-template-columns: 5.5em 1fr;
-		gap: 10px;
-	}
-
-	.modes dt {
-		font-weight: 500;
-	}
-
-	.modes dd {
-		margin: 0;
-	}
-
-	.modes .on {
-		color: var(--ink);
-	}
-
-	.working {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		margin-top: 14px;
 		font-size: 13px;
-		color: var(--faint);
+		color: var(--muted);
 	}
 
-	.dot {
-		width: 6px;
-		height: 6px;
+	/* Three bubbles rising, as in a pot that is nearly there. */
+	.brew {
+		flex: none;
+		display: inline-flex;
+		align-items: flex-end;
+		gap: 2px;
+		width: 13px;
+		height: 12px;
+	}
+
+	.brew i {
+		width: 3px;
+		height: 3px;
 		border-radius: 50%;
 		background: var(--accent);
-		animation: blink 0.9s steps(2, jump-none) infinite;
+		animation: bubble 1.3s ease-in-out infinite;
 	}
 
-	.problem {
-		margin-top: 10px;
-		font-size: 13px;
+	.brew i:nth-child(2) {
+		animation-delay: 0.22s;
+	}
+
+	.brew i:nth-child(3) {
+		animation-delay: 0.44s;
+	}
+
+	@keyframes bubble {
+		0%,
+		100% {
+			transform: translateY(0);
+			opacity: 0.35;
+		}
+		40% {
+			transform: translateY(-7px);
+			opacity: 1;
+		}
+	}
+
+	.word {
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		color: var(--accent);
+	}
+
+	.time,
+	.esc {
+		flex: none;
+		font-size: 12px;
+		color: var(--faint);
+		font-variant-numeric: tabular-nums;
+	}
+
+	.esc.armed {
+		color: var(--warn);
+	}
+
+	/* The word still changes; the mark stands still. */
+	@media (prefers-reduced-motion: reduce) {
+		.brew i {
+			animation: none;
+			opacity: 0.8;
+		}
 	}
 
 	/* --- the box to type in --- */
@@ -1463,28 +1542,6 @@
 		gap: 10px;
 		min-height: 30px;
 		padding: 2px 6px 6px 8px;
-	}
-
-	.chips {
-		display: inline-flex;
-		gap: 2px;
-	}
-
-	.chips button {
-		height: 28px;
-		padding: 0 11px;
-		border-radius: 999px;
-		font: 500 13px/1 var(--rb-text);
-		color: var(--muted);
-	}
-
-	.chips button:hover {
-		background: var(--hover);
-	}
-
-	.chips button[aria-checked='true'] {
-		background: var(--pressed);
-		color: var(--ink);
 	}
 
 	.switch {
@@ -1681,15 +1738,4 @@
 		color: var(--warn);
 	}
 
-	.sr {
-		position: absolute;
-		width: 1px;
-		height: 1px;
-		overflow: hidden;
-		clip-path: inset(50%);
-	}
-
-	.fine.warn {
-		color: var(--warn);
-	}
 </style>

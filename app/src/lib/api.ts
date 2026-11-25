@@ -734,7 +734,8 @@ export const studioDeleteTake = (id: string, shot: string, take: number) => json
 // --- Code: tasks a model works on in a folder (the loop runs in the service) ------------------
 
 export type AgentMode = 'ask' | 'read_only' | 'auto_edits' | 'bypass';
-export type AgentState = 'running' | 'waiting' | 'done' | 'failed' | 'stopped' | 'interrupted';
+/** `waiting`: a step waits for a yes or no. `asking`: the task put a question to the person and goes on with their next message. */
+export type AgentState = 'running' | 'waiting' | 'asking' | 'done' | 'failed' | 'stopped' | 'interrupted';
 
 export interface AgentToolStep {
 	kind: 'tool';
@@ -746,7 +747,7 @@ export interface AgentToolStep {
 	diff: string | null;
 }
 
-export type AgentStep = { kind: 'user' | 'model' | 'note'; text: string } | AgentToolStep;
+export type AgentStep = { kind: 'user' | 'model' | 'note' | 'question'; text: string } | AgentToolStep;
 
 /** A step that waits for the person: a change to a file (with its diff), a command, or a connector's tool. */
 export interface AgentPending {
@@ -767,6 +768,8 @@ export interface AgentTaskRow {
 	state: AgentState;
 	created_ms: number;
 	updated_ms: number;
+	/** When the person sent the request that is being worked on. Missing from an older service. */
+	request_ms?: number;
 }
 
 /** A request that can be taken back. `request` counts the person's messages from 1. */
