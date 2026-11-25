@@ -4,10 +4,16 @@
     "beforeBuildCommand": "sh scripts/bundle-daemon.sh && pnpm build"
   },
   "bundle": {
-    "externalBin": ["binaries/rigbrewd"],
+    "externalBin": [
+      "binaries/rigbrewd"
+    ],
     "category": "Productivity",
-    "shortDescription": "Open models, fitted to your rig.",
+    "shortDescription": "AI that runs on your own computer.",
     "copyright": "Rigbrew contributors, Apache-2.0",
-    "macOS": { "minimumSystemVersion": "14.0" }
+    "macOS": {
+      "minimumSystemVersion": "14.0",
+      "entitlements": "entitlements.plist",
+      "hardenedRuntime": true
+    }
   }
 }
