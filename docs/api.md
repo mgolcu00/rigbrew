@@ -152,6 +152,17 @@ service; the text becomes a `model` step when the turn ends, and `writing` is em
 `?brief=true` a few times a second: that answer has only `id`, `state`, `updated_ms`, the number of `steps` and
 `writing`, and `updated_ms` says when to ask for the whole task again.
 
+### How the app shows a task
+
+The Code screen reads like a terminal agent (`app/src/lib/code-view.ts`): one compact line per thing done. A change
+is a line with the file and the lines added and removed, a command is a line with the command; both open to the
+diff or the output. A run of look-ups (`list_files`, `read_file`, `search`, `outline`, `web_search`, `fetch_url`,
+the skill tools) is a single line, "Searching…" while it goes and "Read 4 files · Searched 2 times" afterwards,
+without the words that were searched for; it opens to the steps. A change, a command, a question or an answer ends
+the run. `update_plan` is no line: the plan is a checklist above the work. While the task is `running`, one line
+above the box to type in shows a word from `app/src/lib/code-words.ts` that follows what is happening, the time
+since `request_ms`, and that Esc (pressed twice) stops the work.
+
 ### Pace
 
 A small model left alone searches the same thing again and again. The service keeps count, so the rules hold
@@ -169,11 +180,43 @@ whatever the model does (`daemon/src/agent/pace.rs`):
   open a page or answer.
 - **Signs of being stuck.** The same call with the same result a third time, twelve look-ups in a row (reading,
   listing, searching, the web) with nothing changed or run in between, or one tool failing three times in a row.
-  The first sign adds a short nudge to the result the model reads. The second tells it to take stock: update the
-  plan and go on in a different way, or finish with what it has. The third ends the request with one question for
-  the person, as a `question` step, and the task's state is `asking`: it goes on with their next message. A change
-  or a command that gives something new is progress and starts this ladder again. The same call three times in a
-  row is not run a third time.
+  The first two signs add a short nudge to the result the model reads. From the third on it is told to take stock:
+  update the plan and go on in a different way, or finish with what it has. The sixth ends the request with one
+  question for the person, as a `question` step, and the task's state is `asking`: it goes on with their next
+  message. A change or a command that gives something new is progress and starts this ladder again, so tests that
+  fail, a fix, and tests that fail in another way can go on for as long as it takes; reading a file again after a
+  change is not a repeat. The same call three times in a row is not run a third time.
+
+### A task runs until it is done
+
+There is no limit on the steps of a task. What keeps a long one going (`daemon/src/agent/recall.rs` and the loop in
+`daemon/src/agent.rs`):
+
+- **Notes instead of a full history.** The conversation is sent whole while it fits the model's context (about
+  12,000 characters of it). When it does not, the oldest messages leave it and what they held is kept as a short
+  running note, written by the service from the calls and their results with no extra request to the model: the
+  files read and what they define, the changes made, the commands run and how they ended, what the person asked
+  along the way. The same file or command is one note that says how often. About three quarters of the budget
+  stay as whole messages, so the last files read are still in front of the model; when the notes grow past a
+  fifth of it the oldest look-ups go first. The first request of the person is kept word for word and sent first,
+  and the plan is in the system message on every turn.
+- **An answer that stops halfway is sent back.** Text with no tool call is the answer, except when it is empty,
+  when the engine cut it off, or when the plan still has steps to do and the text is not a question: then the
+  model is told so and the work goes on, at most twice in a row. `finish` with steps of the plan undone is
+  answered with what is left, at most twice.
+- **A last look.** After ten turns or more in which files were changed, the first `finish` is answered once with
+  the request word for word and with the files it names that are not in the folder.
+- **An engine error is tried again.** The model may be loading again or the engine busy: the request is repeated
+  after 2, 6 and 20 seconds before the task fails. A task that failed, was stopped or was cut off keeps its whole
+  conversation, so the next message ("go on") continues from where it was.
+- **Only a question waits for the person.** See [Pace](#pace): a task that goes round in circles ends its request
+  with a question, in the state `asking`.
+
+The task runs in the service, so it goes on while the app shows another screen. It does not outlive the service:
+the app stops `rigbrewd` when it quits, and the service stops by itself when the app is gone. A task that was
+working then is `interrupted` after the next start and goes on with the next message.
+
+`request_ms` is when the person sent the request that is being worked on.
 
 ### Undo
 

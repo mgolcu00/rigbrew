@@ -11,9 +11,11 @@
 //! - **Runs of look-ups.** Reading, listing and searching again and again with nothing changed,
 //!   run or answered in between.
 //! - **The ladder.** The same call with the same result a third time, a long run of look-ups, or
-//!   one tool failing again and again is a sign of being stuck. The first sign adds a short
-//!   nudge to the result, the second tells the model to take stock and change approach, and the
-//!   third becomes one question for the person: the task waits for their answer, it is not ended.
+//!   one tool failing again and again is a sign of being stuck. The first signs add a short
+//!   nudge to the result, the next ones tell the model to take stock and change approach, and
+//!   only the sixth with nothing new changed or run in between becomes one question for the
+//!   person: the task waits for their answer, it is not ended. Tests that fail, a fix, and
+//!   tests that fail in another way are work, not a sign.
 
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
@@ -31,6 +33,10 @@ const WEB_RUN: usize = 3;
 const LOOKUP_RUN: usize = 12;
 /// How often the same call may give the same result before it is a sign of being stuck.
 const SAME_OUTCOME: u8 = 3;
+/// Signs of being stuck, with no progress between them, before the model is told to change
+/// approach, and before the person is asked.
+const RETHINK_AT: u8 = 3;
+const ASK_AT: u8 = 6;
 /// Failures of one tool in a row that count as a sign of being stuck.
 const FAIL_RUN: usize = 3;
 /// The same call this many times in a row is not run again.
@@ -137,10 +143,12 @@ pub struct Pace {
     same_calls: usize,
     failing: String,
     fail_run: usize,
-    /// How often each (call, result) was seen in the current request.
-    outcomes: HashMap<String, u8>,
-    /// How far up the ladder the current request is: 0 fine, 1 nudged, 2 told to change approach.
-    level: u8,
+    /// How often each look-up gave the same result since something last changed.
+    looked: HashMap<String, u8>,
+    /// How often each change or command gave the same result in the current request.
+    done: HashMap<String, u8>,
+    /// Signs of being stuck since the last progress.
+    signs: u8,
     /// Search results and pages of this task, newest last.
     remembered: Vec<Remembered>,
 }
@@ -280,10 +288,15 @@ open one of the pages found with fetch_url, or answer.",
         }
         let mut sign = None;
         // The same call with the same result: a remembered search counts under its words, so
-        // "rust book" and "Book, Rust!" are one.
+        // "rust book" and "Book, Rust!" are one, and a command counts without the time it took.
+        let lookup = matches!(kind, Kind::Lookup | Kind::Search | Kind::Page);
+        let stable = match (kind, result.split_once('\n')) {
+            (Kind::Command, Some((first, rest))) => format!("{}\n{rest}", first.split(" after ").next().unwrap_or(first)),
+            _ => result.to_string(),
+        };
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        (tool, web_key.unwrap_or_else(|| args.to_string()), result).hash(&mut hasher);
-        let seen = self.outcomes.entry(format!("{:x}", hasher.finish())).or_insert(0);
+        (tool, web_key.unwrap_or_else(|| args.to_string()), stable).hash(&mut hasher);
+        let seen = if lookup { &mut self.looked } else { &mut self.done }.entry(format!("{:x}", hasher.finish())).or_insert(0);
         *seen = seen.saturating_add(1);
         let fresh = *seen == 1;
         if *seen >= SAME_OUTCOME {
@@ -302,12 +315,16 @@ open one of the pages found with fetch_url, or answer.",
         } else if ok && self.failing == tool {
             self.fail_run = 0;
         }
-        // Something new changed or ran: that is progress, and the ladder starts again.
+        // Something new changed or ran: that is progress, and the ladder starts again. Reading a
+        // file once more after a change is not a repeat, and tests that fail after a fix are
+        // not the same failure.
         if ok && fresh && matches!(kind, Kind::Change | Kind::Command | Kind::Other) {
             self.lookup_run = 0;
-            self.level = 0;
+            self.signs = 0;
+            self.fail_run = 0;
+            self.looked.clear();
         }
-        if matches!(kind, Kind::Lookup | Kind::Search | Kind::Page) && self.lookup_run > 0 && self.lookup_run.is_multiple_of(LOOKUP_RUN) {
+        if lookup && self.lookup_run > 0 && self.lookup_run.is_multiple_of(LOOKUP_RUN) {
             sign = sign.or(Some(Sign::Lookups));
         }
         let Some(sign) = sign else {
@@ -320,9 +337,9 @@ open one of the pages found with fetch_url, or answer.",
             });
             return Verdict { nudge, ask: None };
         };
-        self.level = self.level.saturating_add(1);
-        match self.level {
-            1 => Verdict {
+        self.signs = self.signs.saturating_add(1);
+        match self.signs {
+            n if n < RETHINK_AT => Verdict {
                 nudge: Some(match sign {
                     Sign::Same => "[You did exactly this before and got the same result. Doing it again will not help. Take a different step.]".to_string(),
                     Sign::Lookups => format!(
@@ -333,7 +350,7 @@ open one of the pages found with fetch_url, or answer.",
                 }),
                 ask: None,
             },
-            2 => Verdict { nudge: Some(RETHINK.into()), ask: None },
+            n if n < ASK_AT => Verdict { nudge: Some(RETHINK.into()), ask: None },
             _ => Verdict {
                 nudge: None,
                 ask: Some(match sign {
@@ -468,16 +485,22 @@ mod tests {
         }
         let (text, ask) = read(&mut pace, LOOKUP_RUN);
         assert!(text.contains("12 look-ups in a row") && ask.is_none(), "{text}");
-        for n in LOOKUP_RUN + 1..2 * LOOKUP_RUN {
-            assert!(!read(&mut pace, n).0.contains('['));
+        // Every twelve more are another sign: nudges first, then the change of approach, and
+        // the question only at the sixth.
+        for sign in 2..=ASK_AT as usize {
+            for n in (sign - 1) * LOOKUP_RUN + 1..sign * LOOKUP_RUN {
+                let (text, ask) = read(&mut pace, n);
+                assert!(!text.contains('[') && ask.is_none());
+            }
+            let (text, ask) = read(&mut pace, sign * LOOKUP_RUN);
+            if sign < RETHINK_AT as usize {
+                assert!(text.contains("look-ups in a row") && ask.is_none(), "{sign}: {text}");
+            } else if sign < ASK_AT as usize {
+                assert!(text.contains("Change approach now") && text.contains("update_plan") && ask.is_none(), "{sign}: {text}");
+            } else {
+                assert!(ask.unwrap().contains("What should I do next?"));
+            }
         }
-        let (text, ask) = read(&mut pace, 2 * LOOKUP_RUN);
-        assert!(text.contains("Change approach now") && text.contains("update_plan") && ask.is_none(), "{text}");
-        for n in 2 * LOOKUP_RUN + 1..3 * LOOKUP_RUN {
-            assert!(read(&mut pace, n).1.is_none());
-        }
-        let (_, ask) = read(&mut pace, 3 * LOOKUP_RUN);
-        assert!(ask.unwrap().contains("What should I do next?"));
     }
 
     #[test]
@@ -486,12 +509,12 @@ mod tests {
         for n in 0..LOOKUP_RUN {
             step(&mut pace, "search", json!({"pattern": format!("p{n}")}), "Nothing in the folder matches.", "done");
         }
-        assert_eq!(pace.level, 1);
+        assert_eq!(pace.signs, 1);
         // The plan is neither a look-up nor progress.
         step(&mut pace, "update_plan", json!({"steps": ["a"]}), "Plan saved", "done");
-        assert_eq!((pace.level, pace.lookup_run), (1, LOOKUP_RUN));
+        assert_eq!((pace.signs, pace.lookup_run), (1, LOOKUP_RUN));
         step(&mut pace, "edit_file", json!({"path": "a.rs", "old": "x", "new": "y"}), "Changed a.rs", "done");
-        assert_eq!((pace.level, pace.lookup_run), (0, 0));
+        assert_eq!((pace.signs, pace.lookup_run), (0, 0));
         for n in 0..LOOKUP_RUN - 1 {
             assert!(!step(&mut pace, "read_file", json!({"path": format!("{n}")}), "text", "done").0.contains('['));
         }
@@ -505,19 +528,28 @@ mod tests {
         let mut pace = Pace::default();
         let round = |pace: &mut Pace| {
             let a = step(pace, "read_file", json!({"path": "a.rs"}), "a.rs (lines 1 to 1 of 1)\nfn a() {}", "done");
-            let b = step(pace, "run_command", json!({"command": "make test"}), "exit code 2\nerror: nope", "failed");
+            // The time a command took is not part of what it gave.
+            let took = pace.done.len() + pace.looked.len() + usize::from(pace.signs);
+            let b =
+                step(pace, "run_command", json!({"command": "make test"}), &format!("exit code 2 after 0.{took} s\nerror: nope"), "failed");
             (a, b)
         };
         let (a, b) = round(&mut pace);
         assert!(!a.0.contains('[') && !b.0.contains('['));
         round(&mut pace);
-        // The third time round: the read is the first sign, the command the second.
+        // The third time round: the read is the first sign, the command the second. Both are nudges.
         let (a, b) = round(&mut pace);
         assert!(a.0.contains("got the same result"), "{}", a.0);
-        assert!(b.0.contains("Change approach now"), "{}", b.0);
-        let (a, _) = round(&mut pace);
-        let question = a.1.expect("the third sign is a question for the person");
-        assert!(question.contains("reading a.rs") && question.contains("go on"), "{question}");
+        assert!(b.0.contains("run_command did not work 3 times in a row"), "{}", b.0);
+        // The fourth: signs three and four say to change approach.
+        let (a, b) = round(&mut pace);
+        assert!(a.0.contains("Change approach now") && a.1.is_none(), "{}", a.0);
+        assert!(b.0.contains("Change approach now") && b.1.is_none(), "{}", b.0);
+        // The fifth: one more of those, and the sixth sign is the question.
+        let (a, b) = round(&mut pace);
+        assert!(a.0.contains("Change approach now") && a.1.is_none());
+        let question = b.1.expect("the sixth sign is a question for the person");
+        assert!(question.contains("the command `make test`") && question.contains("go on"), "{question}");
         // Their answer starts the ladder again.
         pace.next_request();
         let (a, b) = round(&mut pace);
@@ -552,13 +584,49 @@ mod tests {
         assert!(!fail(&mut pace, 2).0.contains('['));
         let third = fail(&mut pace, 3).0;
         assert!(third.contains("edit_file did not work 3 times in a row"), "{third}");
-        fail(&mut pace, 4);
-        fail(&mut pace, 5);
-        assert!(fail(&mut pace, 6).0.contains("Change approach now"));
-        fail(&mut pace, 7);
-        fail(&mut pace, 8);
-        let question = fail(&mut pace, 9).1.unwrap();
-        assert!(question.contains("the change to a.rs") && question.contains("\"try 9\" is not in a.rs."), "{question}");
+        for n in 4..=17 {
+            let (text, ask) = fail(&mut pace, n);
+            assert!(ask.is_none());
+            match n {
+                6 => assert!(text.contains("did not work 6 times in a row"), "{text}"),
+                9 | 12 | 15 => assert!(text.contains("Change approach now"), "{text}"),
+                _ => assert!(!text.contains('['), "{n}: {text}"),
+            }
+        }
+        let question = fail(&mut pace, 18).1.unwrap();
+        assert!(question.contains("the change to a.rs") && question.contains("\"try 18\" is not in a.rs."), "{question}");
+
+        // Tests that fail, a fix, tests that fail in another way: that is work, however long it goes on.
+        let mut pace = Pace::default();
+        for n in 0..30 {
+            let (ran, ask) =
+                step(&mut pace, "run_command", json!({"command": "make test"}), &format!("exit code 1 after 0.1 s\n{n} failed"), "failed");
+            assert!(!ran.contains('[') && ask.is_none(), "{n}: {ran}");
+            // Reading the same two files again after each fix is not a repeat either.
+            for file in ["a.rs", "a_test.rs"] {
+                let (read, ask) = step(&mut pace, "read_file", json!({"path": file}), "the same text as before", "done");
+                assert!(!read.contains('[') && ask.is_none(), "{n}: {read}");
+            }
+            step(
+                &mut pace,
+                "edit_file",
+                json!({"path": "a.rs", "old": format!("v{n}"), "new": format!("v{}", n + 1)}),
+                "Changed a.rs",
+                "done",
+            );
+        }
+        // The same edit back and forth is not progress: the ladder is climbed.
+        let mut pace = Pace::default();
+        let mut asked = false;
+        for n in 0..40 {
+            let (old, new) = if n % 2 == 0 { ("x", "y") } else { ("y", "x") };
+            step(&mut pace, "edit_file", json!({"path": "a.rs", "old": old, "new": new}), "Changed a.rs", "done");
+            asked |=
+                step(&mut pace, "run_command", json!({"command": "make test"}), &format!("exit code 1 after 0.{n} s\n1 failed"), "failed")
+                    .1
+                    .is_some();
+        }
+        assert!(asked, "going back and forth ends in a question");
 
         // Searches refused for the budget count as that tool not working.
         let mut pace = Pace::default();

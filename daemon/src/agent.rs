@@ -4,6 +4,13 @@
 //! at another screen, and can be listed, followed and stopped. Every task is kept in memory and
 //! as one JSON file under `<data dir>/agent/`, so finished tasks are there after a restart.
 //!
+//! A task has no limit on its steps: the model is on this computer and costs nothing to run, so
+//! the work goes on until it is done. Three things make that hold: `pace` notices when the model
+//! goes round in circles (and in the end asks the person, it never ends the task for it),
+//! `recall` keeps a running note of what left the context window, and an engine error is tried
+//! again after a short wait. When the service itself stops, the task is marked as cut off and
+//! the person's next message goes on from where it was.
+//!
 //!   POST   /v1/agent/tasks                {folder, prompt, model?, mode, web?, connectors?} starts a task
 //!   GET    /v1/agent/tasks?folder=        tasks, newest first
 //!   GET    /v1/agent/tasks/{id}           state, steps so far, what waits for an answer, and the
@@ -24,6 +31,7 @@ pub mod mcp;
 mod outline;
 mod pace;
 mod plan;
+mod recall;
 pub mod skills;
 mod stream;
 mod undo;
@@ -48,8 +56,13 @@ use crate::{fail, Shared};
 use files::Folder;
 pub use undo::task_undo;
 
-/// Model turns one request may take before the task stops and says so.
-const STEP_LIMIT: usize = 40;
+/// How long the loop waits before it asks the engine again after an error, one wait per try.
+/// The model is on this computer: it may be loading again, or busy for a moment. Only when the
+/// last wait did not help does the task fail, and the person's next message goes on from there.
+const RETRY_WAITS: [Duration; 3] = [Duration::from_secs(2), Duration::from_secs(6), Duration::from_secs(20)];
+/// How often in a row an answer with no tool call is sent back (it was empty, cut off, or the
+/// plan still has steps to do) before it is taken as the answer.
+const MAX_SEND_BACKS: usize = 2;
 /// Characters of conversation sent to the model; older tool results are left out beyond it.
 /// The chat engine runs with a context of 8192 tokens, and the tools, the rules and the answer
 /// need their share of it.
@@ -128,6 +141,9 @@ struct Task {
     state: String,
     created_ms: i64,
     updated_ms: i64,
+    /// When the person sent the request that is being worked on, or was worked on last.
+    #[serde(default)]
+    request_ms: i64,
     steps: Vec<Step>,
     pending: Option<Pending>,
     error: Option<String>,
@@ -153,6 +169,10 @@ struct Task {
     /// What was searched, and how the current request is getting on: see `pace`. Not shown by the API.
     #[serde(default)]
     pace: pace::Pace,
+    /// What is kept of the part of the conversation that is no longer sent: see `recall`. Not
+    /// shown by the API.
+    #[serde(default)]
+    memory: recall::Memory,
 }
 
 impl Task {
@@ -166,6 +186,7 @@ impl Task {
         if let Some(o) = v.as_object_mut() {
             o.remove("messages");
             o.remove("pace");
+            o.remove("memory");
         }
         v
     }
@@ -173,7 +194,8 @@ impl Task {
     fn summary(&self) -> Value {
         json!({
             "id": self.id, "folder": self.folder, "title": self.title, "model": self.model, "mode": self.mode,
-            "state": self.state, "created_ms": self.created_ms, "updated_ms": self.updated_ms, "steps": self.steps.len(),
+            "state": self.state, "created_ms": self.created_ms, "updated_ms": self.updated_ms, "request_ms": self.request_ms,
+            "steps": self.steps.len(),
         })
     }
 
@@ -442,6 +464,115 @@ fn tool_defs(mode: Mode, web: bool, with_skills: bool) -> Vec<Value> {
     out
 }
 
+/// An engine error that waiting does not cure.
+fn lasting(error: &str) -> bool {
+    let e = error.to_lowercase();
+    e.contains("not installed") || e.contains("no model file") || e.contains("no chat model")
+}
+
+/// What to do with an answer that has text and no tool call.
+#[derive(Debug, PartialEq)]
+enum Plain {
+    /// It is the answer: the request is done.
+    Answer,
+    /// Send it back with this line; the work goes on.
+    Back(String),
+}
+
+/// A small model often stops in the middle: it writes nothing, its answer is cut off, or it
+/// says what it will do next and calls no tool. Each of these is sent back with a short line,
+/// at most `MAX_SEND_BACKS` times in a row. A question to the person is always an answer.
+fn plain_answer(text: &str, cut_off: bool, plan: &[plan::PlanStep], sent_back: usize) -> Plain {
+    if sent_back >= MAX_SEND_BACKS {
+        return Plain::Answer;
+    }
+    if text.is_empty() {
+        return Plain::Back("You answered with nothing. Call a tool to go on, or call finish with a summary of what you did.".into());
+    }
+    if cut_off {
+        return Plain::Back("Your answer was cut off. Go on exactly where it stopped. Do not repeat what you already wrote.".into());
+    }
+    if !plan.is_empty() && !plan::finished(plan) && !text.trim_end().ends_with('?') {
+        return Plain::Back(format!(
+            "Your plan still has steps to do:\n{}\nDo not stop here: go on with the next step using the tools. If the work is really done, call finish.",
+            plan::brief(plan)
+        ));
+    }
+    Plain::Answer
+}
+
+/// What `finish` answers while the plan still has steps to do: the work is not ended, the
+/// model is told what is left. `None` when the plan is done or there is none.
+fn not_finished(plan: &[plan::PlanStep]) -> Option<String> {
+    (!plan.is_empty() && !plan::finished(plan)).then(|| {
+        format!(
+            "Not finished: your plan still has steps to do:\n{}\nDo them now. If they are really done, mark them with update_plan and call finish again.",
+            plan::brief(plan)
+        )
+    })
+}
+
+/// A request is long work once it took this many turns.
+const LONG_WORK: usize = 10;
+
+/// The files a request names that are not in the folder: `tests/test_cli.py`, `README.md`. Only
+/// what plainly is a file name counts (a path with a slash, or a lower-case name with an
+/// ending), so "Node.js" and "example.com" are not taken for one.
+fn named_but_missing(request: &str, root: &FsPath) -> Vec<String> {
+    static NAME: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let name = NAME.get_or_init(|| regex::Regex::new(r"[A-Za-z0-9_][A-Za-z0-9_./-]*\.[A-Za-z][A-Za-z0-9]{0,5}").expect("static pattern"));
+    const NOT_FILES: &[&str] = &["com", "org", "net", "io", "dev", "app", "ai", "co", "html"];
+    const DOCS: &[&str] = &["README", "LICENSE", "CHANGELOG", "CONTRIBUTING", "Makefile", "Dockerfile"];
+    let mut out: Vec<String> = Vec::new();
+    for found in name.find_iter(request) {
+        let before = &request[..found.start()];
+        let token = found.as_str().trim_end_matches('.');
+        let Some((stem, ending)) = token.rsplit_once('.') else { continue };
+        let file_like = token.contains('/')
+            || DOCS.contains(&stem)
+            || (stem.len() >= 2 && stem.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-'));
+        if !file_like
+            || token.contains("..")
+            || token.contains("//")
+            || before.ends_with('/')
+            || before.ends_with('.')
+            || before.ends_with('@')
+            || (NOT_FILES.contains(&ending) && !token.contains('/'))
+        {
+            continue;
+        }
+        if !root.join(token).exists() && !out.iter().any(|o| o == token) {
+            out.push(token.to_string());
+        }
+        if out.len() == 12 {
+            break;
+        }
+    }
+    out
+}
+
+/// After long work that changed files, the first `finish` is answered with the request itself,
+/// word for word, and with the files it names that are not there: by then a small model has
+/// often lost a part of what was asked. `None` for short work, or when nothing was changed.
+fn last_look(steps: &[Step], turns: usize, root: &FsPath) -> Option<String> {
+    let start = steps.iter().rposition(|s| matches!(s, Step::User { .. }))?;
+    let Step::User { text } = &steps[start] else { return None };
+    let changed = steps[start..]
+        .iter()
+        .any(|s| matches!(s, Step::Tool { name, status, .. } if status == "done" && pace::kind_of(name) == pace::Kind::Change));
+    (turns >= LONG_WORK && changed).then(|| {
+        let missing = named_but_missing(text, root);
+        let missing = if missing.is_empty() {
+            String::new()
+        } else {
+            format!("These files are named there and are not in the folder: {}. Write them now if they were asked for.\n\n", missing.join(", "))
+        };
+        format!(
+            "Before you finish, here is what the person asked for, word for word:\n\n{text}\n\n{missing}Go through it point by point against what you did. If something is missing, do it now. If everything is there, call finish again."
+        )
+    })
+}
+
 fn weight(message: &Value) -> usize {
     let content = message["content"].as_str().map_or(0, |s| s.chars().count());
     let calls =
@@ -475,9 +606,9 @@ fn shrink(message: &mut Value) {
     }
 }
 
-/// The conversation as it is sent: when it is longer than `budget` characters, the oldest tool
-/// results and long call arguments are left out first. What the person wrote always stays, and
-/// so does the last message.
+/// The last resort after `recall::compact`, for a newest part that is too long by itself: when
+/// the conversation is longer than `budget` characters, the oldest tool results and long call
+/// arguments are left out first. What the person wrote always stays, and so does the last message.
 fn fit(messages: &[Value], budget: usize) -> Vec<Value> {
     let mut out = messages.to_vec();
     let mut total: usize = out.iter().map(weight).sum();
@@ -726,7 +857,9 @@ async fn call_tool(app: &Shared, id: &str, folder: &Folder, call: &str, name: &s
     }
 }
 
-/// Works on the task until the model answers, finishes, or the step limit is reached.
+/// Works on the task until the model answers or finishes, or until it has a question for the
+/// person. There is no limit on the steps: the model is on this computer, and a task takes as
+/// long as it takes. What stops a task that goes round in circles is `pace`.
 async fn work(app: &Shared, id: &str) -> Ended {
     let agents = &app.agent;
     let failed = |why: String| Ended { state: "failed", error: Some(why) };
@@ -743,19 +876,21 @@ async fn work(app: &Shared, id: &str) -> Ended {
     let mut budget = HISTORY_CHARS;
     // A tool call too long for one answer comes back from the engine as an error, not as a call.
     let mut cut_offs = 0;
+    // Engine errors in a row, and answers without a tool call that were sent back in a row.
+    let (mut errors, mut sent_back) = (0, 0);
+    // How often `finish` was answered with what is still to do. Counted for the whole request.
+    let mut held_open = 0;
+    // Whether the request was read back to the model once before it finished.
+    let mut looked_back = false;
     loop {
+        // What no longer fits leaves the conversation and stays as notes.
+        agents.change(id, |t| recall::compact(&mut t.messages, &mut t.memory, budget));
         let Some(task) = agents.get(id) else { return failed("The task is gone.".into()) };
-        if task.turns >= STEP_LIMIT {
-            return Ended {
-                state: "stopped",
-                error: Some(format!("Stopped after {STEP_LIMIT} steps without finishing. Send a message to let it go on.")),
-            };
-        }
         let skills = skills::load(&app.root, Some(folder.root()));
         let system =
             format!("{}{}{}", system_prompt(&folder, task.mode, task.web, &skills), mcp::prompt(app, &task.mcp), extra::context(&task));
         let mut messages = vec![json!({"role": "system", "content": system})];
-        messages.extend(fit(&task.messages, budget));
+        messages.extend(fit(&recall::conversation(&task.memory, &task.messages), budget));
         let mut tools = tool_defs(task.mode, task.web, !skills.is_empty());
         tools.extend(skills::extra_tools(&skills));
         tools.extend(mcp::tool_defs(app, &task.mcp));
@@ -784,13 +919,22 @@ async fn work(app: &Shared, id: &str) -> Ended {
                 cut_offs += 1;
                 app.record("agent_call_cut_off", json!({"package": package.id}));
                 agents.change(id, |t| {
-                    t.messages.push(json!({"role": "user", "content": CUT_OFF_HINT}));
-                    t.steps.push(Step::Note { text: "That was too long to write in one go. Trying again in smaller parts.".into() });
+                    t.messages.push(recall::hint(CUT_OFF_HINT));
+                    t.steps.push(Step::Note { text: "Too long for one go. Writing it in parts.".into() });
                 });
+                continue;
+            }
+            // Anything else may pass: the model is loading again, the engine was busy or went
+            // away. Wait a little and ask again; the conversation is as it was.
+            Err(e) if errors < RETRY_WAITS.len() && !lasting(&e) => {
+                app.record("agent_engine_retry", json!({"package": package.id, "try": errors + 1}));
+                tokio::time::sleep(RETRY_WAITS[errors]).await;
+                errors += 1;
                 continue;
             }
             Err(e) => return failed(e),
         };
+        errors = 0;
         agents.change(id, |t| t.turns += 1);
         let message = &answer["choices"][0]["message"];
         let cut_off = answer["choices"][0]["finish_reason"] == "length";
@@ -798,18 +942,37 @@ async fn work(app: &Shared, id: &str) -> Ended {
         let text = text.rsplit_once("</think>").map_or(text, |(_, after)| after).trim().to_string();
         let calls: Vec<Value> = message["tool_calls"].as_array().cloned().unwrap_or_default();
         if calls.is_empty() {
-            // Text and no tool call: that is the answer.
+            // Text and no tool call: that is the answer, unless the model plainly stopped halfway.
+            let mut back = match plain_answer(&text, cut_off, &task.extra.plan, sent_back) {
+                Plain::Answer => None,
+                Plain::Back(line) => Some(line),
+            };
+            // The same last look as before `finish`, unless the text is a question to the person.
+            if back.is_none() && !looked_back && !text.is_empty() && !text.trim_end().ends_with('?') {
+                looked_back = true;
+                back = last_look(&task.steps, task.turns, folder.root());
+            }
             agents.change(id, |t| {
-                t.messages.push(json!({"role": "assistant", "content": text}));
-                t.steps.push(if text.is_empty() {
-                    Step::Note { text: "The model gave no answer.".into() }
-                } else {
-                    Step::Model { text: text.clone() }
-                });
-                verify::note_unchecked(t, &text);
+                if !text.is_empty() {
+                    t.messages.push(json!({"role": "assistant", "content": text}));
+                    t.steps.push(Step::Model { text: text.clone() });
+                } else if back.is_none() {
+                    t.messages.push(json!({"role": "assistant", "content": ""}));
+                    t.steps.push(Step::Note { text: "No answer.".into() });
+                }
+                match &back {
+                    Some(line) => t.messages.push(recall::hint(line)),
+                    None => verify::note_unchecked(t, &text),
+                }
             });
+            if back.is_some() {
+                sent_back += 1;
+                app.record("agent_sent_back", json!({"package": package.id}));
+                continue;
+            }
             return Ended { state: "done", error: None };
         }
+        sent_back = 0;
         // Every call gets an id the results can point to.
         let calls: Vec<Value> = calls
             .into_iter()
@@ -834,6 +997,21 @@ async fn work(app: &Shared, id: &str) -> Ended {
             let args = parsed.clone().unwrap_or_else(|| json!({}));
             app.record("agent_tool_called", json!({"tool": if KNOWN_TOOLS.contains(&name.as_str()) || extra::TOOLS.contains(&name.as_str()) { name.as_str() } else { "unknown" }}));
             if name == "finish" {
+                // Finishing with steps of its own plan undone: a small model does that. It is
+                // told what is left, twice at most; after that its word is taken.
+                let now = agents.get(id);
+                let mut left = now.as_ref().and_then(|t| not_finished(&t.extra.plan)).filter(|_| held_open < MAX_SEND_BACKS);
+                if left.is_none() && !looked_back {
+                    looked_back = true;
+                    left = now.as_ref().and_then(|t| last_look(&t.steps, t.turns, folder.root()));
+                } else if left.is_some() {
+                    held_open += 1;
+                }
+                if let Some(left) = left {
+                    app.record("agent_sent_back", json!({"package": package.id}));
+                    agents.change(id, |t| t.messages.push(json!({"role": "tool", "tool_call_id": model_id, "content": left})));
+                    continue;
+                }
                 let summary = arg_str(&args, "summary").unwrap_or("").trim().to_string();
                 let said = format!("{text}\n{summary}");
                 agents.change(id, |t| {
@@ -992,6 +1170,7 @@ pub async fn task_create(State(app): State<Shared>, Json(body): Json<NewTask>) -
         state: "running".into(),
         created_ms: now,
         updated_ms: now,
+        request_ms: now,
         steps: vec![Step::User { text: prompt.to_string() }],
         pending: None,
         error: None,
@@ -1002,6 +1181,7 @@ pub async fn task_create(State(app): State<Shared>, Json(body): Json<NewTask>) -
         extra: Default::default(),
         mcp: mcp::TaskState::new(body.connectors),
         pace: Default::default(),
+        memory: Default::default(),
     };
     let (id, view) = (task.id.clone(), task.view());
     app.agent.insert(task);
@@ -1092,6 +1272,7 @@ pub async fn task_message(State(app): State<Shared>, Path(id): Path<String>, Jso
         t.steps.push(Step::User { text: text.clone() });
         t.messages.push(json!({"role": "user", "content": text}));
         t.state = "running".into();
+        t.request_ms = now_ms();
         t.error = None;
         t.turns = 0;
         t.denied.clear();
@@ -1206,6 +1387,102 @@ mod tests {
     }
 
     #[test]
+    fn an_answer_that_stops_halfway_is_sent_back_and_a_real_one_is_not() {
+        let plan = |steps: Value| plan::parse(&json!({ "steps": steps })).unwrap();
+        let open = plan(json!([{"text": "Write the code", "status": "done"}, {"text": "Write the tests"}]));
+        let done = plan(json!([{"text": "Write the code", "status": "done"}]));
+        // No plan, or a finished one: text is the answer.
+        assert_eq!(plain_answer("The test fails because of a typo.", false, &[], 0), Plain::Answer);
+        assert_eq!(plain_answer("All done.", false, &done, 0), Plain::Answer);
+        // Steps left: the model is told which, and to go on.
+        let Plain::Back(line) = plain_answer("Now I will write the tests.", false, &open, 0) else { panic!("sent back") };
+        assert!(line.contains("[x] Write the code\n[>] Write the tests") && line.contains("go on with the next step"), "{line}");
+        // A question to the person is theirs to answer, plan or not.
+        assert_eq!(plain_answer("Which test runner do you use?", false, &open, 0), Plain::Answer);
+        // Nothing at all, or an answer the engine cut off.
+        assert!(matches!(plain_answer("", false, &[], 0), Plain::Back(l) if l.contains("answered with nothing")));
+        assert!(matches!(plain_answer("The first half of", true, &[], 1), Plain::Back(l) if l.contains("cut off")));
+        // The same for finish: with steps left it is told which, and a plan that is done (or none) lets it end.
+        assert!(not_finished(&open).unwrap().contains("[>] Write the tests"));
+        assert_eq!(not_finished(&done), None);
+        assert_eq!(not_finished(&[]), None);
+        // Never more than twice in a row: then it is the answer, whatever it is.
+        assert_eq!(plain_answer("Now I will write the tests.", false, &open, MAX_SEND_BACKS), Plain::Answer);
+        assert_eq!(plain_answer("", false, &[], MAX_SEND_BACKS), Plain::Answer);
+    }
+
+    #[test]
+    fn long_work_that_changed_files_is_checked_against_the_request_before_it_ends() {
+        let tool = |name: &str, status: &str| Step::Tool {
+            call: "c".into(),
+            name: name.into(),
+            arguments: json!({}),
+            status: status.into(),
+            result: None,
+            diff: None,
+        };
+        let mut steps = vec![
+            Step::User { text: "first thing".into() },
+            tool("write_file", "done"),
+            Step::User { text: "Write four test files.".into() },
+            tool("read_file", "done"),
+        ];
+        let root = files::scratch("lastlook");
+        assert_eq!(last_look(&steps, 30, &root), None, "nothing was changed for this request");
+        steps.push(tool("write_file", "failed"));
+        assert_eq!(last_look(&steps, 30, &root), None, "a change that did not go in is none");
+        steps.push(tool("edit_file", "done"));
+        assert_eq!(last_look(&steps, LONG_WORK - 1, &root), None, "short work needs no second look");
+        let look = last_look(&steps, LONG_WORK, &root).unwrap();
+        assert!(look.contains("word for word:\n\nWrite four test files.\n\nGo through it") && !look.contains("first thing"), "{look}");
+        assert_eq!(last_look(&[], 30, &root), None);
+        // Files the request names and the folder does not have are said by name.
+        std::fs::create_dir_all(root.join("tests")).unwrap();
+        std::fs::write(root.join("tests/test_item.py"), "").unwrap();
+        std::fs::write(root.join("README.md"), "").unwrap();
+        let request = "Write inventory/cli.py, then tests in tests/test_item.py, tests/test_cli.py and tests/test_cli.py. \
+            Then a README.md and notes.txt. Use Node.js 22.1 like https://example.com/docs/setup.html says, e.g. from example.org, \
+            and mail me@host.dev. Not ../outside.txt.";
+        assert_eq!(named_but_missing(request, &root), ["inventory/cli.py", "tests/test_cli.py", "notes.txt"]);
+        steps.push(Step::User { text: request.into() });
+        steps.push(tool("write_file", "done"));
+        let look = last_look(&steps, LONG_WORK, &root).unwrap();
+        assert!(look.contains("not in the folder: inventory/cli.py, tests/test_cli.py, notes.txt. Write them now"), "{look}");
+        assert!(named_but_missing("Summarise this folder.", &root).is_empty());
+    }
+
+    #[test]
+    fn an_engine_error_is_tried_again_unless_waiting_cannot_help() {
+        assert!(!lasting("error sending request for url (http://127.0.0.1:51234/v1/chat/completions)"));
+        assert!(!lasting("The model stopped with an error."));
+        assert!(!lasting("Loading model"));
+        assert!(lasting("Steep is not installed"));
+        assert!(lasting("package has no model file"));
+        assert!(RETRY_WAITS.len() >= 3 && RETRY_WAITS.windows(2).all(|w| w[0] < w[1]));
+    }
+
+    #[test]
+    fn a_long_task_is_sent_as_the_first_request_the_notes_and_the_newest_part() {
+        let mut messages = vec![json!({"role": "user", "content": "Build the thing."})];
+        for n in 0..40 {
+            messages.push(call(&format!("r{n}"), "read_file", json!({"path": format!("f{n}.rs")})));
+            messages.push(result(&format!("r{n}"), &format!("f{n}.rs (lines 1 to 9 of 9)\nfn f{n}() {{}}\n{}", "// filler\n".repeat(120))));
+        }
+        let mut memory = recall::Memory::default();
+        assert!(recall::compact(&mut messages, &mut memory, HISTORY_CHARS));
+        let sent = fit(&recall::conversation(&memory, &messages), HISTORY_CHARS);
+        assert!(sent.iter().map(weight).sum::<usize>() <= HISTORY_CHARS);
+        let first = sent[0]["content"].as_str().unwrap();
+        assert!(first.starts_with("Build the thing.") && first.contains("read f0.rs (lines 1 to 9 of 9): defines f0"), "{first}");
+        assert_eq!(sent.last().unwrap()["tool_call_id"], "r39");
+        assert!(sent.last().unwrap()["content"].as_str().unwrap().len() > 1000, "the newest result is whole");
+        // A conversation cut like this is still a valid one: nothing is left for `repair` to mend.
+        let mut again = messages.clone();
+        repair(&mut again);
+        assert_eq!(again, messages);
+    }
+
+    #[test]
     fn calls_without_a_result_get_one() {
         let mut messages = vec![
             json!({"role": "user", "content": "go"}),
@@ -1254,6 +1531,7 @@ mod tests {
             state: "waiting".into(),
             created_ms: 1,
             updated_ms: 1,
+            request_ms: 1,
             steps: vec![Step::Tool {
                 call: "c1".into(),
                 name: "run_command".into(),
@@ -1271,9 +1549,10 @@ mod tests {
             extra: Default::default(),
             mcp: Default::default(),
             pace: Default::default(),
+            memory: Default::default(),
         };
         let view = task.view();
-        assert!(view.get("messages").is_none() && view.get("pace").is_none());
+        assert!(view.get("messages").is_none() && view.get("pace").is_none() && view.get("memory").is_none());
         assert_eq!(view["mode"], "ask");
         assert_eq!(view["steps"][0]["kind"], "tool");
         assert_eq!(view["pending"]["command"], "ls");
@@ -1300,6 +1579,7 @@ mod tests {
             state: "running".into(),
             created_ms: 1,
             updated_ms: 1,
+            request_ms: 1,
             steps: vec![Step::User { text: "hello".into() }],
             pending: None,
             error: None,
@@ -1310,6 +1590,7 @@ mod tests {
             extra: Default::default(),
             mcp: Default::default(),
             pace: Default::default(),
+            memory: Default::default(),
         };
         agents.insert(task.clone());
         task.id = "b".repeat(32);
