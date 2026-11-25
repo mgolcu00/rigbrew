@@ -33,6 +33,24 @@
 		void connectors.load();
 	});
 
+	// The three kinds of tools sit behind one row; it remembers whether it was left open.
+	let tools = $state(false);
+	onMount(() => {
+		try {
+			tools = localStorage.getItem('rigbrew.sidebar.tools') === '1';
+		} catch {
+			// no storage: closed
+		}
+	});
+	function toggleTools() {
+		tools = !tools;
+		try {
+			localStorage.setItem('rigbrew.sidebar.tools', tools ? '1' : '0');
+		} catch {
+			// not remembered
+		}
+	}
+
 	function newChat() {
 		chat.newChat();
 		app.go('chat');
@@ -63,12 +81,20 @@
 				{/if}
 			</button>
 		{/each}
-		<button class="row" class:current={agents.sheet !== null} onclick={() => agents.open('sidebar')} title="Agents: saved ways to use the chat model"><Icon name="person" size={16} /><span>Agents</span></button>
-		<button class="row" class:current={skills.sheet !== null} onclick={() => skills.open('sidebar', code.folder)} title="Skills: instructions for one kind of work"><Icon name="library" size={16} /><span>Skills</span></button>
-		<button class="row" class:current={connectors.sheet !== null} onclick={() => connectors.open('sidebar')} title="Connectors: tools from outside Rigbrew">
-			<Icon name="external" size={16} /><span>Connectors</span>
-			{#if connectors.usable.length > 0}<span class="count" title="{connectors.usable.length} running">{connectors.usable.length}</span>{/if}
+		<!-- Agents, skills and connectors: one quiet row that opens to three, so the list stays short. -->
+		<button class="row" aria-expanded={tools} onclick={toggleTools} title="Agents, skills and connectors">
+			<Icon name="library" size={16} /><span>Tools</span>
+			{#if connectors.usable.length > 0 && !tools}<span class="count" title="{connectors.usable.length} connectors running">{connectors.usable.length}</span>{/if}
+			<span class="chev" class:open={tools} aria-hidden="true"><Icon name="chevron" size={12} /></span>
 		</button>
+		{#if tools}
+			<button class="row sub" class:current={agents.sheet !== null} onclick={() => agents.open('sidebar')} title="Agents: saved ways to use the chat model"><span>Agents</span></button>
+			<button class="row sub" class:current={skills.sheet !== null} onclick={() => skills.open('sidebar', code.folder)} title="Skills: instructions for one kind of work"><span>Skills</span></button>
+			<button class="row sub" class:current={connectors.sheet !== null} onclick={() => connectors.open('sidebar')} title="Connectors: tools from outside Rigbrew">
+				<span>Connectors</span>
+				{#if connectors.usable.length > 0}<span class="count" title="{connectors.usable.length} running">{connectors.usable.length}</span>{/if}
+			</button>
+		{/if}
 	</nav>
 
 	<div class="chats scroll">
@@ -311,5 +337,27 @@
 		.side {
 			width: 200px;
 		}
+	}
+
+	.row.sub {
+		height: 30px;
+		padding-left: 36px;
+		font-size: 13.5px;
+		color: var(--muted);
+	}
+
+	.chev {
+		margin-left: auto;
+		display: inline-grid;
+		color: var(--faint);
+		transition: transform var(--quick);
+	}
+
+	.chev.open {
+		transform: rotate(90deg);
+	}
+
+	.row .count + .chev {
+		margin-left: 6px;
 	}
 </style>
