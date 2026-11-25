@@ -174,8 +174,13 @@ const imageTool = {
 	}
 };
 
-const systemPrompt =
-	'You are a chat model running inside Rigbrew, on the user\'s own machine. ' +
+// Who the model is, said on every turn: without it the model answers with the name it was trained under.
+const identityPrompt =
+	'You are Steep, the chat model of Rigbrew, a free open-source app that runs AI on the user\'s own computer. You are running locally on this machine. ' +
+	'If asked who or what you are, or which model you are, say that you are Steep, Rigbrew\'s chat model, built from an open-weight model and running on this computer. ' +
+	'Do not give any other company, product or model name as your identity.';
+
+const toolsPrompt =
 	'You can make images by calling the generate_image tool. Call it only when the user asks for a picture, drawing, photo or illustration; ' +
 	'otherwise answer in text. After the tool returns, the image is already on screen: reply with one short sentence and do not describe or link the image.';
 
@@ -663,7 +668,7 @@ class ChatState {
 	 */
 	#history(conversation: Conversation, withTools: boolean) {
 		const out: Record<string, unknown>[] = [];
-		if (withTools) out.push({ role: 'system', content: systemPrompt });
+		out.push({ role: 'system', content: withTools ? `${identityPrompt} ${toolsPrompt}` : identityPrompt });
 		const answered = new Set<string>();
 		const result = (m: Message): string => {
 			if (m.role === 'offer') return 'No image model is installed. The user was offered the install.';
