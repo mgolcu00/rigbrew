@@ -88,6 +88,13 @@ ready and never switches by itself.
 
 Only models under Apache-2.0, MIT or CC-BY-4.0 are packaged. More in [docs/models.md](docs/models.md).
 
+## Beyond chat
+
+- **Code.** Choose a folder and say what you want done. A model on your machine reads the files, works step by step, and asks before it changes a file or runs a command. On macOS commands run in the system sandbox.
+- **Studio.** A film is a list of shots in a folder of yours. The chat model can write the shots from an idea; the video model makes them one after another, a shot can continue the one before it, and the film exports as one MP4.
+- **Community models.** Paste the link of an open GGUF chat model from Hugging Face or GitHub and it is added next to Rigbrew's own. Rigbrew has not tested these.
+- **Agents and artifacts.** Save your own instructions as agents; pages, drawings, documents and long code open beside the chat.
+
 ## Measured, not promised
 
 Every version is compared with the full-precision original on the same inputs. For the chat family:

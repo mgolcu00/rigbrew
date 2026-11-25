@@ -135,6 +135,41 @@ export const articles: Article[] = [
 		]
 	},
 	{
+		id: 'code',
+		title: 'Code: let a model work on a folder',
+		body: [
+			`Choose a folder and say what you want done in plain words. A chat model on this ${Mac} reads the files, works step by step and shows each step.`,
+			'It asks before it changes a file or runs a command. A change is shown as what is removed and what is added, so you can say yes or no. “Read only” lets it look and answer without changing anything.',
+			`On a Mac a command can change files only inside the folder you chose, and it has no internet unless you switch on “Allow web search”. Web search sends your search words to DuckDuckGo; everything else stays on this ${Mac}.`,
+			'A task keeps going when you open another screen. A small model does small jobs well: one bug, one file, one question about the code.'
+		]
+	},
+	{
+		id: 'studio',
+		title: 'Studio: a film made of shots',
+		body: [
+			'A film is a list of shots in a folder of yours. Describe each shot, or write what the film is about and let the chat model write the shots.',
+			'The video model makes the shots one after another, with sound, also while you do something else. “Continue the shot before” starts a shot from the last picture of the one before it, so the two join without a cut.',
+			'You can cut seconds from the start or the end of a shot, lay a sound file under the whole film, and export one MP4 file into the film’s folder.'
+		]
+	},
+	{
+		id: 'community',
+		title: 'Community models',
+		body: [
+			'Under Models you can paste the link of an open chat model from Hugging Face or GitHub. Rigbrew lists the files that fit this machine and installs the one you pick.',
+			'Rigbrew has not tested these models. The page says who made each one and under which licence. Remove one whenever you like.'
+		]
+	},
+	{
+		id: 'agents',
+		title: 'Agents and artifacts',
+		body: [
+			'An agent is a saved way to use the chat model: a name, an instruction, and what it may do (pictures, reading aloud, video). Make one under Agents and pick it in the box where you type.',
+			'When an answer holds a page, a drawing, a document or a long piece of code, it opens beside the chat as an artifact. You can look at it, copy it or save it as a file.'
+		]
+	},
+	{
 		id: 'levels',
 		title: 'Guided, Standard and Pro',
 		body: [
