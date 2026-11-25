@@ -93,9 +93,10 @@ pub fn commands(root: &Path) -> Vec<String> {
 /// What is added to the result of a change that was applied.
 pub fn reminder(root: &Path) -> String {
     match commands(root).as_slice() {
-        [] => "Now check it if you can: run the project's tests or its build, and say what really happened.".into(),
-        [one] => format!("Now check it: run `{one}` and say what it really printed."),
-        [one, two, ..] => format!("Now check it: run `{one}` (or `{two}`) and say what it really printed."),
+        [] => "Now check it if you can, unless the person said not to: run the project's tests or its build, and say what really happened."
+            .into(),
+        [one] => format!("Now check it, unless the person said not to: run `{one}` and say what it really printed."),
+        [one, two, ..] => format!("Now check it, unless the person said not to: run `{one}` (or `{two}`) and say what it really printed."),
     }
 }
 
@@ -200,7 +201,7 @@ mod tests {
         let root = project(&[("Cargo.toml", "")]);
         let (text, status) = after_change(&root, ("Changed src/lib.rs (10 lines now).".into(), "done"));
         assert_eq!(status, "done");
-        assert_eq!(text, "Changed src/lib.rs (10 lines now).\nNow check it: run `cargo test` and say what it really printed.");
+        assert_eq!(text, "Changed src/lib.rs (10 lines now).\nNow check it, unless the person said not to: run `cargo test` and say what it really printed.");
         assert_eq!(
             after_change(&root, ("The text to replace is not in src/lib.rs.".into(), "failed")).0,
             "The text to replace is not in src/lib.rs."

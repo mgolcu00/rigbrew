@@ -44,7 +44,7 @@ pub fn rules(mode: Mode) -> Vec<String> {
     ];
     if mode != Mode::ReadOnly {
         lines.push("Commands already run inside the folder. Do not use cd or absolute paths in a command.".to_string());
-        lines.push("After a change, run the project's tests or build. Never say that something works, passes or is fixed unless a command you ran after your last change showed it. If you could not check, say so.".to_string());
+        lines.push("After a change, run the project's tests or build, unless the person said not to. Never say that something works, passes or is fixed unless a command you ran after your last change showed it. If you could not check, say so.".to_string());
     }
     lines
 }

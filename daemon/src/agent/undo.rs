@@ -102,6 +102,8 @@ fn git(root: &Path, index: Option<&Path>, args: &[&str], input: Option<&[u8]>) -
     let mut cmd = files::confined(root, "git");
     // No hooks, no file system monitor, no prompts: nothing of the repository's own runs here.
     cmd.args(["-c", "core.hooksPath=.git/rigbrew-no-hooks", "-c", "core.fsmonitor=false", "-c", "advice.addEmbeddedRepo=false"]);
+    // Files are kept and written back byte for byte, whatever the person's setting for line ends.
+    cmd.args(["-c", "core.autocrlf=false", "-c", "core.safecrlf=false"]);
     cmd.args(args);
     for name in ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY"] {
         cmd.env_remove(name);
@@ -426,6 +428,9 @@ mod tests {
         std::fs::canonicalize(root).unwrap()
     }
 
+    // The tests that run git are tried on macOS and Linux. On Windows the canonical path of a
+    // folder carries the `\\?\` prefix, and git is not tried with it here.
+    #[cfg(unix)]
     fn sh(root: &Path, args: &[&str]) -> String {
         let out = std::process::Command::new("git")
             .current_dir(root)
@@ -455,11 +460,13 @@ mod tests {
         std::fs::write(root.join(path), text).unwrap();
     }
 
+    #[cfg(unix)]
     fn snapshot_of(root: &Path, task: &str, request: usize) -> Snapshot {
         let (commit, skipped) = git_snapshot(root, task, request).unwrap();
         Snapshot { request, kind: "git".into(), commit: Some(commit), skipped, files: vec![], commands: false, undone: false, undone_at: 0 }
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_git_repository_goes_back_to_the_snapshot_and_nothing_else_moves() {
         let root = project("undo-git");
@@ -526,6 +533,7 @@ mod tests {
         assert_eq!(sh(&root, &["for-each-ref", "refs/rigbrew/"]), "");
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_repository_without_a_commit_can_be_taken_back_too() {
         let root = project("undo-git-empty");

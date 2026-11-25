@@ -46,7 +46,8 @@
 //!   GET    /v1/videos/files/{id}.webm     a saved clip; DELETE removes it
 //!   ...    /v1/studio/...                 films made of shots in a folder (see `studio.rs`)
 //!   POST   /v1/agent/tasks                Code: {"folder", "prompt", "model", "mode", "web"} starts a task on a folder
-//!   GET    /v1/agent/tasks[/{id}]         tasks (?folder=), or one with its steps; DELETE stops it (?remove=true forgets it)
+//!   GET    /v1/agent/tasks[/{id}]         tasks (?folder=), or one with its steps, its plan and the answer being written
+//!                                        (?brief=true leaves the steps out); DELETE stops it (?remove=true forgets it)
 //!   POST   /v1/agent/tasks/{id}/approve   {"call", "allow", "always"}: answer a step that waits for the person
 //!   POST   /v1/agent/tasks/{id}/message   {"text"}: continue the task
 //!   POST   /v1/agent/tasks/{id}/undo      take back what the newest request changed in the folder
