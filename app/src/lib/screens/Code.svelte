@@ -9,6 +9,7 @@
 	import { skills } from '#lib/skills.svelte.ts';
 	import { app } from '#lib/state.svelte.ts';
 	import { isMac, machine, mod } from '#lib/words.ts';
+	import ErrorLine from '#lib/components/ErrorLine.svelte';
 	import Icon from '#lib/components/Icon.svelte';
 
 	// Code: pick a folder, say what should be done, and watch a model on this computer do it one
@@ -256,23 +257,26 @@
 	</ul>
 {/snippet}
 
-{#snippet composer(placeholder: string, explain: boolean)}
+{#snippet composer(placeholder: string, _explain: boolean)}
 	<div class="composer" class:off={!model}>
 		<textarea bind:this={input} bind:value={draft} oninput={grow} {onkeydown} rows="1" spellcheck="false" disabled={!model} {placeholder} aria-label="What should be done"></textarea>
 		<div class="tools">
-			<div class="chips" role="radiogroup" aria-label="How much it may do">
-				{#each modes as m (m.id)}
-					<button type="button" role="radio" aria-checked={code.mode === m.id} onclick={() => code.setMode(m.id)} title={m.does}>{m.name}</button>
-				{/each}
-			</div>
-			<label class="switch" title="Lets the model search the web and open pages">
+			<label class="perm" class:danger={code.mode === 'bypass'} title={mode.does}>
+				<span class="sr">Permissions</span>
+				<select value={code.mode} onchange={(e) => code.setMode(e.currentTarget.value as (typeof modes)[number]['id'])} aria-label="Permissions">
+					{#each modes as m (m.id)}
+						<option value={m.id}>{m.name}</option>
+					{/each}
+				</select>
+			</label>
+			<label class="switch" title="Lets the model search the web and open pages. Search words leave this computer; your files do not.">
 				<input type="checkbox" checked={code.web} onchange={(e) => code.setWeb(e.currentTarget.checked)} />
-				<span>Allow web search</span>
+				<span>Web</span>
 			</label>
 			{#if connectors.list.length > 0}
 				<label class="switch" title="Lets the model use the tools of your running connectors. It asks you each time.">
 					<input type="checkbox" checked={code.connectors} onchange={(e) => code.setConnectors(e.currentTarget.checked)} />
-					<span>Use connectors</span>
+					<span>Connectors</span>
 				</label>
 			{/if}
 			<span class="grow"></span>
@@ -283,27 +287,9 @@
 			{/if}
 		</div>
 	</div>
-	{#if explain}
-		<dl class="modes">
-			{#each modes as m (m.id)}
-				<div class:on={code.mode === m.id}>
-					<dt>{m.name}</dt>
-					<dd>{m.does}</dd>
-				</div>
-			{/each}
-		</dl>
+	{#if code.mode === 'bypass'}
+		<p class="fine warn">It will change files and run commands without asking.</p>
 	{/if}
-	<p class="fine">
-		{#if !explain}{mode.does}{/if}
-		{#if code.web}
-			Web search is on: the search words go to DuckDuckGo and the pages the model opens are fetched from the internet. Your files are not sent.
-		{:else}
-			Everything stays on this {machine}. Web search is off; if you switch it on, the search words go to DuckDuckGo.
-		{/if}
-		{#if code.connectors && connectors.list.length > 0}
-			Connectors are on: {connectors.usable.length === 0 ? 'none is running, so start one under Connectors first' : 'the model may ask to use a tool of a running connector, and you are asked each time'}.
-		{/if}
-	</p>
 {/snippet}
 
 <section class="screen code" aria-label="Code">
@@ -330,7 +316,7 @@
 							<button class="pick" type="submit" disabled={!typed.trim()}>Use this folder</button>
 						</form>
 					{/if}
-					{#if code.problem}<p class="problem selectable">{code.problem}</p>{/if}
+					{#if code.problem}<ErrorLine error={code.problem} where="code" />{/if}
 				</div>
 				{#if code.recent.length}
 					<div class="again">
@@ -425,16 +411,12 @@
 								<h2>Run this command?</h2>
 								<pre class="raw selectable">{p.command}</pre>
 								{#if purposeOf(p.command)}<p class="purpose">{purposeOf(p.command)}</p>{/if}
-								{#if isMac}
-									<p class="why">It runs in {folderName}. It can read what you can, change files only inside this folder{code.web ? '' : ', and it has no internet'}. Allow it only if you know what it does.</p>
-								{:else}
-									<p class="why">It runs in {folderName} with your own rights, so it can do anything you can do in a terminal. Allow it only if you know what it does.</p>
-								{/if}
+								{#if !isMac}<p class="why">It runs with your own rights.</p>{/if}
 							{:else if p.tool === 'call_tool'}
 								<h2>Use {asked?.kind === 'tool' ? String(asked.arguments.tool ?? 'a tool') : 'a tool'} from the connector {p.path}?</h2>
 								<p class="cap">With these arguments</p>
 								<pre class="raw selectable">{shownArguments(asked?.kind === 'tool' ? asked.arguments.arguments : undefined)}</pre>
-								<p class="why">This tool belongs to the connector, not to Rigbrew. It works outside this folder and may reach other files, programs or the internet. Allow it only if you know what it does.</p>
+								<p class="why">This tool comes from a connector and works outside this folder.</p>
 							{:else}
 								<h2>{p.tool === 'write_file' ? 'Write' : p.tool === 'append_file' ? 'Add to' : 'Change'} {p.path}?</h2>
 								{#if p.diff}{@render diffView(p.diff)}{/if}
@@ -502,9 +484,9 @@
 						</div>
 					{/if}
 
-					{#if task.error}<p class="ended selectable" class:bad={task.state === 'failed'}>{task.error}</p>
+					{#if task.error}{#if task.state === 'failed'}<ErrorLine error={task.error} where="code" />{:else}<p class="ended selectable">{task.error}</p>{/if}
 					{:else if task.state === 'stopped'}<p class="ended">Stopped. Nothing more will be changed. Send a message to go on.</p>{/if}
-					{#if code.problem}<p class="problem selectable">{code.problem}</p>{/if}
+					{#if code.problem}<ErrorLine error={code.problem} where="code" />{/if}
 				</div>
 			</div>
 			<div class="dock">
@@ -529,7 +511,7 @@
 						<p class="lede">Code needs a chat model. <button class="link" onclick={() => app.go('models')}>Install one under Models</button>, then come back.</p>
 					{/if}
 					{@render composer('Say it in plain words', true)}
-					{#if code.problem}<p class="problem selectable">{code.problem}</p>{/if}
+					{#if code.problem}<ErrorLine error={code.problem} where="code" />{/if}
 
 					{#if code.tasks.length === 0}
 						<ul class="ideas">
@@ -1675,5 +1657,39 @@
 		.turn.you {
 			max-width: 92%;
 		}
+	}
+
+	/* The permission picker: one quiet menu in the box where you type. */
+	.perm {
+		display: inline-flex;
+		align-items: center;
+	}
+
+	.perm select {
+		height: 28px;
+		padding: 0 8px;
+		border: 0;
+		border-radius: 999px;
+		background: var(--pressed);
+		color: var(--ink);
+		font: 500 13px/1 var(--rb-text);
+		cursor: pointer;
+	}
+
+	.perm.danger select {
+		background: var(--warn-soft);
+		color: var(--warn);
+	}
+
+	.sr {
+		position: absolute;
+		width: 1px;
+		height: 1px;
+		overflow: hidden;
+		clip-path: inset(50%);
+	}
+
+	.fine.warn {
+		color: var(--warn);
 	}
 </style>

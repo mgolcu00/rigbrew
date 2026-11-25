@@ -124,7 +124,8 @@ pub async fn dispatch(app: &Shared, id: &str, call: &str, name: &str, args: &Val
         return Some((DENIED_TWICE.into(), "denied"));
     }
     let key = format!("{}/{tool}", connector.id);
-    let allowed = task.mode != Mode::ReadOnly && (connector.always_allow.iter().any(|t| t == tool) || task.mcp.always.contains(&key));
+    let allowed = task.mode == Mode::Bypass
+        || (task.mode != Mode::ReadOnly && (connector.always_allow.iter().any(|t| t == tool) || task.mcp.always.contains(&key)));
     if !allowed {
         // The card shows the connector by its name; the tool and the arguments are in the step.
         let pending = Pending { call: call.into(), tool: name.into(), path: Some(connector.name.clone()), command: None, diff: None };

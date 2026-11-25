@@ -122,11 +122,23 @@ const rules: { id: string; test: RegExp; text: string; short: string; fix: Fix; 
 ];
 
 /** Turns any error (or message) into a plain sentence and a next step. */
+/**
+ * A short code for an error, to tell support which one it was: the class in capitals when the
+ * error is a known one ("E-LOST"), else four characters made from its text ("E-7F3A").
+ */
+export function codeOf(error: unknown): string {
+	const said = plain(error);
+	if (said.known) return `E-${said.id.toUpperCase().replace(/[^A-Z0-9]+/g, '-')}`;
+	let h = 0;
+	for (const ch of said.raw) h = (Math.imul(h, 31) + ch.charCodeAt(0)) >>> 0;
+	return `E-${(h & 0xffff).toString(16).toUpperCase().padStart(4, '0')}`;
+}
+
 export function plain(error: unknown): Plain {
 	const raw = error instanceof Error ? error.message : String(error ?? '');
 	if (raw === LOST) return { id: 'lost', text: rules[0].text, short: rules[0].short, fix: 'retry', act: 'Try again', raw, known: true };
 	for (const rule of rules) {
 		if (rule.test.test(raw)) return { id: rule.id, text: rule.text, short: rule.short, fix: rule.fix, act: rule.act, raw, known: true };
 	}
-	return { id: 'unknown', text: 'Something went wrong. Trying again usually works.', short: 'It did not work', fix: 'retry', act: 'Try again', raw, known: false };
+	return { id: 'unknown', text: 'Something went wrong. Try again.', short: 'It did not work', fix: 'retry', act: 'Try again', raw, known: false };
 }

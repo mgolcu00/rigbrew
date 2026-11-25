@@ -71,6 +71,9 @@ enum Mode {
     ReadOnly,
     /// File changes inside the folder apply at once; commands still wait.
     AutoEdits,
+    /// Nothing waits: file changes, commands and connector tools go ahead. The person chose this
+    /// knowingly; the folder limits and, on macOS, the command sandbox still hold.
+    Bypass,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -307,7 +310,7 @@ fn system_prompt(folder: &Folder, mode: Mode, web: bool, skills: &[skills::Skill
         Mode::ReadOnly => {
             lines.push("This task is read only: you cannot change files or run commands. Describe the change instead.".into())
         }
-        Mode::Ask | Mode::AutoEdits => {
+        Mode::Ask | Mode::AutoEdits | Mode::Bypass => {
             lines.push(
                 "To change a file use edit_file with the exact text to replace. Use write_file only for a new file or a full rewrite."
                     .into(),
@@ -664,7 +667,7 @@ async fn call_tool(app: &Shared, id: &str, folder: &Folder, call: &str, name: &s
         }
         "run_command" => {
             let Some(command) = arg_str(args, "command").map(str::trim).filter(|c| !c.is_empty()) else { return missing("command") };
-            if !task.always.iter().any(|c| c == command) {
+            if task.mode != Mode::Bypass && !task.always.iter().any(|c| c == command) {
                 let pending = Pending { call: call.into(), tool: name.into(), path: None, command: Some(command.to_string()), diff: None };
                 let decision = ask(app, id, pending, &signature).await;
                 if !decision.allow {

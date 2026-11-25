@@ -644,7 +644,7 @@ export const studioDeleteTake = (id: string, shot: string, take: number) => json
 
 // --- Code: tasks a model works on in a folder (the loop runs in the service) ------------------
 
-export type AgentMode = 'ask' | 'read_only' | 'auto_edits';
+export type AgentMode = 'ask' | 'read_only' | 'auto_edits' | 'bypass';
 export type AgentState = 'running' | 'waiting' | 'done' | 'failed' | 'stopped' | 'interrupted';
 
 export interface AgentToolStep {

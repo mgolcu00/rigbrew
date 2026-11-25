@@ -1,13 +1,13 @@
 <script lang="ts">
 	import { ux } from '#lib/experience.svelte.ts';
-	import { plain } from '#lib/errors.ts';
+	import { codeOf, plain } from '#lib/errors.ts';
 	import { guide } from '#lib/guide.svelte.ts';
 	import { app } from '#lib/state.svelte.ts';
 	import { onMount } from 'svelte';
 	import Icon from './Icon.svelte';
 
-	// An error in plain words with the one thing to do about it. The service's own message is
-	// under "Details": always in Pro, and elsewhere when no plain sentence was found for it.
+	// An error as one calm line: what to do in plain words, a button when there is something to
+	// do, and a short code. The service's own message is under "Details" in Pro only.
 	let {
 		error,
 		lead = '',
@@ -46,13 +46,14 @@
 				return null;
 		}
 	});
-	const details = $derived(said.raw && (ux.flags.rawErrors || !said.known));
+	const details = $derived(said.raw && ux.flags.rawErrors);
+	const code = $derived(codeOf(error));
 </script>
 
 <div class="error" class:compact role="alert">
 	<p class="say selectable">
 		<Icon name="warn" size={14} />
-		<span>{#if lead}<b>{lead}</b>{' '}{/if}{said.text}</span>
+		<span>{#if lead}<b>{lead}</b>{' '}{/if}{said.text} <span class="code num" title="Error code">{code}</span></span>
 	</p>
 	{#if action || details}
 		<div class="more">
@@ -80,12 +81,18 @@
 		display: flex;
 		align-items: flex-start;
 		gap: 6px;
-		color: var(--ink);
+		color: var(--muted);
 	}
 
 	.say :global(svg) {
 		margin-top: 2px;
-		color: var(--fail);
+		color: var(--warn);
+	}
+
+	.code {
+		margin-left: 4px;
+		font-size: 11px;
+		color: var(--faint);
 	}
 
 	.say b {

@@ -13,7 +13,8 @@ const active = (t: { state: string } | null | undefined) => t?.state === 'runnin
 export const modes: { id: AgentMode; name: string; does: string }[] = [
 	{ id: 'ask', name: 'Ask first', does: 'Asks you before it changes a file or runs a command.' },
 	{ id: 'read_only', name: 'Read only', does: 'Only reads. It cannot change files or run commands.' },
-	{ id: 'auto_edits', name: 'Auto edits', does: 'Changes files in the folder without asking. Still asks before it runs a command.' }
+	{ id: 'auto_edits', name: 'Auto edits', does: 'Changes files in the folder without asking. Still asks before it runs a command.' },
+	{ id: 'bypass', name: 'Bypass permissions', does: 'Never asks. It changes files and runs commands on its own.' }
 ];
 
 const MAX_RECENT = 8;
