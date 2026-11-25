@@ -530,9 +530,10 @@ fn seatbelt_profile(folder: &Path, network: bool) -> String {
     profile
 }
 
-/// Whether commands run inside a sandbox on this system (macOS: yes, with the system's own tool).
-pub fn sandboxed() -> bool {
-    cfg!(target_os = "macos") && Path::new("/usr/bin/sandbox-exec").is_file()
+/// Whether commands run inside a sandbox here: on macOS, with the system's own tool.
+#[cfg(target_os = "macos")]
+fn sandboxed() -> bool {
+    Path::new("/usr/bin/sandbox-exec").is_file()
 }
 
 /// `run_command`: one shell command with the folder as its working directory. On macOS it runs
