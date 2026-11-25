@@ -6,6 +6,7 @@
 	import { guide, type ChecklistId } from '#lib/guide.svelte.ts';
 	import { copyText, openExternal } from '#lib/api.ts';
 	import { starterDraft } from '#lib/agents.ts';
+	import ToolLine from '#lib/components/ToolLine.svelte';
 	import { agents } from '#lib/agents.svelte.ts';
 	import { collectArtifacts, kindName, splitMessage, type Artifact } from '#lib/artifacts.ts';
 	import { remembered } from '#lib/remember.ts';
@@ -646,6 +647,8 @@
 										<p>The catalogue has no picture model yet.</p>
 									{/if}
 								</li>
+							{:else if message.role === 'tool' && message.tool}
+								<li class="turn used"><ToolLine note={message.tool} /></li>
 							{:else if message.role === 'assistant' && (message.content || message.state !== 'done')}
 								<li class="turn model">
 									<p class="meta">

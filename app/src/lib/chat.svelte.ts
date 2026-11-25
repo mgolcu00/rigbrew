@@ -2,9 +2,12 @@ import { agentPrompt, allowedTools, type Agent, type ToolName } from './agents';
 import { agents } from './agents.svelte';
 import * as api from './api';
 import { artifactsPrompt, asksForPiece } from './artifacts';
+import { NO_EXTRAS, callArguments, chatConnectors, chatSkills, extraTools, extrasPrompt, findConnector, hasExtras, isExtraTool, olderResult, shownArguments, type Extras } from './chattools';
+import { connectors } from './connectors.svelte';
 import { ux } from './experience.svelte';
 import { installedVariant } from './format';
 import { guide } from './guide.svelte';
+import { skills } from './skills.svelte';
 import { app } from './state.svelte';
 import type { Package } from './types';
 import { nameOf } from './words';
@@ -86,6 +89,25 @@ export interface ToolCall {
 	arguments: string;
 }
 
+/** A line in the transcript for a skill the model read or a connector tool it used. */
+export interface ToolNote {
+	/** The tool call this belongs to. */
+	callId: string;
+	/** skill: read a skill. file: read one of a skill's files. find: looked for a tool. call: used a connector's tool. */
+	kind: 'skill' | 'file' | 'find' | 'call';
+	/** The skill, the file, the words looked for, or the tool. */
+	what: string;
+	/** For a call: the connector by its name and by its id. */
+	connector?: string;
+	connectorId?: string;
+	/** For a call: the arguments as the person is shown them. */
+	arguments?: string;
+	/** asking: waits for the person's yes or no. */
+	state: 'asking' | 'running' | 'done' | 'failed' | 'denied' | 'stopped';
+	/** What came back, shortened, to look at. */
+	result?: string;
+}
+
 export interface ImageJob {
 	prompt: string;
 	width: number;
@@ -121,8 +143,8 @@ export interface ImageJob {
 
 export interface Message {
 	id: number;
-	/** image: a picture card. video: a clip card. offer: "install an image model" in place of a picture. */
-	role: 'user' | 'assistant' | 'image' | 'video' | 'offer';
+	/** image: a picture card. video: a clip card. offer: "install an image model" in place of a picture. tool: a skill or a connector the model used. */
+	role: 'user' | 'assistant' | 'image' | 'video' | 'offer' | 'tool';
 	content: string;
 	/** User only: which mode it was sent in. */
 	mode?: Mode;
@@ -148,6 +170,8 @@ export interface Message {
 	spoken?: boolean;
 	image?: ImageJob;
 	video?: VideoJob;
+	/** Tool only: what the model read or used, and whether it waits for the person. */
+	tool?: ToolNote;
 	/** Offer only: what was asked for, so it can be made once the install is done. */
 	offer?: { prompt: string; size: SizeName; callId?: string };
 }
@@ -232,6 +256,9 @@ const videoTool = {
 		}
 	}
 };
+
+/** The chat's own tools, by name: what a usage event may name. */
+const toolNames = { generate_image: true, read_aloud: true, generate_video: true };
 
 /** What the chat model is told about the tools it has on this turn, and which one this message reads like. */
 function toolsPrompt(names: ToolName[], hint: ToolName | null): string {
@@ -515,6 +542,7 @@ class ChatState {
 				// Anything that was still running when it was saved did not finish.
 				if (m.state === 'waiting' || m.state === 'streaming') m.state = 'stopped';
 				if (m.image?.state === 'waiting') m.image.state = 'stopped';
+				if (m.tool && (m.tool.state === 'asking' || m.tool.state === 'running')) m.tool.state = 'stopped';
 			}
 			conversation.messages = messages;
 			conversation.startedAt = data?.startedAt ?? conversation.startedAt;
@@ -770,15 +798,18 @@ class ChatState {
 	 * generate_image tool call with its result, whether the model asked for it or the person
 	 * used Image mode, so the model always knows what is on screen and how it got there.
 	 */
-	#history(conversation: Conversation, tools: ToolName[], agent: Agent | null) {
-		const withTools = tools.length > 0;
+	#history(conversation: Conversation, tools: ToolName[], agent: Agent | null, extras: Extras = NO_EXTRAS) {
+		const withTools = tools.length > 0 || hasExtras(extras);
+		// What a skill or a connector gave back stays whole only for the request being answered.
+		const lastAsked = conversation.messages.findLastIndex((m) => m.role === 'user');
 		const out: Record<string, unknown>[] = [];
 		const last = conversation.messages.findLast((m) => m.role === 'user')?.content ?? '';
 		// Who it is, then the agent's instruction when the chat runs as one, then how to write things to keep, then the tools.
 		const system = [identityPrompt];
 		if (agent) system.push(agentPrompt(agent));
 		system.push(artifactsPrompt);
-		if (withTools) system.push(toolsPrompt(tools, plainlyAsksFor(last)));
+		if (tools.length > 0) system.push(toolsPrompt(tools, plainlyAsksFor(last)));
+		if (hasExtras(extras)) system.push(extrasPrompt(extras));
 		out.push({ role: 'system', content: system.join(' ') });
 		const answered = new Set<string>();
 		const result = (m: Message): string => {
@@ -805,7 +836,9 @@ class ChatState {
 				// Each call needs an answer right after it. The card (or offer) that followed holds it.
 				for (const call of m.toolCalls) {
 					const card = conversation.messages.slice(i + 1).find((x) => (x.image?.callId ?? x.offer?.callId) === call.id);
-					out.push({ role: 'tool', tool_call_id: call.id, content: card ? result(card) : (m.toolResults?.[call.id] ?? 'That tool is not available.') });
+					const kept = m.toolResults?.[call.id];
+					const said = kept !== undefined && isExtraTool(call.name) && i < lastAsked ? olderResult(call.name, call.arguments, kept) : kept;
+					out.push({ role: 'tool', tool_call_id: call.id, content: card ? result(card) : (said ?? 'That tool is not available.') });
 					answered.add(call.id);
 				}
 			} else if (withTools && m.role === 'image' && m.image && m.image.state !== 'waiting' && !answered.has(m.image.callId)) {
@@ -834,9 +867,13 @@ class ChatState {
 		// A page, a diagram or a document is written, not made by a tool: on a turn that asks
 		// for one and does not plainly ask for sound or a video, no tool is offered at all ("a fox as SVG" is written too).
 		const wants = plainlyAsksFor(asked);
-		const tools = asksForPiece(asked) && wants !== 'read_aloud' && wants !== 'generate_video' ? [] : allowedTools(agent, available);
+		const written = asksForPiece(asked) && wants !== 'read_aloud' && wants !== 'generate_video';
+		const tools = written ? [] : allowedTools(agent, available);
+		// Skills and connectors, under the same rule. Reading a skill, finding a tool and using it are a round each.
+		const extras = written || !allowTools ? NO_EXTRAS : await this.#extras(agent);
+		const rounds = hasExtras(extras) ? 6 : 3;
 
-		for (let round = 0; round < 3; round++) {
+		for (let round = 0; round < rounds; round++) {
 			conversation.messages.push({
 				id: nextId++,
 				role: 'assistant',
@@ -855,7 +892,7 @@ class ChatState {
 				this.engine = null;
 				this.#switchTip(pkg);
 			}
-			const calls = await this.#stream(pkg, reply, this.#history(conversation, tools, agent), tools, signal);
+			const calls = await this.#stream(pkg, reply, this.#history(conversation, tools, agent, extras), tools, signal, extraTools(extras));
 			if (reply.state === 'done' && reply.content) {
 				const text = reply.content.replace(/[#*_`>|]/g, '').replace(/\s+/g, ' ').trim();
 				this.announce = `${nameOf(pkg, ux.flags)} answered: ${text.length > 600 ? `${text.slice(0, 600)}…` : text}`;
@@ -873,7 +910,13 @@ class ChatState {
 				} catch {
 					// Malformed arguments: fall through to the "nothing asked" case.
 				}
-				app.track('chat_tool_called', { tool: call.name, package: pkg.id });
+				app.track('chat_tool_called', { tool: isExtraTool(call.name) || call.name in toolNames ? call.name : 'unknown', package: pkg.id });
+				if (isExtraTool(call.name)) {
+					results[call.id] = await this.#extraTool(conversation, call, extras, signal);
+					if (signal.aborted) return;
+					again = true;
+					continue;
+				}
 				if (call.name === 'read_aloud') {
 					const text = typeof args.text === 'string' ? args.text.trim() : '';
 					const voice = app.voicePackage;
@@ -928,8 +971,108 @@ class ChatState {
 		}
 	}
 
+	/** What this turn is offered beyond pictures, sound and video: skills, and connectors when the agent may use them. */
+	async #extras(agent: Agent | null): Promise<Extras> {
+		const offered = chatSkills(skills.list, agent?.skills ?? []);
+		if (!agent?.connectors) return { skills: offered, connectors: [] };
+		// Asked for now: a connector may have been started or stopped since the last turn.
+		await connectors.load();
+		return { skills: offered, connectors: chatConnectors($state.snapshot(connectors.list)) };
+	}
+
+	/** The steps that wait for the person's yes or no, by tool call. */
+	#asking = new Map<string, (answer: { allow: boolean; always: boolean }) => void>();
+
+	/** Waits for the person's answer to one tool call. Stopping the turn is a no. */
+	#ask(callId: string, signal: AbortSignal): Promise<{ allow: boolean; always: boolean }> {
+		return new Promise((resolve) => {
+			const done = (answer: { allow: boolean; always: boolean }) => {
+				this.#asking.delete(callId);
+				signal.removeEventListener('abort', stopped);
+				resolve(answer);
+			};
+			const stopped = () => done({ allow: false, always: false });
+			if (signal.aborted) return stopped();
+			signal.addEventListener('abort', stopped);
+			this.#asking.set(callId, done);
+		});
+	}
+
+	/** The person's answer to a connector tool that waits in the transcript. */
+	answerTool(callId: string, allow: boolean, always = false) {
+		const waiting = this.#asking.get(callId);
+		if (waiting) return waiting({ allow, always: allow && always });
+		// Nothing waits for this any more (the chat was reopened): it did not run.
+		for (const c of this.conversations) for (const m of c.messages) if (m.tool?.callId === callId && m.tool.state === 'asking') m.tool.state = 'stopped';
+	}
+
+	/** Runs `use_skill`, `read_skill_file`, `find_tool` or `call_tool` and returns what the model is told. */
+	async #extraTool(conversation: Conversation, call: ToolCall, extras: Extras, signal: AbortSignal): Promise<string> {
+		const args = callArguments(call.arguments);
+		const word = (key: string) => (typeof args[key] === 'string' ? (args[key] as string).trim() : '');
+		const note = (tool: Omit<ToolNote, 'callId'>): ToolNote => {
+			conversation.messages.push({ id: nextId++, role: 'tool', content: '', at: Date.now(), tool: { callId: call.id, ...tool } });
+			return conversation.messages[conversation.messages.length - 1].tool!;
+		};
+		const settle = (n: ToolNote, ok: boolean, text: string) => {
+			n.state = ok ? 'done' : 'failed';
+			n.result = text.length > 2000 ? `${text.slice(0, 2000)}…` : text;
+			return text;
+		};
+		let made: ToolNote | null = null;
+		try {
+			if (call.name === 'use_skill' || call.name === 'read_skill_file') {
+				const name = word('name');
+				if (!extras.skills.some((s) => s.name === name)) {
+					return `There is no skill named ${name || '(nothing)'}. The skills are: ${extras.skills.map((s) => s.name).join(', ') || 'none'}.`;
+				}
+				if (call.name === 'use_skill') {
+					made = note({ kind: 'skill', what: name, state: 'running' });
+					const answer = await api.useSkill(name);
+					return settle(made, answer.ok, answer.text);
+				}
+				made = note({ kind: 'file', what: `${word('path')} of ${name}`, state: 'running' });
+				const answer = await api.skillFile(name, word('path'));
+				return settle(made, answer.ok, answer.text);
+			}
+			if (extras.connectors.length === 0) return `There is no tool named ${call.name} in this chat.`;
+			if (call.name === 'find_tool') {
+				const query = word('query');
+				if (!query) return '"query" is needed: a few words for what you need.';
+				made = note({ kind: 'find', what: query, state: 'running' });
+				return settle(made, true, (await api.findConnectorTool(query)).text);
+			}
+			const connector = findConnector(extras.connectors, args.connector);
+			const tool = word('tool');
+			if (!connector) return `There is no connector named ${word('connector') || '(nothing)'}. The connectors are: ${extras.connectors.map((c) => c.id).join(', ')}.`;
+			if (!tool) return '"tool" is needed. Call find_tool first to get its name.';
+			// A tool that is not there is said so before the person is asked about it.
+			const known = await api.connectorTools(connector.id);
+			const found = known.find((t) => t.name === tool);
+			if (!found) return `The connector ${connector.id} has no tool named ${tool}. Its tools are: ${known.slice(0, 30).map((t) => t.name).join(', ')}.`;
+			made = note({ kind: 'call', what: tool, connector: connector.name, connectorId: connector.id, arguments: shownArguments(args.arguments), state: found.always ? 'running' : 'asking' });
+			if (made.state === 'asking') {
+				// Nothing is being worked on while the person decides.
+				this.work = null;
+				const answer = await this.#ask(call.id, signal);
+				if (!answer.allow) {
+					made.state = signal.aborted ? 'stopped' : 'denied';
+					return 'The user did not allow this. Do not try it again. Answer without it, or say what you could not do.';
+				}
+				if (answer.always) void connectors.setAlways(connector.id, tool, true);
+				made.state = 'running';
+			}
+			const answer = await api.callConnector(connector.id, tool, args.arguments ?? {}, 'chat');
+			return settle(made, answer.ok, answer.text);
+		} catch (e) {
+			const why = e instanceof Error ? e.message : String(e);
+			if (made) settle(made, false, why);
+			return `That did not work: ${why}`;
+		}
+	}
+
 	/** Streams one completion into `reply` and returns the tool calls the model made. */
-	async #stream(pkg: Package, reply: Message, messages: unknown[], tools: ToolName[], signal: AbortSignal): Promise<ToolCall[]> {
+	async #stream(pkg: Package, reply: Message, messages: unknown[], tools: ToolName[], signal: AbortSignal, more: unknown[] = []): Promise<ToolCall[]> {
 		const calls: ToolCall[] = [];
 		let firstTokenAt = 0;
 		let pieces = 0;
@@ -941,7 +1084,7 @@ class ChatState {
 					stream: true,
 					stream_options: { include_usage: true },
 					chat_template_kwargs: { enable_thinking: false },
-					...(tools.length ? { tools: tools.map((t) => (t === 'generate_image' ? imageTool : t === 'read_aloud' ? speakTool : videoTool)) } : {})
+					...(tools.length + more.length ? { tools: [...tools.map((t) => (t === 'generate_image' ? imageTool : t === 'read_aloud' ? speakTool : videoTool)), ...more] } : {})
 				},
 				signal
 			);
