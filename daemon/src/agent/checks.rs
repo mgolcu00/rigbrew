@@ -156,9 +156,11 @@ pub fn detect(root: &Path) -> Vec<Check> {
     }
     if has(root, "Package.swift") {
         let missing = not_installed("swift");
-        add(&mut out, Kind::Types, "swift build", missing.clone());
+        // On macOS the check already runs in Rigbrew's sandbox, and Swift's own cannot start inside another.
+        let flag = if cfg!(target_os = "macos") { " --disable-sandbox" } else { "" };
+        add(&mut out, Kind::Types, &format!("swift build{flag}"), missing.clone());
         if root.join("Tests").is_dir() {
-            add(&mut out, Kind::Tests, "swift test", missing);
+            add(&mut out, Kind::Tests, &format!("swift test{flag}"), missing);
         }
     }
     let pubspec = text_of(root, "pubspec.yaml");
@@ -329,6 +331,11 @@ pub fn failures(output: &str, root: &Path) -> Vec<String> {
     static BARE: OnceLock<Regex> = OnceLock::new();
     static NAMED: OnceLock<Regex> = OnceLock::new();
     static PYTHON: OnceLock<Regex> = OnceLock::new();
+    static NODE_AT: OnceLock<Regex> = OnceLock::new();
+    static TOOK: OnceLock<Regex> = OnceLock::new();
+    // Node's own runner says where a failed test is on the line before its name.
+    let node_at = re(&NODE_AT, r"^test at (\S+?):(\d+):\d+$");
+    let took = re(&TOOK, r" \([\d.]+ ?m?s\)$");
     // A frame of a Python traceback.
     let python = re(&PYTHON, r#"^\s*File "([^"]+)", line (\d+), in (\w+)$"#);
     let ansi = re(&ANSI, r"\x1b\[[0-9;?]*[A-Za-z]");
@@ -362,6 +369,15 @@ pub fn failures(output: &str, root: &Path) -> Vec<String> {
         let next = lines.get(i + 1).map_or("", |l| l.trim());
         if let Some(c) = panic.captures(line) {
             push(&mut out, clip(&format!("{}:{} {}: {next}", near(root, &c[2]), &c[3], &c[1])));
+            continue;
+        }
+        if let Some(c) = node_at.captures(line) {
+            if let Some(name) = named.captures(next) {
+                let name = took.replace(c_name(&name), "").into_owned();
+                // The same test was named before, without its place.
+                out.retain(|o| took.replace(o, "") != name);
+                push(&mut out, clip(&format!("{}:{} {name}", near(root, &c[1]), &c[2])));
+            }
             continue;
         }
         if let Some(c) = python.captures(line) {
@@ -411,7 +427,10 @@ pub fn failures(output: &str, root: &Path) -> Vec<String> {
         if let Some(c) = named.captures(line) {
             let what = c[1].trim();
             // "✖ 2 problems" is a count, not a test.
-            if !what.is_empty()
+            let known = out.iter().any(|o| o.ends_with(took.replace(what, "").as_ref()));
+            if !known
+                && !what.is_empty()
+                && !what.ends_with(':')
                 && !what.starts_with(|c: char| c == '(' || c.is_ascii_digit())
                 && !what.starts_with("errors=")
                 && !what.starts_with("failures=")
@@ -424,6 +443,10 @@ pub fn failures(output: &str, root: &Path) -> Vec<String> {
         out = warnings;
     }
     out
+}
+
+fn c_name<'a>(found: &'a regex::Captures<'a>) -> &'a str {
+    found.get(1).map_or("", |m| m.as_str()).trim()
 }
 
 /// What is said in place of a failure list when a program the check needs is not there.
@@ -585,9 +608,10 @@ mod tests {
             ]
         );
         assert_eq!(found(&[("test_shop.py", "import unittest\n")]), vec![(Tests, format!("{python} -m unittest"))]);
+        let swift = if cfg!(target_os = "macos") { " --disable-sandbox" } else { "" };
         assert_eq!(
             found(&[("Package.swift", ""), ("Tests/AppTests/A.swift", "")]),
-            pairs(&[(Types, "swift build"), (Tests, "swift test")])
+            vec![(Types, format!("swift build{swift}")), (Tests, format!("swift test{swift}"))]
         );
         assert_eq!(
             found(&[
@@ -714,6 +738,9 @@ mod tests {
         );
         assert_eq!(read("  ● cart › adds an item\n\n    expect(received).toBe(expected)\n"), ["cart › adds an item"]);
         assert_eq!(read("not ok 2 - totals the cart\n  ---\n  duration_ms: 0.4\n"), ["totals the cart"]);
+        // Node's runner names a failed test twice, the second time with its place: one line.
+        let node = "✖ adds (2.67ms)\n✔ ok (0.29ms)\nℹ fail 1\n\n✖ failing tests:\n\ntest at sum.test.mjs:3:1\n✖ adds (2.67ms)\n  AssertionError [ERR_ASSERTION]: 3 == 4\n      at TestContext.<anonymous> (file:///work/shop/sum.test.mjs:3:27)\n";
+        assert_eq!(read(node), ["sum.test.mjs:3 adds"]);
         assert_eq!(read("/work/shop/Tests/CartTests.swift:12: error: -[CartTests testTotal] : XCTAssertEqual failed: (\"3\") is not equal to (\"4\")\n").len(), 1);
         // Colours are not part of a path, the list is short, and a clean log has no failures.
         assert_eq!(read("\x1b[31msrc/a.ts:1:1 - error TS1: bad\x1b[0m\n"), ["src/a.ts:1 error TS1: bad"]);

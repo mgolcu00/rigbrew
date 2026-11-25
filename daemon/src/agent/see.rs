@@ -88,6 +88,12 @@ pub(super) fn rules(mode: Mode, root: &Path) -> Vec<String> {
     lines
 }
 
+/// Whether a skill is worth a line of the system message in this folder: the two about phones
+/// are named only where a phone app is. `use_skill` still finds them by name.
+pub(super) fn skill_fits(name: &str, root: &Path) -> bool {
+    !matches!(name, "ios-simulator" | "android-emulator") || devices::mobile_project(root)
+}
+
 /// The project's checks as one line of the system message, or nothing when it has none.
 pub(super) fn context(mode: Mode, root: &Path) -> Option<String> {
     if mode == Mode::ReadOnly {
@@ -421,8 +427,13 @@ mod tests {
             );
             assert_eq!(context(Mode::ReadOnly, &checked), None);
         }
+        assert!(!skill_fits("ios-simulator", &root) && skill_fits("preview-and-fix", &root));
+        // What this adds to every request is small: the model's context is.
+        assert!(serde_json::to_string(&tool_defs(Mode::Bypass, &root)).unwrap().len() < 2000);
+        assert!(rules(Mode::Bypass, &root).join("\n").len() < 420);
         // Every tool named here has a definition, and the other way round.
         std::fs::create_dir_all(root.join("ios")).unwrap();
+        assert!(skill_fits("ios-simulator", &root));
         let all: Vec<Value> = tool_defs(Mode::Bypass, &root);
         assert!(all.len() == TOOLS.len() || !devices::available());
         assert!(all.iter().all(|t| TOOLS.contains(&t["function"]["name"].as_str().unwrap())));

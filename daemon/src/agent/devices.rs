@@ -2,10 +2,10 @@
 //! devices `adb` sees. Three things can be asked: which devices there are, a picture of one's
 //! screen, and the last lines of its log.
 //!
-//! These are fixed commands the service runs itself, outside the folder's sandbox (the
-//! simulator cannot be reached from inside it): `xcrun simctl list / io screenshot / spawn log
-//! show` and `adb devices / exec-out screencap / logcat -d`. Nothing the model writes becomes a
-//! command line: a device must be one of those listed, and an app's name may only hold
+//! These are fixed commands the service runs itself, outside the folder's sandbox (the picture
+//! is written next to the task, not into the folder): `xcrun simctl list / io screenshot / spawn
+//! log show` and `adb devices / exec-out screencap / logcat -d`. Nothing the model writes becomes
+//! a command line: a device must be one of those listed, and an app's name may only hold
 //! letters, digits, dots, dashes and underscores. They only read, so every mode has them,
 //! Read only included, and none of them asks first. Building and starting the app is the
 //! model's own work through `run_command`, with the person's yes.

@@ -590,6 +590,11 @@ pub fn shell(folder: &Folder, command: &str, net: Net, env: &[(&str, String)]) -
         let mut c = if sandboxed() {
             let mut c = tokio::process::Command::new("/usr/bin/sandbox-exec");
             c.arg("-p").arg(seatbelt_profile(folder.root(), net)).arg("sh");
+            // Go keeps what it builds in the person's cache folder, which a command cannot write
+            // to: without a cache of its own in the temporary folder `go test` does not even start.
+            if std::env::var_os("GOCACHE").is_none() {
+                c.env("GOCACHE", std::env::temp_dir().join("rigbrew-go-build"));
+            }
             c
         } else {
             tokio::process::Command::new("sh")

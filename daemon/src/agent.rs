@@ -914,7 +914,8 @@ async fn work(app: &Shared, id: &str) -> Ended {
         // What no longer fits leaves the conversation and stays as notes.
         agents.change(id, |t| recall::compact(&mut t.messages, &mut t.memory, budget));
         let Some(task) = agents.get(id) else { return failed("The task is gone.".into()) };
-        let skills = skills::load(&app.root, Some(folder.root()));
+        let mut skills = skills::load(&app.root, Some(folder.root()));
+        skills.retain(|s| s.source != "built-in" || see::skill_fits(&s.name, folder.root()));
         let system = format!(
             "{}{}{}{}{}",
             system_prompt(&folder, task.mode, task.web, &skills),
