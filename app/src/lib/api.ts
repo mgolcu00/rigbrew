@@ -463,6 +463,9 @@ export interface StudioShot {
 	state: 'empty' | 'queued' | 'making' | 'done' | 'failed' | 'changed';
 	error?: string;
 	seconds?: number;
+	/** Seconds cut from the start and the end when the film is played or exported. */
+	trim_start?: number;
+	trim_end?: number;
 }
 
 export interface StudioProject {
@@ -494,13 +497,22 @@ export interface StudioListing {
 export const studioList = async () => (await json<{ projects: StudioListing[] }>('GET', '/v1/studio/projects')).projects;
 export const studioOpen = (folder: string, name = '') => json<StudioView>('POST', '/v1/studio/projects', { folder, name });
 export const studioRead = (id: string) => json<StudioView>('GET', `/v1/studio/projects/${enc(id)}`);
-export const studioSave = (id: string, body: { name?: string; size?: string; shots?: { id?: string; prompt: string; frames: number }[] }) =>
+export const studioSave = (id: string, body: { name?: string; size?: string; shots?: { id?: string; prompt: string; frames: number; trim_start?: number; trim_end?: number }[] }) =>
 	json<StudioView>('PUT', `/v1/studio/projects/${enc(id)}`, body);
 export const studioForget = (id: string) => json<unknown>('DELETE', `/v1/studio/projects/${enc(id)}`);
 export const studioRender = (id: string, shots?: string[]) => json<StudioView>('POST', `/v1/studio/projects/${enc(id)}/render`, shots ? { shots } : {});
 export const studioStop = (id: string) => json<StudioView>('DELETE', `/v1/studio/projects/${enc(id)}/render`);
 export const studioStoryboard = async (id: string, idea: string, shots: number) =>
 	(await json<{ shots: { prompt: string }[] }>('POST', `/v1/studio/projects/${enc(id)}/storyboard`, { idea, shots })).shots;
+export interface StudioExport {
+	state: 'none' | 'working' | 'done' | 'failed';
+	file?: string;
+	error?: string;
+	shots?: number;
+}
+export const studioExport = (id: string, music?: string, volume?: number) =>
+	json<StudioExport>('POST', `/v1/studio/projects/${enc(id)}/export`, music ? { music, music_volume: volume ?? 0.5 } : {});
+export const studioExportState = (id: string) => json<StudioExport>('GET', `/v1/studio/projects/${enc(id)}/export`);
 export const studioClip = async (id: string, shot: string) => (await send('GET', `/v1/studio/projects/${enc(id)}/clips/${enc(shot)}.webm`)).blob();
 
 /** Asks for a folder with the system's own dialog. Null when nothing was chosen, or in the browser preview. */

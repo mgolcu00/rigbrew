@@ -282,6 +282,7 @@ fn engine_binary_name(kind: EngineKind) -> Option<&'static str> {
         EngineKind::Llama => Some("llama-server"),
         EngineKind::Sdcpp => Some("sd-server"),
         EngineKind::Sherpa => Some(rigbrew_core::voice::PROGRAM),
+        EngineKind::Ffmpeg => Some("ffmpeg"),
     }
 }
 

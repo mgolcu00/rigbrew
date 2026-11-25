@@ -8,6 +8,8 @@
 //!   POST   /v1/studio/projects/{id}/render        {"shots": [id]?, "model"?}: make the listed shots, or every shot not made yet
 //!   DELETE /v1/studio/projects/{id}/render        stop: the shot being made is stopped, the rest leave the queue
 //!   POST   /v1/studio/projects/{id}/storyboard    {"idea", "shots"}: the chat model writes shot descriptions (not saved)
+//!   POST   /v1/studio/projects/{id}/export      {"music"?, "music_volume"?}: join the made shots into `<folder>/<name>.mp4`
+//!   GET    /v1/studio/projects/{id}/export      where the export is: {"state", "file", "error"}
 //!   GET    /v1/studio/projects/{id}/clips/{shot}.webm
 //!
 //! A film is `<folder>/rigbrew-film.json` plus `<folder>/clips/<shot>.webm`; the list of folders is
@@ -49,6 +51,15 @@ pub struct Shot {
     /// How long the last render took.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seconds: Option<f32>,
+    /// Seconds cut from the start and from the end of the clip when the film is exported or played.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub trim_start: f32,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub trim_end: f32,
+}
+
+fn is_zero(v: &f32) -> bool {
+    *v == 0.0
 }
 
 fn empty() -> String {
@@ -226,6 +237,10 @@ struct ShotIn {
     prompt: String,
     #[serde(default)]
     frames: Option<u32>,
+    #[serde(default)]
+    trim_start: f32,
+    #[serde(default)]
+    trim_end: f32,
 }
 
 #[derive(Deserialize)]
@@ -251,14 +266,27 @@ fn merge_shots(old: &[Shot], new: Vec<ShotIn>, size_changed: bool) -> Result<Vec
         if !(5..=241).contains(&frames) {
             return Err("a shot is between 5 and 241 frames".into());
         }
+        // Trims leave at least half a second of the shot.
+        let length = frames as f32 / 24.0;
+        let trim_start = s.trim_start.clamp(0.0, (length - 0.5).max(0.0));
+        let trim_end = s.trim_end.clamp(0.0, (length - 0.5 - trim_start).max(0.0));
         let id = s.id.filter(|i| valid_id(i) && !out.iter().any(|o| o.id == *i)).unwrap_or_else(new_id);
         let shot = match old.iter().find(|o| o.id == id) {
             Some(o) => {
                 let same = o.prompt == prompt && o.frames == frames && !size_changed;
                 let state = if same || o.state == "empty" { o.state.clone() } else { "changed".into() };
-                Shot { id, prompt, frames, state, error: if same { o.error.clone() } else { None }, seconds: o.seconds }
+                Shot {
+                    id,
+                    prompt,
+                    frames,
+                    state,
+                    error: if same { o.error.clone() } else { None },
+                    seconds: o.seconds,
+                    trim_start,
+                    trim_end,
+                }
             }
-            None => Shot { id, prompt, frames, state: empty(), error: None, seconds: None },
+            None => Shot { id, prompt, frames, state: empty(), error: None, seconds: None, trim_start, trim_end },
         };
         out.push(shot);
     }
@@ -559,12 +587,167 @@ async fn storyboard(State(app): State<Shared>, Path(_id): Path<String>, Json(bod
     Json(json!({"shots": shots.into_iter().map(|prompt| json!({"prompt": prompt})).collect::<Vec<_>>()})).into_response()
 }
 
+/// The export of each film: "working", "done" or "failed", with the file or what went wrong.
+static EXPORTS: Mutex<Vec<(String, Value)>> = Mutex::new(Vec::new());
+
+fn set_export(id: &str, value: Value) {
+    let mut all = EXPORTS.lock().unwrap();
+    all.retain(|(i, _)| i != id);
+    all.push((id.to_string(), value));
+}
+
+#[derive(Deserialize, Default)]
+struct Export {
+    /// A sound file to lay under the whole film (a full path), mixed with the shots' own sound.
+    #[serde(default)]
+    music: Option<String>,
+    /// 0 to 1; how loud the music is next to the shots' sound. Default 0.5.
+    #[serde(default)]
+    music_volume: Option<f32>,
+}
+
+/// A file name made of the film's name: letters, digits, spaces, dashes.
+fn file_stem(name: &str) -> String {
+    let stem: String = name.chars().map(|c| if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' { c } else { ' ' }).collect();
+    let stem = stem.split_whitespace().collect::<Vec<_>>().join(" ");
+    if stem.is_empty() {
+        "film".into()
+    } else {
+        stem.chars().take(80).collect()
+    }
+}
+
+/// The concat list ffmpeg reads: every made shot in order, with its trims.
+fn concat_list(p: &Project) -> (String, usize) {
+    let mut list = String::from("ffconcat version 1.0\n");
+    let mut count = 0;
+    for s in p.shots.iter().filter(|s| s.state == "done" || s.state == "changed") {
+        let path = clip_path(p, &s.id);
+        if !path.is_file() {
+            continue;
+        }
+        let length = s.frames as f32 / 24.0;
+        list.push_str(&format!("file '{}'\n", path.to_string_lossy().replace('\'', "'\\''")));
+        if s.trim_start > 0.0 {
+            list.push_str(&format!("inpoint {:.3}\n", s.trim_start));
+        }
+        if s.trim_end > 0.0 {
+            list.push_str(&format!("outpoint {:.3}\n", (length - s.trim_end).max(s.trim_start + 0.1)));
+        }
+        count += 1;
+    }
+    (list, count)
+}
+
+async fn export(State(app): State<Shared>, Path(id): Path<String>, body: Option<Json<Export>>) -> Response {
+    let Some(p) = load(&app, &id) else {
+        return fail(StatusCode::NOT_FOUND, "no such film, or its folder is gone");
+    };
+    let body = body.map(|b| b.0).unwrap_or_default();
+    let (list, count) = concat_list(&p);
+    if count == 0 {
+        return fail(StatusCode::CONFLICT, "No shot is made yet. Make the shots first.");
+    }
+    let music = match body.music.as_deref().map(str::trim).filter(|m| !m.is_empty()) {
+        Some(m) if FsPath::new(m).is_absolute() && FsPath::new(m).is_file() => Some(m.to_string()),
+        Some(_) => return fail(StatusCode::BAD_REQUEST, "the sound file was not found: give its full path"),
+        None => None,
+    };
+    if EXPORTS.lock().unwrap().iter().any(|(i, v)| *i == id && v["state"] == "working") {
+        return fail(StatusCode::CONFLICT, "This film is being exported already.");
+    }
+    let ffmpeg = match crate::engine_tool(&app, crate::EngineKind::Ffmpeg, "ffmpeg").await {
+        Ok(path) => path,
+        Err(e) => return fail(StatusCode::SERVICE_UNAVAILABLE, format!("The tool that joins the shots could not be set up: {e}")),
+    };
+    let folder = PathBuf::from(&p.folder);
+    let out = folder.join(format!("{}.mp4", file_stem(&p.name)));
+    let list_path = folder.join(".rigbrew-export.txt");
+    if let Err(e) = std::fs::write(&list_path, list) {
+        return fail(StatusCode::INTERNAL_SERVER_ERROR, format!("the film's folder cannot be written to: {e}"));
+    }
+    set_export(&id, json!({"state": "working", "shots": count}));
+    let volume = body.music_volume.unwrap_or(0.5).clamp(0.0, 1.0);
+    let app2 = app.clone();
+    tokio::spawn(async move {
+        let started = std::time::Instant::now();
+        let tmp = out.with_extension("part.mp4");
+        let mut cmd = tokio::process::Command::new(&ffmpeg);
+        cmd.args(["-hide_banner", "-loglevel", "error", "-y", "-f", "concat", "-safe", "0", "-i"]).arg(&list_path);
+        if let Some(m) = &music {
+            // The music runs under the whole film and ends with it.
+            cmd.args(["-stream_loop", "-1", "-i"]).arg(m);
+            cmd.args([
+                "-filter_complex",
+                &format!("[1:a]volume={volume:.2}[m];[0:a][m]amix=inputs=2:duration=first:dropout_transition=0[a]"),
+                "-map",
+                "0:v",
+                "-map",
+                "[a]",
+            ]);
+        }
+        // Apple's own encoders: H.264 in hardware and AAC. Plays everywhere.
+        cmd.args([
+            "-c:v",
+            "h264_videotoolbox",
+            "-b:v",
+            "8M",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            "-movflags",
+            "+faststart",
+            "-f",
+            "mp4",
+        ])
+        .arg(&tmp);
+        cmd.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped()).kill_on_drop(true);
+        let result = match cmd.output().await {
+            Ok(o) if o.status.success() => std::fs::rename(&tmp, &out).map_err(|e| e.to_string()),
+            Ok(o) => Err(String::from_utf8_lossy(&o.stderr)
+                .lines()
+                .last()
+                .unwrap_or("the shots could not be joined")
+                .chars()
+                .take(300)
+                .collect()),
+            Err(e) => Err(e.to_string()),
+        };
+        std::fs::remove_file(&list_path).ok();
+        match result {
+            Ok(()) => {
+                let bytes = std::fs::metadata(&out).map(|m| m.len()).unwrap_or(0);
+                app2.record(
+                    "studio_exported",
+                    json!({"shots": count, "seconds": started.elapsed().as_secs_f32(), "bytes": bytes, "music": music.is_some()}),
+                );
+                set_export(&id, json!({"state": "done", "file": out.to_string_lossy(), "bytes": bytes, "shots": count}));
+            }
+            Err(e) => {
+                std::fs::remove_file(&tmp).ok();
+                app2.record("studio_export_failed", json!({"shots": count}));
+                set_export(&id, json!({"state": "failed", "error": e}));
+            }
+        }
+    });
+    (StatusCode::ACCEPTED, Json(json!({"state": "working", "shots": count}))).into_response()
+}
+
+async fn export_state(Path(id): Path<String>) -> Json<Value> {
+    let found = EXPORTS.lock().unwrap().iter().find(|(i, _)| *i == id).map(|(_, v)| v.clone());
+    Json(found.unwrap_or_else(|| json!({"state": "none"})))
+}
+
 pub fn router() -> Router<Shared> {
     Router::new()
         .route("/v1/studio/projects", get(list).post(create))
         .route("/v1/studio/projects/{id}", get(read).put(save).delete(forget))
         .route("/v1/studio/projects/{id}/render", post(render).delete(stop))
         .route("/v1/studio/projects/{id}/storyboard", post(storyboard))
+        .route("/v1/studio/projects/{id}/export", get(export_state).post(export))
         .route("/v1/studio/projects/{id}/clips/{name}", get(clip))
 }
 
@@ -573,35 +756,49 @@ mod tests {
     use super::*;
 
     fn shot(id: &str, prompt: &str, state: &str) -> Shot {
-        Shot { id: id.into(), prompt: prompt.into(), frames: 121, state: state.into(), error: None, seconds: Some(200.0) }
+        Shot {
+            id: id.into(),
+            prompt: prompt.into(),
+            frames: 121,
+            state: state.into(),
+            error: None,
+            seconds: Some(200.0),
+            trim_start: 0.0,
+            trim_end: 0.0,
+        }
     }
 
     #[test]
     fn a_shot_keeps_its_clip_until_its_description_changes() {
         let old = vec![shot("a1", "a fox in snow", "done"), shot("b2", "waves at dusk", "done")];
         let new = vec![
-            ShotIn { id: Some("b2".into()), prompt: "waves at dusk".into(), frames: Some(121) },
-            ShotIn { id: Some("a1".into()), prompt: "a fox in rain".into(), frames: Some(121) },
-            ShotIn { id: None, prompt: "a new one".into(), frames: None },
+            ShotIn { id: Some("b2".into()), prompt: "waves at dusk".into(), frames: Some(121), trim_start: 0.0, trim_end: 0.0 },
+            ShotIn { id: Some("a1".into()), prompt: "a fox in rain".into(), frames: Some(121), trim_start: 0.0, trim_end: 0.0 },
+            ShotIn { id: None, prompt: "a new one".into(), frames: None, trim_start: 0.0, trim_end: 0.0 },
         ];
         let out = merge_shots(&old, new, false).unwrap();
         assert_eq!(out.iter().map(|s| s.state.as_str()).collect::<Vec<_>>(), ["done", "changed", "empty"]);
         assert_eq!(out[0].id, "b2");
         assert!(valid_id(&out[2].id));
         // A new shape means every made shot has to be made again.
-        let again =
-            merge_shots(&old, vec![ShotIn { id: Some("a1".into()), prompt: "a fox in snow".into(), frames: Some(121) }], true).unwrap();
+        let again = merge_shots(
+            &old,
+            vec![ShotIn { id: Some("a1".into()), prompt: "a fox in snow".into(), frames: Some(121), trim_start: 0.0, trim_end: 0.0 }],
+            true,
+        )
+        .unwrap();
         assert_eq!(again[0].state, "changed");
     }
 
     #[test]
     fn shots_are_bounded_and_ids_cannot_repeat_or_leave_the_folder() {
-        assert!(merge_shots(&[], vec![ShotIn { id: None, prompt: "x".into(), frames: Some(999) }], false).is_err());
+        assert!(merge_shots(&[], vec![ShotIn { id: None, prompt: "x".into(), frames: Some(999), trim_start: 0.0, trim_end: 0.0 }], false)
+            .is_err());
         let twice = merge_shots(
             &[],
             vec![
-                ShotIn { id: Some("a1".into()), prompt: "one".into(), frames: None },
-                ShotIn { id: Some("a1".into()), prompt: "two".into(), frames: None },
+                ShotIn { id: Some("a1".into()), prompt: "one".into(), frames: None, trim_start: 0.0, trim_end: 0.0 },
+                ShotIn { id: Some("a1".into()), prompt: "two".into(), frames: None, trim_start: 0.0, trim_end: 0.0 },
             ],
             false,
         )
@@ -609,6 +806,38 @@ mod tests {
         assert_ne!(twice[0].id, twice[1].id);
         assert!(!valid_id("../x") && !valid_id("") && !valid_id("A1") && valid_id("a1b2"));
         assert!(valid_size("640x384") && !valid_size("640x385") && !valid_size("64x64") && !valid_size("wide"));
+    }
+
+    #[test]
+    fn the_export_list_has_made_shots_in_order_with_their_trims() {
+        let dir = std::env::temp_dir().join(format!("rigbrew-studio-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(dir.join("clips")).unwrap();
+        for id in ["a1", "c3"] {
+            std::fs::write(dir.join("clips").join(format!("{id}.webm")), b"x").unwrap();
+        }
+        let mut second = shot("c3", "waves", "done");
+        second.trim_start = 0.5;
+        second.trim_end = 1.0;
+        let p = Project {
+            id: "p".into(),
+            name: "A film: take 2!".into(),
+            folder: dir.to_string_lossy().into(),
+            size: "640x384".into(),
+            shots: vec![shot("a1", "fox", "done"), shot("b2", "not made", "empty"), second],
+            updated_ms: 0,
+        };
+        let (list, count) = concat_list(&p);
+        assert_eq!(count, 2);
+        let lines: Vec<&str> = list.lines().collect();
+        assert!(lines[0].starts_with("ffconcat") && lines[1].ends_with("a1.webm'") && lines[2].ends_with("c3.webm'"));
+        assert_eq!(&lines[3..], ["inpoint 0.500", "outpoint 4.042"]);
+        assert_eq!(file_stem(&p.name), "A film take 2");
+        assert_eq!(file_stem("///"), "film");
+        // Trims always leave part of the shot.
+        let kept = merge_shots(&[], vec![ShotIn { id: None, prompt: "x".into(), frames: Some(49), trim_start: 9.0, trim_end: 9.0 }], false)
+            .unwrap();
+        assert!(kept[0].trim_start <= 49.0 / 24.0 - 0.5 && kept[0].trim_end == 0.0);
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]

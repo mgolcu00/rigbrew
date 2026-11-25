@@ -64,6 +64,8 @@ pub enum Engine {
     Sdcpp,
     /// sherpa-onnx, in process.
     Sherpa,
+    /// FFmpeg: joins, trims and encodes clips. No package runs on it; Studio uses it as a tool.
+    Ffmpeg,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

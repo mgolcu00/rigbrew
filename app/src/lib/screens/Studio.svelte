@@ -94,7 +94,7 @@
 		timer = undefined;
 		if (!project) return;
 		try {
-			const saved = await api.studioSave(project.id, { name: project.name, size: project.size, shots: project.shots.map(({ id, prompt, frames }) => ({ id, prompt, frames })) });
+			const saved = await api.studioSave(project.id, { name: project.name, size: project.size, shots: project.shots.map(({ id, prompt, frames, trim_start, trim_end }) => ({ id, prompt, frames, trim_start: trim_start ?? 0, trim_end: trim_end ?? 0 })) });
 			// Keep what is being typed; take the states.
 			if (view && !timer) view = saved;
 		} catch (e) {
@@ -162,6 +162,27 @@
 			view = await api.studioStop(project.id);
 		} catch (e) {
 			problem = say(e);
+		}
+	}
+
+	// One file out of the made shots, in the film's folder.
+	let exporting = $state<api.StudioExport | null>(null);
+	let music = $state('');
+	async function exportFilm() {
+		if (!project) return;
+		problem = '';
+		try {
+			await saveNow();
+			exporting = await api.studioExport(project.id, music.trim() || undefined);
+			app.track('studio_export_clicked', { shots: done.length, music: Boolean(music.trim()) });
+			while (exporting?.state === 'working') {
+				await new Promise((r) => setTimeout(r, 1500));
+				exporting = await api.studioExportState(project.id);
+			}
+			if (exporting?.state === 'failed') problem = `The film could not be exported. ${exporting.error ?? ''}`;
+		} catch (e) {
+			problem = say(e);
+			exporting = null;
 		}
 	}
 
@@ -237,6 +258,7 @@
 					<button class="btn" onclick={stop}>Stop</button>
 				{:else}
 					<button class="btn" onclick={() => play(0)} disabled={done.length === 0}>Play film</button>
+					<button class="btn" onclick={exportFilm} disabled={done.length === 0 || exporting?.state === 'working'} title="Joins the made shots into one MP4 file in the film's folder">{exporting?.state === 'working' ? 'Exporting…' : 'Export'}</button>
 					<button class="btn primary" onclick={() => make()} disabled={todo === 0 || !video} title={video ? '' : 'Add Video under Models first'}>Make {todo > 0 ? `${todo} ${todo === 1 ? 'shot' : 'shots'}` : 'film'}</button>
 				{/if}
 			</header>
@@ -257,6 +279,7 @@
 					Making shot {project.shots.findIndex((s) => s.id === p.shot) + 1} of {project.shots.length}{p.step !== null && p.steps ? `, step ${p.step} of ${p.steps}` : ''}, {clock(p.elapsed_ms / 1000)} so far. It keeps going if you leave this screen.
 				</p>
 			{/if}
+			{#if exporting?.state === 'done' && exporting.file}<p class="progress selectable" role="status">Exported {exporting.shots} {exporting.shots === 1 ? 'shot' : 'shots'} to {exporting.file.replace(/^\/Users\/[^/]+/, '~')}</p>{/if}
 			{#if problem}<p class="problem selectable" role="alert">{problem}</p>{/if}
 
 			{#if playing !== null && done[playing]}
@@ -289,6 +312,9 @@
 								</select>
 								<span class="state {shot.state}">{stateWords[shot.state]}{shot.state === 'done' && shot.seconds ? `, took ${clock(shot.seconds)}` : ''}</span>
 								{#if shot.error}<span class="problem selectable">{shot.error}</span>{/if}
+								{#if shot.state === 'done' || shot.state === 'changed'}
+									<label class="trim" title="Seconds cut from the start and from the end of this shot in the exported film">Cut <input type="number" min="0" max="9" step="0.1" bind:value={shot.trim_start} oninput={saveSoon} aria-label="Seconds cut from the start of shot {i + 1}" /> <input type="number" min="0" max="9" step="0.1" bind:value={shot.trim_end} oninput={saveSoon} aria-label="Seconds cut from the end of shot {i + 1}" /> s</label>
+								{/if}
 								<span class="grow"></span>
 								<button class="tool" onclick={() => move(i, -1)} disabled={i === 0} title="Move up" aria-label="Move shot {i + 1} up">↑</button>
 								<button class="tool" onclick={() => move(i, 1)} disabled={i === project.shots.length - 1} title="Move down" aria-label="Move shot {i + 1} down">↓</button>
@@ -309,6 +335,7 @@
 			</ol>
 			<p class="row end">
 				<button class="btn" onclick={() => addShot()}>Add a shot</button>
+				<input class="field music" bind:value={music} placeholder="Music or narration for the export: full path to a sound file (optional)" aria-label="Sound file to lay under the exported film" />
 				{#if video?.credit}<span class="note">{video.credit}</span>{/if}
 			</p>
 		{/if}
@@ -624,6 +651,32 @@
 	.state.making,
 	.state.queued {
 		color: var(--accent);
+	}
+
+	.trim {
+		display: inline-flex;
+		align-items: center;
+		gap: 4px;
+		font-size: 12.5px;
+		color: var(--faint);
+	}
+
+	.trim input {
+		width: 52px;
+		height: 26px;
+		padding: 0 6px;
+		border: 1px solid var(--line);
+		border-radius: 8px;
+		background: var(--bg);
+		color: var(--ink);
+		font: 400 12.5px/1 var(--rb-text);
+	}
+
+	.music {
+		flex: 1;
+		min-width: 200px;
+		height: 30px;
+		font-size: 13px;
 	}
 
 	.tool {
