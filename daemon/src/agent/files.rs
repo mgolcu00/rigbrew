@@ -475,7 +475,7 @@ pub struct Ran {
 }
 
 /// Kills the command's whole process group when the task is stopped or the time is up.
-struct Group(Option<u32>);
+struct Group(#[cfg_attr(not(unix), allow(dead_code))] Option<u32>);
 
 impl Group {
     fn kill(&mut self) {
