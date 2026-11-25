@@ -25,13 +25,18 @@
 //! and, only when the person switched it on, a web search and public pages (see `web`) and the
 //! tools of the connectors they added (see `mcp`).
 
+mod apps;
+mod checks;
+mod devices;
 mod extra;
 mod files;
+pub mod look;
 pub mod mcp;
 mod outline;
 mod pace;
 mod plan;
 mod recall;
+pub mod see;
 pub mod skills;
 mod stream;
 mod undo;
@@ -108,6 +113,9 @@ enum Step {
         result: Option<String>,
         /// The change as a unified diff, for `write_file` and `edit_file`.
         diff: Option<String>,
+        /// The picture the step took (a page, a phone's screen): its name under the task's shots.
+        #[serde(default)]
+        image: Option<String>,
     },
     Note {
         text: String,
@@ -187,6 +195,7 @@ impl Task {
             o.remove("messages");
             o.remove("pace");
             o.remove("memory");
+            o.remove("eye");
         }
         v
     }
@@ -248,6 +257,10 @@ pub struct Agents {
     dir: PathBuf,
     tasks: Mutex<HashMap<String, Task>>,
     running: Mutex<HashMap<String, Running>>,
+    /// The apps tasks started with `start_app`.
+    pub apps: apps::Apps,
+    /// Pages that wait for the app's window to open them.
+    looks: look::Looks,
 }
 
 fn now_ms() -> i64 {
@@ -278,7 +291,7 @@ impl Agents {
             }
             tasks.insert(task.id.clone(), task);
         }
-        Agents { dir, tasks: Mutex::new(tasks), running: Mutex::new(HashMap::new()) }
+        Agents { dir, tasks: Mutex::new(tasks), running: Mutex::new(HashMap::new()), apps: Default::default(), looks: Default::default() }
     }
 
     fn save(&self, task: &Task) {
@@ -314,6 +327,7 @@ impl Agents {
             for (_, id) in old.into_iter().take(tasks.len() + 1 - MAX_KEPT) {
                 if let Some(gone) = tasks.remove(&id) {
                     undo::forget(&self.dir, &gone);
+                    self.let_go(&id);
                 }
                 std::fs::remove_file(self.dir.join(format!("{id}.json"))).ok();
             }
@@ -322,10 +336,17 @@ impl Agents {
         tasks.insert(task.id.clone(), task);
     }
 
+    /// What a task leaves outside its own file: its running app and its pictures.
+    fn let_go(&self, id: &str) {
+        self.apps.stop(id);
+        look::forget(&self.dir, id);
+    }
+
     fn remove(&self, id: &str) {
         if let Some(gone) = self.tasks.lock().unwrap().remove(id) {
             undo::forget(&self.dir, &gone);
         }
+        self.let_go(id);
         std::fs::remove_file(self.dir.join(format!("{id}.json"))).ok();
     }
 }
@@ -687,6 +708,11 @@ const KNOWN_TOOLS: &[&str] = &[
     "finish",
 ];
 
+/// Whether a name is one of the service's own tools (connector tools are not).
+fn known(name: &str) -> bool {
+    KNOWN_TOOLS.contains(&name) || extra::TOOLS.contains(&name) || see::TOOLS.contains(&name)
+}
+
 const DENIED: &str = "The person did not allow this. Do not try it again. Go on without it, or say what you could not do.";
 const DENIED_TWICE: &str =
     "The person said no to this kind of step twice. It was not asked again. Finish without it and say what you could not do.";
@@ -740,6 +766,7 @@ async fn call_tool(app: &Shared, id: &str, folder: &Folder, call: &str, name: &s
     let offered = match name {
         "edit_file" | "write_file" | "append_file" | "run_command" => task.mode != Mode::ReadOnly,
         "web_search" | "fetch_url" => task.web,
+        _ if see::TOOLS.contains(&name) => see::offered(name, task.mode, folder.root()),
         _ => KNOWN_TOOLS.contains(&name) || extra::TOOLS.contains(&name),
     };
     if !offered {
@@ -827,7 +854,7 @@ async fn call_tool(app: &Shared, id: &str, folder: &Folder, call: &str, name: &s
                 }
             }
             undo::before_change(app, id, folder, None).await;
-            let ran = files::run(folder, command, COMMAND_TIMEOUT, task.web).await;
+            let ran = files::run(folder, command, COMMAND_TIMEOUT, apps::net_of(app, &task)).await;
             (ran.text, if ran.ok { "done" } else { "failed" })
         }
         "web_search" => {
@@ -853,6 +880,7 @@ async fn call_tool(app: &Shared, id: &str, folder: &Folder, call: &str, name: &s
             }
         }
         _ if extra::TOOLS.contains(&name) => extra::call(app, id, folder, name, args).await,
+        _ if see::TOOLS.contains(&name) => see::call(app, id, folder, call, name, args).await,
         _ => (format!("There is no tool named {name}."), "failed"),
     }
 }
@@ -888,15 +916,30 @@ async fn work(app: &Shared, id: &str) -> Ended {
         let Some(task) = agents.get(id) else { return failed("The task is gone.".into()) };
         let skills = skills::load(&app.root, Some(folder.root()));
         let system = format!(
-            "{}{}{}{}",
+            "{}{}{}{}{}",
             system_prompt(&folder, task.mode, task.web, &skills),
+            see::rules(task.mode, folder.root()).iter().map(|l| format!("\n{l}")).collect::<String>(),
             mcp::prompt(app, &task.mcp),
             extra::context(&task),
             task.pace.note(task.web)
         );
         let mut messages = vec![json!({"role": "system", "content": system})];
-        messages.extend(fit(&recall::conversation(&task.memory, &task.messages), budget));
+        let mut sent = fit(&recall::conversation(&task.memory, &task.messages), budget);
+        // The newest picture goes with the result of the step that took it, for a few turns,
+        // when the model takes pictures at all.
+        if let Some(eye) = task.extra.eye.as_ref().filter(|e| !e.call.is_empty() && e.sends < look::EYE_SENDS && see::sees(app, &task)) {
+            if let Some(png) = look::read_shot(&agents.dir, id, &eye.shot) {
+                sent = look::with_picture(sent, eye, &png);
+                agents.change(id, |t| {
+                    if let Some(eye) = t.extra.eye.as_mut() {
+                        eye.sends += 1;
+                    }
+                });
+            }
+        }
+        messages.extend(sent);
         let mut tools = tool_defs(task.mode, task.web, !skills.is_empty());
+        tools.extend(see::tool_defs(task.mode, folder.root()));
         tools.extend(skills::extra_tools(&skills));
         tools.extend(mcp::tool_defs(app, &task.mcp));
         // A tool that is used up for this request is not offered again until the next one.
@@ -931,6 +974,12 @@ async fn work(app: &Shared, id: &str) -> Ended {
                 });
                 continue;
             }
+            // The engine would not take the picture: the work goes on without it.
+            Err(e) if task.extra.eye.is_some() && look::picture_refused(&e) => {
+                app.record("agent_picture_refused", json!({"package": package.id}));
+                agents.change(id, |t| t.extra.eye = None);
+                continue;
+            }
             // Anything else may pass: the model is loading again, the engine was busy or went
             // away. Wait a little and ask again; the conversation is as it was.
             Err(e) if errors < RETRY_WAITS.len() && !lasting(&e) => {
@@ -957,7 +1006,7 @@ async fn work(app: &Shared, id: &str) -> Ended {
             // The same last look as before `finish`, unless the text is a question to the person.
             if back.is_none() && !looked_back && !text.is_empty() && !text.trim_end().ends_with('?') {
                 looked_back = true;
-                back = last_look(&task.steps, task.turns, folder.root());
+                back = see::before_finish(&task, folder.root());
             }
             agents.change(id, |t| {
                 if !text.is_empty() {
@@ -1002,7 +1051,7 @@ async fn work(app: &Shared, id: &str) -> Ended {
             let raw = c["function"]["arguments"].as_str().unwrap_or("{}");
             let parsed: Option<Value> = serde_json::from_str::<Value>(raw).ok().filter(Value::is_object);
             let args = parsed.clone().unwrap_or_else(|| json!({}));
-            app.record("agent_tool_called", json!({"tool": if KNOWN_TOOLS.contains(&name.as_str()) || extra::TOOLS.contains(&name.as_str()) { name.as_str() } else { "unknown" }}));
+            app.record("agent_tool_called", json!({"tool": if known(&name) { name.as_str() } else { "unknown" }}));
             if name == "finish" {
                 // Finishing with steps of its own plan undone: a small model does that. It is
                 // told what is left, twice at most; after that its word is taken.
@@ -1010,7 +1059,7 @@ async fn work(app: &Shared, id: &str) -> Ended {
                 let mut left = now.as_ref().and_then(|t| not_finished(&t.extra.plan)).filter(|_| held_open < MAX_SEND_BACKS);
                 if left.is_none() && !looked_back {
                     looked_back = true;
-                    left = now.as_ref().and_then(|t| last_look(&t.steps, t.turns, folder.root()));
+                    left = now.as_ref().and_then(|t| see::before_finish(t, folder.root()));
                 } else if left.is_some() {
                     held_open += 1;
                 }
@@ -1041,6 +1090,7 @@ async fn work(app: &Shared, id: &str) -> Ended {
                     status: "running".into(),
                     result: None,
                     diff: None,
+                    image: None,
                 })
             });
             // A search already made, a budget used up, the same call a third time: answered here.
@@ -1064,9 +1114,13 @@ async fn work(app: &Shared, id: &str) -> Ended {
             agents.change(id, |t| {
                 t.set_tool(&call, status, Some(result.clone()), None);
                 t.messages.push(json!({"role": "tool", "tool_call_id": model_id, "content": result}));
+                // A picture this step took is sent after this result.
+                if let Some(eye) = t.extra.eye.as_mut().filter(|e| e.step == call) {
+                    eye.call = model_id.clone();
+                }
             });
             if let Some(question) = verdict.ask {
-                app.record("agent_asked_person", json!({"tool": if KNOWN_TOOLS.contains(&name.as_str()) || extra::TOOLS.contains(&name.as_str()) { name.as_str() } else { "unknown" }}));
+                app.record("agent_asked_person", json!({"tool": if known(&name) { name.as_str() } else { "unknown" }}));
                 agents.change(id, |t| {
                     t.messages.push(json!({"role": "assistant", "content": question}));
                     t.steps.push(Step::Question { text: question.clone() });
@@ -1088,6 +1142,10 @@ fn start(app: &Shared, id: &str, follow_up: bool) {
     let (task_app, task_id) = (app.clone(), id.to_string());
     let handle = tokio::spawn(async move {
         let ended = work(&task_app, &task_id).await;
+        // A request that failed leaves no app behind; one that is done keeps it for the person to see.
+        if ended.state == "failed" {
+            task_app.agent.apps.stop(&task_id);
+        }
         task_app.agent.change(&task_id, |t| {
             t.settle(ended.state);
             t.error = ended.error;
@@ -1321,6 +1379,8 @@ pub async fn task_delete(State(app): State<Shared>, Path(id): Path<String>, Quer
     }
     // Stopping drops the work where it is: a request to the model is cut, a command is killed.
     let abort = app.agent.running.lock().unwrap().get(&id).map(|r| r.abort.clone());
+    // Stopping a task stops the app it started.
+    app.agent.apps.stop(&id);
     if let Some(abort) = abort {
         abort.abort();
         app.agent.change(&id, |t| {
@@ -1336,7 +1396,7 @@ pub async fn task_delete(State(app): State<Shared>, Path(id): Path<String>, Quer
         return Json(json!({"removed": id})).into_response();
     }
     match app.agent.get(&id) {
-        Some(task) => Json(json!({"task": task.view()})).into_response(),
+        Some(task) => Json(json!({"task": stream::shown(&app, &task, &Default::default())})).into_response(),
         None => not_found(),
     }
 }
@@ -1427,6 +1487,7 @@ mod tests {
             status: status.into(),
             result: None,
             diff: None,
+            image: None,
         };
         let mut steps = vec![
             Step::User { text: "first thing".into() },
@@ -1546,6 +1607,7 @@ mod tests {
                 status: "waiting".into(),
                 result: None,
                 diff: None,
+                image: None,
             }],
             pending: Some(Pending { call: "c1".into(), tool: "run_command".into(), path: None, command: Some("ls".into()), diff: None }),
             error: None,

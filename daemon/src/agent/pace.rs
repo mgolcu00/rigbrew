@@ -67,10 +67,12 @@ pub enum Kind {
 pub fn kind_of(tool: &str) -> Kind {
     match tool {
         "list_files" | "read_file" | "search" | "outline" | "use_skill" | "read_skill_file" | "find_tool" => Kind::Lookup,
+        // Looking at the page or the phone again with nothing changed is a look-up like any other.
+        "look_at_page" | "simulator" => Kind::Lookup,
         "web_search" => Kind::Search,
         "fetch_url" => Kind::Page,
         "edit_file" | "write_file" | "append_file" => Kind::Change,
-        "run_command" => Kind::Command,
+        "run_command" | "check_project" | "start_app" => Kind::Command,
         "update_plan" => Kind::Plan,
         _ => Kind::Other,
     }
@@ -180,6 +182,10 @@ fn what(tool: &str, args: &Value) -> String {
         "list_files" | "outline" => "looking through the folder".to_string(),
         "web_search" => "searching the web".to_string(),
         "fetch_url" => "opening a web page".to_string(),
+        "check_project" => "the checks of the project".to_string(),
+        "start_app" => "starting the app".to_string(),
+        "look_at_page" => format!("looking at {}", arg("url")),
+        "simulator" => "looking at the phone".to_string(),
         other => format!("the step {other}"),
     }
 }

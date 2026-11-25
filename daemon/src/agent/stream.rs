@@ -51,6 +51,8 @@ pub fn shown(app: &Shared, task: &Task, how: &Shown) -> Value {
     let writing = app.agent.running.lock().unwrap().get(&task.id).map(|r| r.writing.text()).unwrap_or_default();
     let mut view = if how.brief { task.summary() } else { task.view() };
     view["writing"] = json!(writing);
+    // The app the task started, while the service knows it: never saved with the task.
+    view["app"] = json!(app.agent.apps.view(&task.id));
     view
 }
 

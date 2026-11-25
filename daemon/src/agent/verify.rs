@@ -41,6 +41,19 @@ fn python_tests(root: &Path) -> Vec<std::path::PathBuf> {
     out
 }
 
+/// The program that runs this project's scripts, by the lock file it keeps.
+pub fn node_runner(root: &Path) -> &'static str {
+    if has(root, "pnpm-lock.yaml") {
+        "pnpm"
+    } else if has(root, "yarn.lock") {
+        "yarn"
+    } else if has(root, "bun.lockb") || has(root, "bun.lock") {
+        "bun"
+    } else {
+        "npm"
+    }
+}
+
 /// The commands that test or build the project in this folder, the most telling first.
 pub fn commands(root: &Path) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
@@ -51,15 +64,7 @@ pub fn commands(root: &Path) -> Vec<String> {
         out.push("go test ./...".into());
     }
     if let Ok(package) = serde_json::from_str::<serde_json::Value>(&text_of(root, "package.json")) {
-        let runner = if has(root, "pnpm-lock.yaml") {
-            "pnpm"
-        } else if has(root, "yarn.lock") {
-            "yarn"
-        } else if has(root, "bun.lockb") || has(root, "bun.lock") {
-            "bun"
-        } else {
-            "npm"
-        };
+        let runner = node_runner(root);
         for script in ["test", "check", "build"] {
             // The script npm writes into a new project only prints that there is no test.
             if package["scripts"][script].as_str().is_some_and(|s| !s.trim().is_empty() && !s.contains("no test specified")) {
@@ -92,6 +97,9 @@ pub fn commands(root: &Path) -> Vec<String> {
 
 /// What is added to the result of a change that was applied.
 pub fn reminder(root: &Path) -> String {
+    if super::checks::has_fast(root) {
+        return "Now check it, unless the person said not to: call check_project and read what it reports.".into();
+    }
     match commands(root).as_slice() {
         [] => "Now check it if you can, unless the person said not to: run the project's tests or its build, and say what really happened."
             .into(),
@@ -133,10 +141,11 @@ pub fn unchecked(steps: &[Step]) -> Option<&'static str> {
     let mut ran = false;
     for step in &request[last_change + 1..] {
         if let Step::Tool { name, status, .. } = step {
-            if name == "run_command" && status == "done" {
+            let checks = name == "run_command" || name == "check_project";
+            if checks && status == "done" {
                 return None;
             }
-            ran |= name == "run_command" && status == "failed";
+            ran |= checks && status == "failed";
         }
     }
     Some(if ran { NOT_PASSED } else { NOT_RUN })
@@ -200,15 +209,25 @@ mod tests {
         let root = project(&[("Cargo.toml", "")]);
         let (text, status) = after_change(&root, ("Changed src/lib.rs (10 lines now).".into(), "done"));
         assert_eq!(status, "done");
-        assert_eq!(text, "Changed src/lib.rs (10 lines now).\nNow check it, unless the person said not to: run `cargo test` and say what it really printed.");
+        // With a check that can run here the model is sent to check_project, otherwise to the command.
+        let by_tool = "Now check it, unless the person said not to: call check_project and read what it reports.";
+        if super::super::checks::has_fast(&root) {
+            assert_eq!(text, format!("Changed src/lib.rs (10 lines now).\n{by_tool}"));
+        } else {
+            assert_eq!(text, "Changed src/lib.rs (10 lines now).\nNow check it, unless the person said not to: run `cargo test` and say what it really printed.");
+        }
         assert_eq!(
             after_change(&root, ("The text to replace is not in src/lib.rs.".into(), "failed")).0,
             "The text to replace is not in src/lib.rs."
         );
         assert_eq!(after_change(&root, ("no".into(), "denied")), ("no".into(), "denied"));
         assert!(reminder(&project(&[])).starts_with("Now check it if you can"));
-        assert!(reminder(&project(&[("package.json", r#"{"scripts": {"test": "x", "build": "y"}}"#)]))
-            .contains("`npm test` (or `npm run build`)"));
+        let node = project(&[("package.json", r#"{"scripts": {"test": "x", "build": "y"}}"#)]);
+        if super::super::checks::has_fast(&node) {
+            assert_eq!(reminder(&node), by_tool);
+        } else {
+            assert!(reminder(&node).contains("`npm test` (or `npm run build`)"));
+        }
     }
 
     #[test]
@@ -244,7 +263,15 @@ mod tests {
     }
 
     fn tool(name: &str, status: &str) -> Step {
-        Step::Tool { call: "c".into(), name: name.into(), arguments: json!({}), status: status.into(), result: None, diff: None }
+        Step::Tool {
+            call: "c".into(),
+            name: name.into(),
+            arguments: json!({}),
+            status: status.into(),
+            result: None,
+            diff: None,
+            image: None,
+        }
     }
 
     #[test]
@@ -256,6 +283,8 @@ mod tests {
         assert_eq!(unchecked(&[user(), tool("edit_file", "done"), tool("run_command", "denied")]), Some(NOT_RUN));
         assert_eq!(unchecked(&[user(), tool("edit_file", "done"), tool("run_command", "failed")]), Some(NOT_PASSED));
         assert_eq!(unchecked(&[user(), tool("edit_file", "done"), tool("run_command", "failed"), tool("run_command", "done")]), None);
+        assert_eq!(unchecked(&[user(), tool("edit_file", "done"), tool("check_project", "done")]), None);
+        assert_eq!(unchecked(&[user(), tool("edit_file", "done"), tool("check_project", "failed")]), Some(NOT_PASSED));
         assert_eq!(
             unchecked(&[
                 user(),

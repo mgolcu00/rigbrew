@@ -1370,6 +1370,15 @@ async fn main() {
         .route("/v1/agent/tasks/{id}/approve", post(agent::task_approve))
         .route("/v1/agent/tasks/{id}/message", post(agent::task_message))
         .route("/v1/agent/tasks/{id}/undo", post(agent::task_undo))
+        .route("/v1/agent/tasks/{id}/app", axum::routing::delete(agent::see::api::app_stop))
+        .route("/v1/agent/tasks/{id}/device", post(agent::see::api::device_shot))
+        .route("/v1/agent/tasks/{id}/shots/{name}", get(agent::look::api::shot))
+        .route("/v1/agent/look", post(agent::look::api::now))
+        .route("/v1/agent/looks/next", get(agent::look::api::next))
+        .route(
+            "/v1/agent/looks/{id}",
+            post(agent::look::api::answer).layer(axum::extract::DefaultBodyLimit::max(agent::look::MAX_PICTURE_BYTES * 2)),
+        )
         .route("/v1/agent/skills", get(agent::skills_list))
         .route("/v1/skills", get(agent::skills::api::list).post(agent::skills::api::create))
         .route("/v1/skills/import", post(agent::skills::api::import))
@@ -1432,6 +1441,8 @@ async fn main() {
             for loaded in std::mem::take(&mut *shutdown_app.engine.lock().await) {
                 loaded.server.stop().await;
             }
+            // So do the apps tasks started.
+            shutdown_app.agent.apps.stop_all();
             // Programs started for connectors end with the service.
             shutdown_app.connectors.stop_all().await;
         })
