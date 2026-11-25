@@ -873,9 +873,11 @@ async fn work(app: &Shared, id: &str) -> Ended {
         Ok(f) => f,
         Err(e) => return failed(e),
     };
-    let Some(package) = app.manifest.package(&task.model).filter(|p| p.modality == Modality::Chat) else {
+    // A model from the manifest, or one the person added from the community.
+    let Some(package) = app.package(&task.model).filter(|p| p.modality == Modality::Chat) else {
         return failed(format!("There is no chat model named {}.", task.model));
     };
+    let package = &package;
     agents.change(id, |t| repair(&mut t.messages));
     let writing = agents.running.lock().unwrap().get(id).map(|r| r.writing.clone()).unwrap_or_default();
     let mut budget = HISTORY_CHARS;
@@ -1213,7 +1215,8 @@ pub async fn task_create(State(app): State<Shared>, Json(body): Json<NewTask>) -
     if own.starts_with(folder.root()) || folder.root().starts_with(&own) {
         return fail(StatusCode::BAD_REQUEST, "That folder holds Rigbrew's own files. Choose the folder of one project.");
     }
-    let chat_models = || app.manifest.packages.iter().filter(|p| p.modality == Modality::Chat && !app.installed(p).is_empty());
+    let all = app.all_packages();
+    let chat_models = || all.iter().filter(|p| p.modality == Modality::Chat && !app.installed(p).is_empty());
     let package = match &body.model {
         Some(wanted) => chat_models().find(|p| p.id == *wanted),
         None => chat_models().next(),
