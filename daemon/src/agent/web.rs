@@ -13,7 +13,10 @@ use reqwest::Url;
 const TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_BYTES: usize = 2 * 1024 * 1024;
 const MAX_REDIRECTS: usize = 5;
-const MAX_RESULTS: usize = 8;
+/// Results of one search. Few and short: a small model reads every one of them.
+const MAX_RESULTS: usize = 5;
+const MAX_TITLE_CHARS: usize = 100;
+const MAX_SNIPPET_CHARS: usize = 160;
 const SEARCH: &str = "https://html.duckduckgo.com/html/";
 const USER_AGENT: &str = concat!("Mozilla/5.0 (compatible; Rigbrew/", env!("CARGO_PKG_VERSION"), ")");
 
@@ -173,6 +176,14 @@ fn short(text: &str) -> String {
     text.chars().take(160).collect()
 }
 
+/// The text, or its first `max` characters and "…".
+fn short_to(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    format!("{}…", text.chars().take(max - 1).collect::<String>().trim_end())
+}
+
 /// Named and numeric character references, the few that matter for reading.
 pub fn decode_entities(text: &str) -> String {
     if !text.contains('&') {
@@ -315,7 +326,7 @@ pub fn parse_results(html: &str) -> Vec<Hit> {
         if name.is_empty() {
             continue;
         }
-        out.push(Hit { title: name, url, snippet: text });
+        out.push(Hit { title: short_to(&name, MAX_TITLE_CHARS), url, snippet: short_to(&text, MAX_SNIPPET_CHARS) });
         if out.len() == MAX_RESULTS {
             break;
         }
@@ -457,13 +468,20 @@ mod tests {
     }
 
     #[test]
-    fn at_most_eight_results() {
+    fn results_are_few_and_short() {
+        let long = "word ".repeat(100);
         let one = |i: usize| {
-            format!(r#"<a class="result__a" href="https://example.com/{i}">Result {i}</a><a class="result__snippet">Text {i}</a>"#)
+            format!(
+                r#"<a class="result__a" href="https://example.com/{i}">Result {i} {long}</a><a class="result__snippet">Text {i} {long}</a>"#
+            )
         };
         let html: String = (0..20).map(one).collect();
         let hits = parse_results(&html);
-        assert_eq!(hits.len(), 8);
-        assert_eq!(hits[7].snippet, "Text 7");
+        assert_eq!(hits.len(), 5);
+        assert!(hits[4].snippet.starts_with("Text 4 word") && hits[4].snippet.ends_with('…'));
+        assert!(hits.iter().all(|h| h.snippet.chars().count() <= 160 && h.title.chars().count() <= 100));
+        // Five results as the model reads them fit in a small part of its context.
+        let shown: usize = hits.iter().map(|h| h.title.len() + h.url.len() + h.snippet.len() + 12).sum();
+        assert!(shown < 1600, "{shown}");
     }
 }

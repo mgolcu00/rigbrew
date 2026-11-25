@@ -103,9 +103,10 @@ curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   http://127.0.0.1:$PORT/v1/agent/tasks
 ```
 
-A task has a `state` (`running`, `waiting`, `done`, `failed`, `stopped`, `interrupted`), `steps` and, while it
-waits for the person, `pending`. A step is one of `{"kind": "user", "text"}`, `{"kind": "model", "text"}`,
-`{"kind": "note", "text"}` or `{"kind": "tool", "call", "name", "arguments", "status", "result", "diff"}` with the
+A task has a `state` (`running`, `waiting`, `asking`, `done`, `failed`, `stopped`, `interrupted`), `steps` and,
+while it waits for a yes or no to one step, `pending`. A step is one of `{"kind": "user", "text"}`,
+`{"kind": "model", "text"}`, `{"kind": "note", "text"}`, `{"kind": "question", "text"}` (see
+[Pace](#pace)) or `{"kind": "tool", "call", "name", "arguments", "status", "result", "diff"}` with the
 status `running`, `waiting`, `done`, `failed`, `denied` or `stopped`. `pending` is `{"call", "tool", "path",
 "command", "diff"}`; answer it with `POST .../approve` and the same `call`.
 
@@ -150,6 +151,29 @@ While the model writes, `GET /v1/agent/tasks/{id}` has the text so far in `writi
 service; the text becomes a `model` step when the turn ends, and `writing` is empty again). To follow it, ask with
 `?brief=true` a few times a second: that answer has only `id`, `state`, `updated_ms`, the number of `steps` and
 `writing`, and `updated_ms` says when to ask for the whole task again.
+
+### Pace
+
+A small model left alone searches the same thing again and again. The service keeps count, so the rules hold
+whatever the model does (`daemon/src/agent/pace.rs`):
+
+- **A search is made once.** A `web_search` with the same words as an earlier one in the task (case, order and
+  punctuation aside) is not sent: the result from before comes back with a line that says so. The same goes for a
+  page that `fetch_url` already opened.
+- **A budget for each request.** One message of the person gets 6 web searches and 12 pages. After that the tool
+  answers that enough was searched and that the model has to work with what it has. The next message of the person
+  starts the count again.
+- **Results are small.** A search gives five results: title, address and one line of at most 160 characters. A
+  page is cut to its readable text and its first 4000 characters, about an eighth of the model's context.
+- **A nudge in the result.** The third web search in a row with no other kind of step carries a line that says to
+  open a page or answer.
+- **Signs of being stuck.** The same call with the same result a third time, twelve look-ups in a row (reading,
+  listing, searching, the web) with nothing changed or run in between, or one tool failing three times in a row.
+  The first sign adds a short nudge to the result the model reads. The second tells it to take stock: update the
+  plan and go on in a different way, or finish with what it has. The third ends the request with one question for
+  the person, as a `question` step, and the task's state is `asking`: it goes on with their next message. A change
+  or a command that gives something new is progress and starts this ladder again. The same call three times in a
+  row is not run a third time.
 
 ### Undo
 

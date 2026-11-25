@@ -22,6 +22,7 @@ mod extra;
 mod files;
 pub mod mcp;
 mod outline;
+mod pace;
 mod plan;
 pub mod skills;
 mod stream;
@@ -98,6 +99,10 @@ enum Step {
     Note {
         text: String,
     },
+    /// What the task asks the person when it cannot get further by itself.
+    Question {
+        text: String,
+    },
 }
 
 /// A tool call that waits for the person's answer.
@@ -118,7 +123,8 @@ struct Task {
     model: String,
     mode: Mode,
     web: bool,
-    /// "running", "waiting", "done", "failed", "stopped" or "interrupted".
+    /// "running", "waiting" (for a yes or no to one step), "asking" (it put a question to the
+    /// person and goes on with their next message), "done", "failed", "stopped" or "interrupted".
     state: String,
     created_ms: i64,
     updated_ms: i64,
@@ -144,6 +150,9 @@ struct Task {
     /// "Use connectors", and the connector tools allowed for the rest of this task.
     #[serde(default)]
     mcp: mcp::TaskState,
+    /// What was searched, and how the current request is getting on: see `pace`. Not shown by the API.
+    #[serde(default)]
+    pace: pace::Pace,
 }
 
 impl Task {
@@ -156,6 +165,7 @@ impl Task {
         let mut v = serde_json::to_value(self).unwrap_or_default();
         if let Some(o) = v.as_object_mut() {
             o.remove("messages");
+            o.remove("pace");
         }
         v
     }
@@ -323,7 +333,10 @@ fn system_prompt(folder: &Folder, mode: Mode, web: bool, skills: &[skills::Skill
         }
     }
     if web {
-        lines.push("web_search and fetch_url reach the internet. Use them only when the folder cannot answer the question.".into());
+        lines.push(format!(
+            "web_search and fetch_url reach the internet. Use them only when the folder cannot answer the question. Search once or twice, then open the best page with fetch_url. One request gets at most {} searches, and a search you already made gives the same result again.",
+            pace::SEARCH_BUDGET
+        ));
     }
     if !skills.is_empty() {
         lines.push("Skills are instructions for a kind of work. When one fits, call use_skill with its name first:".into());
@@ -332,6 +345,7 @@ fn system_prompt(folder: &Folder, mode: Mode, web: bool, skills: &[skills::Skill
         }
     }
     lines.extend(extra::rules(mode));
+    lines.push("Never look up the same thing twice. After a few look-ups, act: make the change, run the check, or answer.".into());
     lines.push("When the work is done, call finish with a short summary of what you did or found. Keep it short and plain.".into());
     lines.join("\n")
 }
@@ -727,8 +741,6 @@ async fn work(app: &Shared, id: &str) -> Ended {
     agents.change(id, |t| repair(&mut t.messages));
     let writing = agents.running.lock().unwrap().get(id).map(|r| r.writing.clone()).unwrap_or_default();
     let mut budget = HISTORY_CHARS;
-    // The same call with the same arguments, over and over: a small model that is stuck.
-    let mut repeated: (String, usize) = (String::new(), 0);
     // A tool call too long for one answer comes back from the engine as an error, not as a call.
     let mut cut_offs = 0;
     loop {
@@ -846,24 +858,36 @@ async fn work(app: &Shared, id: &str) -> Ended {
                     diff: None,
                 })
             });
-            let signature = format!("{name} {raw}");
-            repeated = if repeated.0 == signature { (signature, repeated.1 + 1) } else { (signature, 1) };
+            // A search already made, a budget used up, the same call a third time: answered here.
+            let held = if parsed.is_some() { agents.change(id, |t| t.pace.before(&name, &args)).flatten() } else { None };
             let (result, status) = if parsed.is_none() {
                 let why = if cut_off { CUT_OFF_HINT } else { "The arguments were not valid JSON. Call the tool again with a JSON object." };
                 (why.to_string(), "failed")
-            } else if repeated.1 >= 3 {
-                (
-                    "You made this exact call three times in a row. It gives the same result. Do something else, or call finish."
-                        .to_string(),
-                    "failed",
-                )
+            } else if let Some(held) = &held {
+                (held.text.clone(), if held.refused { "failed" } else { "done" })
             } else {
                 call_tool(app, id, &folder, &call, &name, &args).await
+            };
+            // Is the work going round in circles? A nudge goes to the model with the result; a
+            // question goes to the person.
+            let verdict =
+                agents.change(id, |t| t.pace.after(&name, &args, &result, status, held.as_ref().map(|h| h.refused))).unwrap_or_default();
+            let result = match &verdict.nudge {
+                Some(nudge) => format!("{result}\n\n{nudge}"),
+                None => result,
             };
             agents.change(id, |t| {
                 t.set_tool(&call, status, Some(result.clone()), None);
                 t.messages.push(json!({"role": "tool", "tool_call_id": model_id, "content": result}));
             });
+            if let Some(question) = verdict.ask {
+                app.record("agent_asked_person", json!({"tool": if KNOWN_TOOLS.contains(&name.as_str()) || extra::TOOLS.contains(&name.as_str()) { name.as_str() } else { "unknown" }}));
+                agents.change(id, |t| {
+                    t.messages.push(json!({"role": "assistant", "content": question}));
+                    t.steps.push(Step::Question { text: question.clone() });
+                });
+                return Ended { state: "asking", error: None };
+            }
         }
     }
 }
@@ -898,7 +922,7 @@ fn finished(app: &Shared, id: &str) -> bool {
         let tools = task.steps.iter().filter(|s| matches!(s, Step::Tool { .. })).count();
         app.record(
             "agent_task_finished",
-            json!({"state": task.state, "steps": task.turns, "tools": tools, "seconds": was.started.elapsed().as_secs_f64()}),
+            json!({"state": task.state, "steps": task.turns, "tools": tools, "searches": task.pace.searches(), "seconds": was.started.elapsed().as_secs_f64()}),
         );
     }
     true
@@ -977,6 +1001,7 @@ pub async fn task_create(State(app): State<Shared>, Json(body): Json<NewTask>) -
         messages: vec![json!({"role": "user", "content": prompt})],
         extra: Default::default(),
         mcp: mcp::TaskState::new(body.connectors),
+        pace: Default::default(),
     };
     let (id, view) = (task.id.clone(), task.view());
     app.agent.insert(task);
@@ -1070,6 +1095,7 @@ pub async fn task_message(State(app): State<Shared>, Path(id): Path<String>, Jso
         t.error = None;
         t.turns = 0;
         t.denied.clear();
+        t.pace.next_request();
         extra::next_request(t);
         if let Some(mode) = body.mode {
             t.mode = mode;
@@ -1244,9 +1270,10 @@ mod tests {
             messages: vec![json!({"role": "user", "content": "secret"})],
             extra: Default::default(),
             mcp: Default::default(),
+            pace: Default::default(),
         };
         let view = task.view();
-        assert!(view.get("messages").is_none());
+        assert!(view.get("messages").is_none() && view.get("pace").is_none());
         assert_eq!(view["mode"], "ask");
         assert_eq!(view["steps"][0]["kind"], "tool");
         assert_eq!(view["pending"]["command"], "ls");
@@ -1282,6 +1309,7 @@ mod tests {
             messages: vec![],
             extra: Default::default(),
             mcp: Default::default(),
+            pace: Default::default(),
         };
         agents.insert(task.clone());
         task.id = "b".repeat(32);
