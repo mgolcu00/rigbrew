@@ -52,9 +52,11 @@
 	const rows = $derived.by(() => {
 		const out: Row[] = [];
 		let top = 0;
+		const own = studio.layout.heights ?? {};
 		const add = (id: string, kind: Row['kind'], h: number, track?: DocTrack) => {
-			out.push({ id, kind, top, height: Math.round(h * vz), track });
-			top += Math.round(h * vz);
+			const height = Math.round(h * vz * (own[id] ?? 1));
+			out.push({ id, kind, top, height, track });
+			top += height;
 		};
 		add(FILM, 'film', 78);
 		add(SHOTS, 'shots', 44);
@@ -1286,6 +1288,36 @@
 		el.addEventListener('pointercancel', onUp);
 	}
 
+	const USUAL: Record<Row['kind'], number> = { film: 78, shots: 44, track: 58 };
+
+	// Dragging the lower edge of a header makes that one track taller or lower; a double click
+	// puts it back to the height of the others.
+	function rowHeight(e: PointerEvent, row: Row) {
+		e.stopPropagation();
+		const el = e.currentTarget as HTMLElement;
+		el.setPointerCapture(e.pointerId);
+		const y0 = e.clientY;
+		const h0 = row.height;
+		const usual = USUAL[row.kind] * vz;
+		const onMove = (m: PointerEvent) => {
+			const factor = Math.min(4, Math.max(0.5, (h0 + m.clientY - y0) / usual));
+			studio.set('heights', { ...studio.layout.heights, [row.id]: Math.round(factor * 100) / 100 });
+		};
+		const onUp = () => {
+			el.removeEventListener('pointermove', onMove);
+			el.removeEventListener('pointerup', onUp);
+			el.removeEventListener('pointercancel', onUp);
+		};
+		el.addEventListener('pointermove', onMove);
+		el.addEventListener('pointerup', onUp);
+		el.addEventListener('pointercancel', onUp);
+	}
+
+	function usualHeight(id: string) {
+		const { [id]: _gone, ...rest } = studio.layout.heights ?? {};
+		studio.set('heights', rest);
+	}
+
 	// Dragging the edge between the headers and the lanes makes the headers wider or narrower.
 	function headWidth(e: PointerEvent) {
 		const el = e.currentTarget as HTMLElement;
@@ -1403,6 +1435,8 @@
 							</div>
 						{/if}
 					{/if}
+					<!-- svelte-ignore a11y_no_static_element_interactions -->
+					<div class="rowedge" onpointerdown={(e) => rowHeight(e, row)} ondblclick={() => usualHeight(row.id)} title="Drag to make this track taller or lower. Double-click for the usual height."></div>
 				</div>
 			{/each}
 			{#if lift}<div class="lift" style:top="{lift.y - 1}px"></div>{/if}
@@ -1554,6 +1588,21 @@
 
 	.head.on {
 		background: #262930;
+	}
+
+	/* The lower edge of a header: five pixels to take hold of. */
+	.rowedge {
+		position: absolute;
+		z-index: 3;
+		left: 0;
+		right: 0;
+		bottom: -3px;
+		height: 6px;
+		cursor: row-resize;
+	}
+
+	.rowedge:hover {
+		background: linear-gradient(transparent 2px, var(--st-accent) 2px, var(--st-accent) 4px, transparent 4px);
 	}
 
 	.head.picked {

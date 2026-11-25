@@ -184,7 +184,7 @@
 			></textarea>
 			<div class="st-row">
 				<input class="st-in grow" bind:value={hint} placeholder="What should be different (optional)" aria-label="What the chat model should change" onkeydown={(e) => (e.stopPropagation(), e.key === 'Enter' && studio.rewrite(shot.id, hint))} />
-				<button class="st-btn" onclick={() => studio.rewrite(shot.id, hint)} disabled={studio.busy !== '' || app.chatPackages.length === 0} title="The chat model writes this description again, in the words of the shots around it. Undo brings the old one back.">
+				<button class="st-btn" onclick={() => studio.rewrite(shot.id, hint)} disabled={studio.busy !== '' || app.chatPackages.length === 0} title={app.chatPackages.length === 0 ? 'Needs the chat model' : 'The chat model writes this description again, in the words of the shots around it. Undo brings the old one back.'}>
 					<StudioIcon name="spark" size={12} />
 					{studio.busy === 'rewriting' ? 'Writing…' : 'Rewrite'}
 				</button>

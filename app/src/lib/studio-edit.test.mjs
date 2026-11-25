@@ -30,6 +30,7 @@ import {
 	pasteRegions,
 	regionEnd,
 	saveBody,
+	takeWork,
 	splitRegion,
 	stripGain,
 	trimRegionEnd,
@@ -52,7 +53,9 @@ import {
 	timecode,
 	xToTime,
 	zoomAround,
-	zoomToSlider
+	zoomSpanAround,
+	zoomToSlider,
+	zoomedSpan
 } from './studio-time.ts';
 
 const close = (a, b, by = 1e-9) => assert.ok(Math.abs(a - b) <= by, `${a} is not ${b}`);
@@ -139,8 +142,21 @@ test('a dragged edge snaps to region edges and the playhead, else to frames', ()
 test('the window follows the playhead and scrolls at its edges', () => {
 	const z = { pps: 100, scroll: 0 };
 	assert.equal(followScroll(4, z, 1000), 0);
-	// Off the right edge: a page on, the playhead near the left.
-	assert.equal(followScroll(9.9, z, 1000), 990 - 120);
+	// Past the place it is held at, the window moves with the playhead: it stands still on the screen.
+	assert.equal(followScroll(6.2, z, 1000), 0);
+	assert.equal(followScroll(6.3, z, 1000), 10);
+	assert.equal(followScroll(9.9, z, 1000), 990 - 620);
+	assert.equal(followScroll(9.9, { pps: 100, scroll: 370 }, 1000), 370);
+	// The Editor's own zoom: a part of what it shows, held inside it, the moment under the pointer staying put.
+	const base = { from: 2, to: 10 };
+	assert.deepEqual(zoomedSpan(base, 1, 5), { from: 2, to: 10 });
+	assert.deepEqual(zoomedSpan(base, 4, 5), { from: 5, to: 7 });
+	assert.deepEqual(zoomedSpan(base, 4, 99), { from: 8, to: 10 });
+	assert.deepEqual(zoomedSpan(base, 0.2, -4), { from: 2, to: 10 });
+	assert.deepEqual(zoomSpanAround(base, base, 2, 0.5), { zoom: 2, from: 4 });
+	assert.deepEqual(zoomSpanAround(base, { from: 4, to: 8 }, 2, 0.25), { zoom: 4, from: 4.5 });
+	assert.deepEqual(zoomSpanAround(base, { from: 4, to: 8 }, 0.1, 0.5), { zoom: 1, from: 2 });
+	assert.equal(zoomSpanAround(base, base, 1000, 0.5).zoom, 64);
 	// Behind the window (after a jump back): the same.
 	assert.equal(followScroll(1, { pps: 100, scroll: 500 }, 1000), 0);
 	assert.equal(edgeScroll(500, 1000), 0);
@@ -448,4 +464,32 @@ test('subtitles: the one on screen, its rows, and the shots under it', () => {
 	assert.deepEqual([0, 1.75, 1.875, 2, 3, 4.1, 5.125, 5.25, 9].map(level), [1, 1, 0.7, 0.4, 0.4, 0.4, 0.7, 1, 1]);
 	assert.equal(duckLevel(said, 0, 3), 1);
 	assert.equal(duckLevel([], 0.6, 3), 1);
+});
+
+test('work the service did is put into the film as it was edited meanwhile', () => {
+	const film = (over = {}) =>
+		docOf({ id: 'p', name: 'Boat', folder: '/f', size: '640x384', updated_ms: 1, shots: [{ id: 'a1', prompt: 'a fox', frames: 121, state: 'done', lines: [{ id: 'l1', text: 'A fox walks.' }] }, { id: 'b2', prompt: '', frames: 96, state: 'done' }], ...over });
+	const mine = film();
+	mine.name = 'Renamed while it worked';
+	mine.shots[0].prompt = 'a red fox';
+	// A dub: the voice track and the translations come in; what was edited stays.
+	const voice = { id: 'v1', name: 'Turkish voice', kind: 'voice', lang: 'Turkish', color: '#4f8fd9', regions: [{ id: 'r1', file: '/f/voice/x.wav', start: 0.15, length: 1.5, line: 'a1/l1' }] };
+	const dubbed = film({ dub: 'Turkish', tracks: [voice], shots: [{ id: 'a1', prompt: 'a fox', frames: 121, state: 'done', lines: [{ id: 'l1', text: 'A fox walks.', said: { Turkish: 'Bir tilki yürüyor.' } }] }, { id: 'b2', prompt: '', frames: 96, state: 'done' }] });
+	const afterDub = takeWork('dub', mine, dubbed);
+	assert.deepEqual([afterDub.name, afterDub.shots[0].prompt, afterDub.dub, afterDub.tracks.map((t) => [t.kind, t.lang, t.regions.length])], ['Renamed while it worked', 'a red fox', 'Turkish', [['voice', 'Turkish', 1]]]);
+	assert.deepEqual(afterDub.shots[0].lines[0].said, { Turkish: 'Bir tilki yürüyor.' });
+	// A second dub replaces its own track and adds none.
+	assert.equal(takeWork('dub', afterDub, dubbed).tracks.length, 1);
+	// A video brought in: its shots come in behind the ones here.
+	const brought = film({ size: '384x640', export: { scale: 2 }, shots: [{ id: 'a1', prompt: 'a fox', frames: 121, state: 'done' }, { id: 'b2', prompt: '', frames: 96, state: 'done' }, { id: 'c3', prompt: '', frames: 120, state: 'done', take: 1, takes: [{ n: 1, frames: 120, ext: 'mp4' }] }] });
+	const afterImport = takeWork('import', mine, brought);
+	assert.deepEqual([afterImport.shots.map((s) => s.id), afterImport.size, afterImport.takes.c3, afterImport.shots[0].prompt], [['a1', 'b2', 'c3'], '640x384', 1, 'a red fox']);
+	// Only an empty film takes the shape of the video.
+	assert.deepEqual([takeWork('import', film({ shots: [] }), brought).size, takeWork('import', film({ shots: [] }), brought).export.scale], ['384x640', 2]);
+	// Clips listened to: lines for the shots that had none, and no others.
+	const heard = film({ language: 'English', shots: [{ id: 'a1', prompt: 'a fox', frames: 121, state: 'done', lines: [{ id: 'x9', text: 'Heard instead.' }] }, { id: 'b2', prompt: '', frames: 96, state: 'done', lines: [{ id: 'l7', text: 'Then the boat came.' }] }] });
+	const afterListen = takeWork('listen', mine, heard);
+	assert.deepEqual([afterListen.shots[0].lines[0].text, afterListen.shots[1].lines[0].text, afterListen.language], ['A fox walks.', 'Then the boat came.', 'English']);
+	// The film handed in is left as it was.
+	assert.deepEqual([mine.tracks.length, mine.shots.length, mine.shots[1].lines.length], [0, 2, 0]);
 });

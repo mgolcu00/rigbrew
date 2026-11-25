@@ -136,7 +136,6 @@
 
 	.band .need {
 		flex: 1 1 0;
-		flex-wrap: nowrap;
 		gap: 8px;
 		padding: 4px 10px;
 		min-width: 0;

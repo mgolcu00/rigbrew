@@ -124,15 +124,40 @@ export function snapTime(seconds: number, marks: readonly number[], pps: number,
 	return best === null ? { time: Math.max(0, snapFrame(seconds)), mark: null } : { time: best, mark: best };
 }
 
+/** Where in the window the playhead is held while the film plays: a little past the middle. */
+export const FOLLOW_AT = 0.62;
+
 /**
- * How far to scroll so a moment stays in view while it moves: nothing while it is inside the
- * middle of the window, a page forward when it runs off the right edge.
+ * How far to scroll so a moment stays in view while it moves: nothing while it is in the left
+ * part of the window; past `FOLLOW_AT` of its width the window moves with it, so the playhead
+ * stands still and the film runs under it. A moment behind the window is brought back near the
+ * left edge.
  */
 export function followScroll(seconds: number, z: Zoom, width: number): number {
 	const x = timeToX(seconds, z);
-	if (x > width - 24) return Math.max(0, seconds * z.pps - width * 0.12);
+	if (x > width * FOLLOW_AT) return Math.max(0, seconds * z.pps - width * FOLLOW_AT);
 	if (x < 0) return Math.max(0, seconds * z.pps - width * 0.12);
 	return z.scroll;
+}
+
+/**
+ * The stretch a magnified view shows: `base` as it is at zoom 1, a part of it at more. The
+ * part is held inside `base` and starts at `from` where it can.
+ */
+export function zoomedSpan(base: { from: number; to: number }, zoom: number, from: number): { from: number; to: number } {
+	const whole = Math.max(0.001, base.to - base.from);
+	const shown = whole / Math.max(1, zoom);
+	const start = Math.min(base.to - shown, Math.max(base.from, from));
+	return { from: start, to: start + shown };
+}
+
+/** A zoom changed so that the moment under `x` (0 to 1 across the view) stays under it: the new zoom and where the view starts. */
+export function zoomSpanAround(base: { from: number; to: number }, view: { from: number; to: number }, factor: number, x: number, most = 64): { zoom: number; from: number } {
+	const whole = Math.max(0.001, base.to - base.from);
+	const was = Math.max(0.001, view.to - view.from);
+	const zoom = Math.min(most, Math.max(1, (whole / was) * factor));
+	const at = view.from + was * Math.min(1, Math.max(0, x));
+	return { zoom, from: zoomedSpan(base, zoom, at - (whole / zoom) * Math.min(1, Math.max(0, x))).from };
 }
 
 /** Pixels to scroll this frame while something is dragged near an edge of the window: faster the closer. */

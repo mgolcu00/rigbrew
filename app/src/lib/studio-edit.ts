@@ -543,3 +543,37 @@ export function duckLevel(said: readonly [number, number][], by: number, seconds
 	}
 	return 1 - Math.min(1, Math.max(0, by)) * Math.min(1, down);
 }
+
+/**
+ * What the service did to the film (a video brought in, a dub, clips listened to) put into the
+ * film as it stands here, for when it was edited while the service worked: only what that work
+ * makes is taken from the service's film, everything else stays as it was edited.
+ */
+export function takeWork(kind: 'import' | 'dub' | 'listen', mine: Doc, theirs: Doc): Doc {
+	const out: Doc = JSON.parse(JSON.stringify(mine));
+	if (kind === 'import') {
+		// An empty film took the shape of the video.
+		if (mine.shots.length === 0) [out.size, out.export] = [theirs.size, { ...theirs.export }];
+		for (const s of theirs.shots) if (!out.shots.some((x) => x.id === s.id)) out.shots.push(JSON.parse(JSON.stringify(s)));
+		out.takes = { ...theirs.takes, ...out.takes };
+	} else if (kind === 'dub') {
+		// The voice tracks are the service's; which one is heard follows the language it set.
+		for (const t of theirs.tracks.filter((x) => x.kind === 'voice')) {
+			const at = out.tracks.findIndex((x) => x.id === t.id);
+			if (at >= 0) out.tracks[at] = JSON.parse(JSON.stringify(t));
+			else out.tracks.push(JSON.parse(JSON.stringify(t)));
+		}
+		out.dub = theirs.dub;
+		for (const s of out.shots) {
+			const there = theirs.shots.find((x) => x.id === s.id);
+			for (const l of s.lines) l.said = { ...there?.lines.find((x) => x.id === l.id)?.said, ...l.said };
+		}
+	} else {
+		for (const s of out.shots) {
+			const there = theirs.shots.find((x) => x.id === s.id);
+			if (s.lines.length === 0 && there) s.lines = JSON.parse(JSON.stringify(there.lines));
+		}
+		out.language ||= theirs.language;
+	}
+	return out;
+}

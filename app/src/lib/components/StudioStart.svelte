@@ -287,6 +287,9 @@
 			<span class="grow"></span>
 			<button class="st-btn quiet" onclick={empty} title="A film without shots, or a film folder to open"><StudioIcon name="plus" size={11} /> Empty film</button>
 		</div>
+		{#if askFolder && way === 'simple'}
+			<input class="st-in wide" bind:value={folder} placeholder="/full/path/to/a/folder" aria-label="Folder of an empty or existing film" onkeydown={(e) => e.key === 'Enter' && empty()} />
+		{/if}
 		{#if studio.films.length > 0}
 			<ul class="films">
 				{#each studio.films as f (f.id)}

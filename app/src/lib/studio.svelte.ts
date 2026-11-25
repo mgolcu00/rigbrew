@@ -24,6 +24,7 @@ import {
 	saveBody,
 	splitRegion,
 	stripGain,
+	takeWork,
 	type Doc,
 	type DocLine,
 	type DocMember,
@@ -63,6 +64,8 @@ interface Layout {
 	lcd: 'time' | 'shot';
 	snap: boolean;
 	vzoom: number;
+	/** A track made taller or lower than the others, by its id: 1 is as the others are. */
+	heights: Record<string, number>;
 }
 
 const usualLayout: Layout = {
@@ -78,7 +81,8 @@ const usualLayout: Layout = {
 	libraryTab: 'films',
 	lcd: 'time',
 	snap: true,
-	vzoom: 1
+	vzoom: 1,
+	heights: {}
 };
 
 const say = (e: unknown) => `${plain(e).text} ${codeOf(e)}`;
@@ -169,6 +173,8 @@ class Studio {
 	edits = $state(0);
 	#timer: ReturnType<typeof setTimeout> | undefined;
 	#dirty = false;
+	/** While the service works on the film itself, nothing is saved over what it does. */
+	#held = 0;
 	#saving: Promise<void> = Promise.resolve();
 	#poll: ReturnType<typeof setInterval> | undefined;
 	clipboard: { regions: DocRegion[]; track: string } | null = null;
@@ -435,7 +441,7 @@ class Studio {
 	saveNow(): Promise<void> {
 		clearTimeout(this.#timer);
 		this.#timer = undefined;
-		if (!this.doc || !this.#dirty) return this.#saving;
+		if (!this.doc || !this.#dirty || this.#held > 0) return this.#saving;
 		const body = saveBody($state.snapshot(this.doc) as Doc);
 		const id = this.id;
 		this.#dirty = false;
@@ -1059,10 +1065,14 @@ class Studio {
 		if (!this.doc || this.jobs[kind]?.state === 'working') return null;
 		const id = this.id;
 		this.problem = '';
+		let held = false;
 		try {
 			await this.saveNow();
 			const before = $state.snapshot(this.doc) as Doc;
 			let job = await start();
+			// From here the service changes the film: an edit made meanwhile waits, and is put together with its work.
+			this.#held++;
+			held = true;
 			this.jobs = { ...this.jobs, [kind]: job };
 			while (job.state === 'working') {
 				await new Promise((r) => setTimeout(r, 1200));
@@ -1074,12 +1084,13 @@ class Studio {
 				this.problem = say(job.error ?? '');
 				return job;
 			}
-			await this.saveNow();
 			const view = await api.studioRead(id);
-			if (this.id !== id) return job;
+			if (this.id !== id || !this.doc) return job;
+			const theirs = docOf(view.project);
+			const edited = this.#dirty;
 			this.history.push(before, label);
 			this.view = view;
-			this.doc = docOf(view.project);
+			this.doc = edited ? takeWork(kind, $state.snapshot(this.doc) as Doc, theirs) : theirs;
 			this.edits++;
 			this.jumps++;
 			this.loadSounds();
@@ -1088,6 +1099,10 @@ class Studio {
 			this.problem = say(e);
 			this.jobs = { ...this.jobs, [kind]: { state: 'none' } };
 			return null;
+		} finally {
+			if (held) this.#held--;
+			// What was edited while the service worked is saved now.
+			if (this.#dirty && this.id === id) this.#touch();
 		}
 	}
 

@@ -23,6 +23,18 @@
 	let slate = $state<{ n: number; state: keyof typeof STATE_WORD; text: string } | null>(null);
 	let shown = $state(-1);
 	let caption = $state('');
+	/** The picture on the screen, measured: the subtitle's letters are a share of its height, as in an export. */
+	let screen = $state<HTMLDivElement | null>(null);
+	let letters = $state(12);
+	$effect(() => {
+		if (!screen) return;
+		const el = screen;
+		const measure = () => (letters = Math.max(8, Math.round(el.clientHeight * 0.052 * 10) / 10));
+		const seen = new ResizeObserver(measure);
+		seen.observe(el);
+		measure();
+		return () => seen.disconnect();
+	});
 	let clock = $state<HTMLSpanElement | null>(null);
 
 	const [w, h] = $derived((studio.doc?.size ?? '640x384').split('x').map(Number));
@@ -137,7 +149,7 @@
 
 <div class="viewer" class:large={studio.viewerLarge} role="group" aria-label="Viewer: the film at the playhead">
 	<!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-	<div class="screen" style:aspect-ratio="{w} / {h}" onclick={() => studio.togglePlay()} ondblclick={() => (studio.viewerLarge = !studio.viewerLarge)}>
+	<div class="screen" bind:this={screen} style:aspect-ratio="{w} / {h}" onclick={() => studio.togglePlay()} ondblclick={() => (studio.viewerLarge = !studio.viewerLarge)}>
 		{#each [0, 1] as slot (slot)}
 			<!-- svelte-ignore a11y_media_has_caption -->
 			<video bind:this={videos[slot]} preload="auto" playsinline onseeked={() => !studio.playing && sync(studio.time)}></video>
@@ -151,7 +163,7 @@
 		{:else if studio.plan.parts.length === 0}
 			<div class="slate"><span class="ss">No shots yet</span></div>
 		{/if}
-		{#if caption}<p class="caption" aria-live="off">{caption}</p>{/if}
+		{#if caption}<p class="caption" style:font-size="{letters}px" aria-live="off">{caption}</p>{/if}
 	</div>
 	<div class="bar">
 		<button class="vb" onclick={() => studio.togglePlay()} aria-label={studio.playing ? 'Pause' : 'Play'} title="{studio.playing ? 'Pause' : 'Play'} (Space)"><StudioIcon name={studio.playing ? 'pause' : 'play'} size={11} /></button>
@@ -174,7 +186,7 @@
 		margin: 0;
 		text-align: center;
 		white-space: pre-line;
-		font: 600 5.2cqh/1.3 var(--rb-text);
+		font: 600 12px/1.3 var(--rb-text);
 		color: #fff;
 		text-shadow:
 			0 0 0.12em #000,
@@ -219,8 +231,6 @@
 		margin: 0 auto;
 		background: #000;
 		overflow: hidden;
-		/* The subtitle is sized by the height of the picture. */
-		container-type: size;
 	}
 
 	video {
