@@ -263,6 +263,21 @@ fn config_cache(app: &App) -> std::path::PathBuf {
     app.root.join("state").join("app-config.json")
 }
 
+/// Whether the server's app config (the last copy kept on disk) says this package is only for
+/// signed-in accounts: `"account_required": ["video", "pour-5b"]` lists kinds of model and package ids.
+pub fn account_required(app: &App, package: &rigbrew_core::manifest::Package) -> bool {
+    let Some(cfg) = std::fs::read_to_string(config_cache(app)).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()) else {
+        return false;
+    };
+    let modality = serde_json::to_value(package.modality).ok().and_then(|v| v.as_str().map(str::to_owned)).unwrap_or_default();
+    cfg["account_required"].as_array().is_some_and(|list| list.iter().filter_map(Value::as_str).any(|x| x == package.id || x == modality))
+}
+
+/// Whether somebody is signed in with a real account (not the anonymous one every install gets).
+pub fn signed_in(app: &App) -> bool {
+    app.session.lock().is_ok_and(|s| s.as_ref().is_some_and(|s| !s.anonymous))
+}
+
 /// The server's app config; the last good answer is kept on disk and served (marked stale) offline.
 pub async fn app_config(State(app): State<Shared>, Query(q): Query<std::collections::HashMap<String, String>>) -> Json<Value> {
     // The app's own version decides about updates; fall back to this service's version.

@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { ACCOUNTS, getAccount } from '#account';
 	import { app } from '#lib/state.svelte.ts';
 	import { ux } from '#lib/experience.svelte.ts';
 	import { plain } from '#lib/errors.ts';
@@ -35,6 +36,13 @@
 	const free = $derived(app.system?.storage.free_mb ?? null);
 	const noRoom = $derived(build && free !== null && build.disk_mb > free);
 
+	// Some packages are only for signed-in accounts. Already downloaded ones stay usable.
+	const signedIn = $derived.by(() => {
+		const user = getAccount().user;
+		return Boolean(user && !user.anonymous);
+	});
+	const locked = $derived(Boolean(pkg.account_required) && !signedIn);
+
 	let cancelling = $state(false);
 	const failed = $derived(mine?.state === 'failed' ? plain(mine.error) : null);
 	$effect(() => {
@@ -68,7 +76,16 @@
 			<span class="problem selectable" role="alert" title="{failed.text}{ux.flags.rawErrors || !failed.known ? `\n\n${failed.raw}` : ''}"><Icon name="warn" size={13} /> {ux.flags.rawErrors ? failed.raw : failed.short}</span>
 			{#if failed.fix === 'help-disk'}<button class="btn quiet" onclick={() => guide.openHelp('disk')}>Free up space</button>{/if}
 		{/if}
-		{#if noRoom}
+		{#if locked}
+			{#if ACCOUNTS}
+				<button class="btn" class:primary onclick={() => (app.track('account_gate_clicked', { package: pkg.id, from }), app.go('profile'))} title="{pkg.name} can only be downloaded with a Rigbrew account. Sign in under your profile, then install it.">
+					<Icon name="download" size={14} />
+					Sign in to install
+				</button>
+			{:else}
+				<span class="muted" title="{pkg.name} can only be downloaded with a Rigbrew account, and this build has no accounts. The download from rigbrew.dev does.">Needs an account (official download only)</span>
+			{/if}
+		{:else if noRoom}
 			<span class="muted num">needs {size(build.disk_mb)} of disk, {size(free ?? 0)} free</span>
 		{:else}
 			<button class="btn" class:primary onclick={() => (app.track('install_clicked', { package: pkg.id, variant: id, from, again: mine?.state === 'failed' }), app.install(pkg, id))} disabled={install?.state === 'running'} title="Downloads {size(build.disk_mb)}{free !== null ? `; ${size(free)} free on this disk` : ''}">

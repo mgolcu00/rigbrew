@@ -6,7 +6,7 @@
 //!
 //!   GET    /v1/system                     hardware profile, rescanned on every call
 //!   GET    /v1/packages                   catalogue with a recommendation and what is installed
-//!   POST   /v1/packages/{id}/pull         start a download: {"variant": "q5"} (optional)
+//!   POST   /v1/packages/{id}/pull         start a download: {"variant": "q5"} (optional); 403 when the package needs an account and nobody is signed in
 //!   DELETE /v1/packages/{id}              remove installed files: ?variant=q5 for one variant, all otherwise
 //!   GET    /v1/jobs                       all download jobs of this run
 //!   GET    /v1/jobs/{id}                  download progress
@@ -232,6 +232,7 @@ async fn packages(State(app): State<Shared>) -> Json<Value> {
                 "variants": p.variants.iter().map(|v| json!({"id": v.id, "quality": v.quality, "disk_mb": v.disk_mb(), "accel_mem_mb": v.accel_mem_mb, "metrics": v.metrics})).collect::<Vec<_>>(),
                 "recommendation": recommend(&app.profile, p).verdict,
                 "installed": app.installed(p).iter().map(|v| v.id.clone()).collect::<Vec<_>>(),
+                "account_required": cloud::account_required(&app, p),
             })
         })
         .collect();
@@ -407,6 +408,11 @@ async fn pull(State(app): State<Shared>, Path(id): Path<String>, body: Option<Js
     let Some(variant) = wanted.and_then(|w| package.variants.iter().find(|v| v.id == w).cloned()) else {
         return fail(StatusCode::CONFLICT, format!("{} has no variant that fits this machine", package.name));
     };
+    // Some packages are only for signed-in accounts (the server's app config says which).
+    if cloud::account_required(&app, &package) && !cloud::signed_in(&app) {
+        app.record("package_pull_refused", json!({"package": package.id, "reason": "account"}));
+        return fail(StatusCode::FORBIDDEN, format!("{} can only be downloaded with a Rigbrew account. Sign in, then install it.", package.name));
+    }
     let job_id = start_pull(&app, package, variant);
     Json(json!({"job": job_id})).into_response()
 }

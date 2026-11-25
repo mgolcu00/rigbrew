@@ -50,6 +50,8 @@ export interface Package {
 	variants: Variant[];
 	recommendation: Recommendation;
 	installed: string[];
+	/** Only signed-in accounts may download it (the server's app config decides). */
+	account_required?: boolean;
 }
 
 export interface Job {
