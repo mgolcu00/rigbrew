@@ -5,6 +5,7 @@ import { guide } from './guide.svelte';
 import { app } from './state.svelte';
 import type { Package } from './types';
 import { nameOf } from './words';
+import { looksEnglish, reader } from './voice.svelte';
 
 /** Where the next message goes: to the chat model, or straight to the image or video model. */
 export type Mode = 'chat' | 'image' | 'video';
@@ -124,6 +125,10 @@ export interface Message {
 	modelName?: string;
 	variant?: string;
 	toolCalls?: ToolCall[];
+	/** Assistant only: what each tool call that left no card answered (read aloud, video), by call id. */
+	toolResults?: Record<string, string>;
+	/** Assistant only: said by the read_aloud tool; the text is what was spoken. */
+	spoken?: boolean;
 	image?: ImageJob;
 	video?: VideoJob;
 	/** Offer only: what was asked for, so it can be made once the install is done. */
@@ -180,9 +185,60 @@ const identityPrompt =
 	'If asked who or what you are, or which model you are, say that you are Steep, Rigbrew\'s chat model, built from an open-weight model and running on this computer. ' +
 	'Do not give any other company, product or model name as your identity.';
 
-const toolsPrompt =
-	'You can make images by calling the generate_image tool. Call it only when the user asks for a picture, drawing, photo or illustration; ' +
-	'otherwise answer in text. After the tool returns, the image is already on screen: reply with one short sentence and do not describe or link the image.';
+const speakTool = {
+	type: 'function',
+	function: {
+		name: 'read_aloud',
+		description:
+			'Speak a text aloud to the user with the voice model installed on this machine. Use it when the user asks for audio, sound, speech, a voice, narration, or to hear, say, pronounce or read something out. This is the only tool that makes sound.',
+		parameters: {
+			type: 'object',
+			properties: { text: { type: 'string', description: 'Exactly the words to speak, as plain text without Markdown. English only.' } },
+			required: ['text']
+		}
+	}
+};
+
+const videoTool = {
+	type: 'function',
+	function: {
+		name: 'generate_video',
+		description: 'Make one short video clip from a text description, using the video model installed on this machine. It takes minutes; the clip appears in the chat when it is ready.',
+		parameters: {
+			type: 'object',
+			properties: { prompt: { type: 'string', description: 'What the clip shows: subject, motion, setting, light. In English, one to three sentences.' } },
+			required: ['prompt']
+		}
+	}
+};
+
+type ToolName = 'generate_image' | 'read_aloud' | 'generate_video';
+
+/** What the chat model is told about the tools it has on this turn, and which one this message reads like. */
+function toolsPrompt(names: ToolName[], hint: ToolName | null): string {
+	const lines = ['You have these tools; pick by what the user asks for, and answer in text when none fits.'];
+	if (names.includes('generate_image')) lines.push('generate_image: only for a still picture, drawing, photo, illustration or logo.');
+	if (names.includes('read_aloud')) lines.push('read_aloud: only for sound: audio, speech, a voice, narration, saying or reading something out. Never use generate_image for sound.');
+	if (names.includes('generate_video')) lines.push('generate_video: only for a video, clip or animation. Never use generate_image for a video.');
+	lines.push('After a tool returns, its result is already in front of the user: reply with one short sentence and do not describe or link it.');
+	if (hint && names.includes(hint)) lines.push(`The latest message reads like a request for ${hint === 'read_aloud' ? 'sound' : hint === 'generate_video' ? 'a video' : 'a picture'}: use ${hint}.`);
+	return lines.join(' ');
+}
+
+const asksForSound = (text: string) =>
+	/\b(read\s+(it|this|that|me)?\s*(aloud|out)|say\s+(it|this|that)|speak|voice|audio|sound|pronounce|narrat\w*|text[- ]to[- ]speech|tts)\b/i.test(text) ||
+	/(sesli|seslendir|ses\s+(üret|olarak|ver|yap|oluştur)|sesini|konuş)/i.test(text);
+
+const asksForVideo = (text: string) => /\b(video|clip|animation|animate|movie|footage)\b/i.test(text) || /(klip|animasyon)/i.test(text);
+
+/** Which tool a message plainly asks for, when exactly one kind of thing is named. */
+function plainlyAsksFor(text: string): ToolName | null {
+	const wants: ToolName[] = [];
+	if (asksForSound(text)) wants.push('read_aloud');
+	if (asksForVideo(text)) wants.push('generate_video');
+	if (asksForImage(text) || /(resim|görsel|fotoğraf|çiz)/i.test(text)) wants.push('generate_image');
+	return wants.length === 1 ? wants[0] : null;
+}
 
 /** Rough check for "this is a request for a picture", used only when no image model is installed. */
 const asksForImage = (text: string) =>
@@ -666,9 +722,11 @@ class ChatState {
 	 * generate_image tool call with its result, whether the model asked for it or the person
 	 * used Image mode, so the model always knows what is on screen and how it got there.
 	 */
-	#history(conversation: Conversation, withTools: boolean) {
+	#history(conversation: Conversation, tools: ToolName[]) {
+		const withTools = tools.length > 0;
 		const out: Record<string, unknown>[] = [];
-		out.push({ role: 'system', content: withTools ? `${identityPrompt} ${toolsPrompt}` : identityPrompt });
+		const last = conversation.messages.findLast((m) => m.role === 'user')?.content ?? '';
+		out.push({ role: 'system', content: withTools ? `${identityPrompt} ${toolsPrompt(tools, plainlyAsksFor(last))}` : identityPrompt });
 		const answered = new Set<string>();
 		const result = (m: Message): string => {
 			if (m.role === 'offer') return 'No image model is installed. The user was offered the install.';
@@ -694,7 +752,7 @@ class ChatState {
 				// Each call needs an answer right after it. The card (or offer) that followed holds it.
 				for (const call of m.toolCalls) {
 					const card = conversation.messages.slice(i + 1).find((x) => (x.image?.callId ?? x.offer?.callId) === call.id);
-					out.push({ role: 'tool', tool_call_id: call.id, content: card ? result(card) : 'That tool is not available.' });
+					out.push({ role: 'tool', tool_call_id: call.id, content: card ? result(card) : (m.toolResults?.[call.id] ?? 'That tool is not available.') });
 					answered.add(call.id);
 				}
 			} else if (withTools && m.role === 'image' && m.image && m.image.state !== 'waiting' && !answered.has(m.image.callId)) {
@@ -711,7 +769,12 @@ class ChatState {
 		const pkg = app.chatPackages.find((p) => p.id === this.model);
 		if (!pkg) return;
 		// The model may ask for an image when one can be made here, or at least installed.
-		const withTools = allowTools && Boolean(app.imagePackage ?? app.imageOffer);
+		const tools: ToolName[] = [];
+		if (allowTools) {
+			if (app.imagePackage ?? app.imageOffer) tools.push('generate_image');
+			if (app.voicePackage) tools.push('read_aloud');
+			if (app.videoPackage) tools.push('generate_video');
+		}
 
 		for (let round = 0; round < 3; round++) {
 			conversation.messages.push({
@@ -732,7 +795,7 @@ class ChatState {
 				this.engine = null;
 				this.#switchTip(pkg);
 			}
-			const calls = await this.#stream(pkg, reply, this.#history(conversation, withTools), withTools, signal);
+			const calls = await this.#stream(pkg, reply, this.#history(conversation, tools), tools, signal);
 			if (reply.state === 'done' && reply.content) {
 				const text = reply.content.replace(/[#*_`>|]/g, '').replace(/\s+/g, ' ').trim();
 				this.announce = `${nameOf(pkg, ux.flags)} answered: ${text.length > 600 ? `${text.slice(0, 600)}…` : text}`;
@@ -740,14 +803,54 @@ class ChatState {
 			if (reply.state !== 'done' || calls.length === 0) return;
 
 			reply.toolCalls = calls;
-			let made = false;
+			// Whether the model gets another turn: after a picture, or when a tool could not do its work.
+			let again = false;
+			const results: Record<string, string> = (reply.toolResults = {});
 			for (const call of calls) {
-				if (call.name !== 'generate_image') continue;
-				let args: { prompt?: unknown; size?: unknown } = {};
+				let args: { prompt?: unknown; size?: unknown; text?: unknown } = {};
 				try {
 					args = JSON.parse(call.arguments || '{}');
 				} catch {
-					// Malformed arguments: fall through to the "no prompt" case.
+					// Malformed arguments: fall through to the "nothing asked" case.
+				}
+				app.track('chat_tool_called', { tool: call.name, package: pkg.id });
+				if (call.name === 'read_aloud') {
+					const text = typeof args.text === 'string' ? args.text.trim() : '';
+					const voice = app.voicePackage;
+					if (!text || !voice) {
+						results[call.id] = voice ? 'Nothing to say: the text was empty.' : 'No voice model is installed. Tell the user to add Voice under Models.';
+						again = true;
+						continue;
+					}
+					// The words appear as an answer and are spoken at once; Read aloud under it plays them again.
+					conversation.messages.push({ id: nextId++, role: 'assistant', content: text, state: 'done', at: Date.now(), modelName: pkg.name, spoken: true });
+					const said = conversation.messages[conversation.messages.length - 1];
+					if (!looksEnglish(text)) {
+						// The voice reads English only: the words stay on screen and the model says why they were not spoken.
+						results[call.id] = 'The text is on screen but was not spoken: the voice model reads English only for now. Tell the user that in one short sentence, in their language.';
+						again = true;
+						continue;
+					}
+					results[call.id] = 'Done. The text is on screen and is being spoken to the user.';
+					void reader.toggle(said.id, voice.id, text).then(() => {
+						if (reader.error) app.say(`Could not read it aloud. ${reader.error}`);
+					});
+					continue;
+				}
+				if (call.name === 'generate_video') {
+					const prompt = typeof args.prompt === 'string' ? args.prompt.trim() : '';
+					if (!prompt || !app.videoPackage) {
+						results[call.id] = app.videoPackage ? 'Nothing to make: the description was empty.' : 'No video model is installed. Tell the user to add Video under Models.';
+						again = true;
+						continue;
+					}
+					results[call.id] = 'Started. The clip is being made in the background and appears in the chat when it is ready.';
+					await this.#video(conversation, prompt);
+					continue;
+				}
+				if (call.name !== 'generate_image') {
+					again = true;
+					continue;
 				}
 				const prompt = typeof args.prompt === 'string' ? args.prompt.trim() : '';
 				const size: SizeName = typeof args.size === 'string' && args.size in sizes ? (args.size as SizeName) : 'square';
@@ -758,15 +861,15 @@ class ChatState {
 				}
 				const job = await this.#image(conversation, { prompt, size, via: 'tool', callId: call.id, askedBy: pkg.name }, signal);
 				if (job.state !== 'done') return;
-				made = true;
+				again = true;
 			}
 			// Let the model finish its turn now that the tool has answered.
-			if (!made && !calls.some((c) => c.name !== 'generate_image')) return;
+			if (!again) return;
 		}
 	}
 
 	/** Streams one completion into `reply` and returns the tool calls the model made. */
-	async #stream(pkg: Package, reply: Message, messages: unknown[], withTools: boolean, signal: AbortSignal): Promise<ToolCall[]> {
+	async #stream(pkg: Package, reply: Message, messages: unknown[], tools: ToolName[], signal: AbortSignal): Promise<ToolCall[]> {
 		const calls: ToolCall[] = [];
 		let firstTokenAt = 0;
 		let pieces = 0;
@@ -778,7 +881,7 @@ class ChatState {
 					stream: true,
 					stream_options: { include_usage: true },
 					chat_template_kwargs: { enable_thinking: false },
-					...(withTools ? { tools: [imageTool] } : {})
+					...(tools.length ? { tools: tools.map((t) => (t === 'generate_image' ? imageTool : t === 'read_aloud' ? speakTool : videoTool)) } : {})
 				},
 				signal
 			);
