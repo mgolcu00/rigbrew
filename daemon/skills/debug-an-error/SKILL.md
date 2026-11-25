@@ -15,8 +15,9 @@ work is not the goal.
 2. **Write down what you know**: what was run, what was expected, what happened instead, and
    whether it ever worked. If one of these is missing, ask for it or look for it. Ask one
    question at a time.
-3. **Reproduce it** when you can run commands: run the smallest thing that shows the error. If you
-   cannot run anything, work from the text and say that you could not check.
+3. **Reproduce it** when you can run commands: run the smallest thing that shows the error. For
+   an error on a web page, `start_app` and `look_at_page` show its console errors. If you cannot
+   run anything, work from the text and say that you could not check.
 4. **Look at the place.** With file tools, read the file and line the error names, plus the
    function around it. Without them, ask the person to paste those lines.
 5. **Name up to three possible causes**, most likely first. For each one say what you would see if

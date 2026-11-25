@@ -15,8 +15,8 @@ already writes its tests.
 1. Find the existing tests: `list_files`, then `search` for `test` in file names or for the test
    keyword of the language (`#[test]`, `def test_`, `it(`, `func Test`). Read one whole test file.
    Copy its layout, its imports and its naming.
-2. Find the command that runs the tests (build file or README) and run it once with `run_command`,
-   so you know the suite is green before you add anything.
+2. Run the tests once before you add anything: `check_project`, or the project's own test command
+   with `run_command`. You need to know the suite is green.
 3. Read the code to test. Write down what it promises: for this input, that output.
 4. Pick the cases, in this order, and stop at about six:
    - the normal case, with a plain example;
@@ -25,7 +25,7 @@ already writes its tests.
    - one case for each `if` that changes the result.
 5. Write the tests next to the existing ones with `edit_file`, or in a new file that follows the
    project's naming with `write_file`.
-6. Run the tests. A new test that fails means one of two things: the test is wrong, or you found
+6. Run the tests again with `check_project`. A new test that fails means one of two things: the test is wrong, or you found
    a bug. Read the code again and decide which. Do not change the code under test to make your
    test pass; report the bug instead.
 

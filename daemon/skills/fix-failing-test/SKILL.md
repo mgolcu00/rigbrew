@@ -13,7 +13,8 @@ The goal is one small change that makes the test pass for the right reason.
 
 1. Find how tests are run. Look at the build file (`package.json` scripts, `Cargo.toml`,
    `pyproject.toml`, a `Makefile`) or the README.
-2. Run the tests with `run_command`. If you were told which test fails, run only that one.
+2. Run the tests: `check_project` gives the failures with file and line. If you were told which
+   test fails, run only that one with `run_command`.
 3. Read the end of the output. Write down three things: the name of the failing test, the file and
    line of the failure, and what was expected against what came out.
 4. Read the test. Then read the code it calls, starting at the line the output names.
