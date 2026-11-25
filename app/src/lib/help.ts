@@ -148,9 +148,9 @@ export const articles: Article[] = [
 		id: 'studio',
 		title: 'Studio: a film made of shots',
 		body: [
-			'A film is a list of shots in a folder of yours. Describe each shot, or write what the film is about and let the chat model write the shots.',
-			'The video model makes the shots one after another, with sound, also while you do something else. “Continue the shot before” starts a shot from the last picture of the one before it, so the two join without a cut.',
-			'You can cut seconds from the start or the end of a shot, lay a sound file under the whole film, and export one MP4 file into the film’s folder.'
+			'Say what the film is about and how long it should be, then press “Make the film”. The chat model writes the shots, the video model makes them one after another with sound, and the film is saved as one MP4 file in a folder of yours. It keeps going while you do something else.',
+			'A film is a list of shots. Open it to change any shot, drag the pictures on the timeline to reorder them, or try a shot again and keep the take you like. “Continue the shot before” starts a shot from the last picture of the one before it, so the two join without a cut.',
+			'Between shots you can choose a cut, a dissolve or a fade through black. You can cut seconds from the start or the end of a shot, set how loud each shot is, lay music or a narration under the whole film, and export it larger or smaller.'
 		]
 	},
 	{
