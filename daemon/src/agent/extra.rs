@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use super::files::Folder;
-use super::{outline, plan, undo, Mode, Task};
+use super::{outline, plan, undo, verify, Mode, Task};
 use crate::Shared;
 
 /// Saved with the task and shown by the API next to its other fields.
@@ -43,6 +43,7 @@ pub fn rules(mode: Mode) -> Vec<String> {
         "Before you read a large file, call outline to see what is on which line. Then read only the part you need with read_file, from_line and lines.".to_string(),
     ];
     if mode != Mode::ReadOnly {
+        lines.push("Commands already run inside the folder. Do not use cd or absolute paths in a command.".to_string());
         lines.push("After a change, run the project's tests or build. Never say that something works, passes or is fixed unless a command you ran after your last change showed it. If you could not check, say so.".to_string());
     }
     lines
@@ -52,6 +53,11 @@ pub fn rules(mode: Mode) -> Vec<String> {
 /// when older messages are left out.
 pub fn context(task: &Task) -> String {
     let mut out = String::new();
+    if task.mode != Mode::ReadOnly {
+        if let Some(check) = verify::commands(std::path::Path::new(&task.folder)).first() {
+            out.push_str(&format!("\n\nThe command that checks this project: {check}"));
+        }
+    }
     if let Some(note) = undo::context(task) {
         out.push_str("\n\n");
         out.push_str(note);
@@ -90,5 +96,53 @@ pub async fn call(app: &Shared, id: &str, folder: &Folder, name: &str, args: &Va
             }
         }
         _ => (format!("There is no tool named {name}."), "failed"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::files;
+    use super::*;
+
+    fn task(folder: &std::path::Path, mode: &str) -> Task {
+        serde_json::from_value(json!({
+            "id": "0".repeat(32), "folder": folder, "title": "t", "model": "m", "mode": mode, "web": false, "state": "running",
+            "created_ms": 1, "updated_ms": 1, "steps": [{"kind": "user", "text": "go"}], "pending": null, "error": null,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn the_model_is_reminded_of_what_it_must_not_lose() {
+        let root = files::scratch("extra");
+        std::fs::write(root.join("Cargo.toml"), "[package]\n").unwrap();
+        let mut t = task(&root, "ask");
+        assert_eq!(context(&t), "\n\nThe command that checks this project: cargo test");
+        t.extra.plan = plan::parse(&json!({"steps": [{"text": "Read", "status": "done"}, {"text": "Fix"}]})).unwrap();
+        assert!(context(&t).ends_with("\n\nYour plan so far ([x] done, [>] doing now, [ ] to do):\n[x] Read\n[>] Fix"), "{}", context(&t));
+        // After an undo the next request is told, and only that one.
+        t.extra.undo.push(serde_json::from_value(json!({"request": 1, "kind": "copies", "undone": true, "undone_at": 1})).unwrap());
+        assert!(!context(&t).contains("took back"));
+        t.steps.push(super::super::Step::User { text: "again".into() });
+        assert!(context(&t).contains("The person took back the changes of the last request."));
+        t.steps.push(super::super::Step::User { text: "and again".into() });
+        assert!(!context(&t).contains("took back"));
+        // A plan that is finished goes with the next message; one that is not stays.
+        next_request(&mut t);
+        assert_eq!(t.extra.plan.len(), 2);
+        t.extra.plan = plan::parse(&json!({"steps": [{"text": "Read", "status": "done"}]})).unwrap();
+        next_request(&mut t);
+        assert!(t.extra.plan.is_empty());
+        // Nothing to run in a task that only reads.
+        let reading = task(&root, "read_only");
+        assert_eq!(context(&reading), "");
+        assert!(!rules(Mode::ReadOnly).iter().any(|l| l.contains("Commands") || l.contains("passes")));
+        assert!(rules(Mode::Ask).iter().any(|l| l.contains("Do not use cd")));
+    }
+
+    #[test]
+    fn every_tool_of_the_harness_has_a_definition() {
+        let names: Vec<String> = tool_defs().iter().map(|t| t["function"]["name"].as_str().unwrap().to_string()).collect();
+        assert_eq!(names, TOOLS);
     }
 }

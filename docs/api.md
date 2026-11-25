@@ -120,7 +120,8 @@ After a change to a file went in, the result the model reads ends with the comma
 `python3 -m pytest` or `python3 -m unittest`, `go test ./...`, the `test`, `check` or `build` target of a
 `Makefile`). When the final answer says that something works, passes or is fixed, and no command ended well
 after the last change of that request, the task gets a `note` step under the answer: "Not checked: no test or
-build ran after the last change."
+build ran after the last change." The first of those commands is also named at the end of the system message, and the
+model is told that commands already run inside the folder.
 
 While the model writes, `GET /v1/agent/tasks/{id}` has the text so far in `writing` (the engine streams to the
 service; the text becomes a `model` step when the turn ends, and `writing` is empty again). To follow it, ask with
@@ -131,7 +132,8 @@ service; the text becomes a `model` step when the turn ends, and `writing` is em
 
 Before the first change of each request (a write, an edit or an allowed command) the folder is recorded, and
 `POST .../undo` puts it back. A task lists these in `undo`, oldest first: `{"request", "kind", "undone", ...}`, where
-`request` counts the person's messages from 1. Each call takes back the newest request that was not taken back yet.
+`request` counts the person's messages from 1. Each call takes back the newest request that was not taken back yet
+and has something to take back (outside git, a request in which only commands ran has nothing saved).
 
 - **In a git repository** (`kind: "git"`, the folder has its own `.git` folder) the working tree is kept as a
   commit on the hidden ref `refs/rigbrew/<task>/<request>`, built with a temporary index file. The index, the
