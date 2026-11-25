@@ -244,14 +244,27 @@ async fn save_video(app: tauri::AppHandle, name: String, data: String) -> Result
     .map_err(|e| e.to_string())?
 }
 
-/// Asks where to save a text file (the account export) and writes it there.
-/// Returns the chosen path, or `None` when the dialog was cancelled.
+/// Asks where to save a text file (the account export, a chat artifact) and writes it there.
+/// The dialog offers the kind of file the name ends in. Returns the chosen path, or `None` when
+/// the dialog was cancelled.
 #[tauri::command]
 async fn save_text(app: tauri::AppHandle, name: String, text: String) -> Result<Option<String>, String> {
     use tauri_plugin_dialog::DialogExt;
 
     tauri::async_runtime::spawn_blocking(move || {
-        let Some(target) = app.dialog().file().set_title("Save").set_file_name(&name).add_filter("JSON", &["json"]).blocking_save_file()
+        let ending = std::path::Path::new(&name)
+            .extension()
+            .and_then(|e| e.to_str())
+            .filter(|e| !e.is_empty() && e.len() <= 8 && e.bytes().all(|b| b.is_ascii_alphanumeric()))
+            .unwrap_or("txt")
+            .to_ascii_lowercase();
+        let Some(target) = app
+            .dialog()
+            .file()
+            .set_title("Save")
+            .set_file_name(&name)
+            .add_filter(ending.to_ascii_uppercase(), &[ending.as_str()])
+            .blocking_save_file()
         else {
             return Ok(None);
         };

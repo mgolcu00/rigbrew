@@ -7,6 +7,7 @@
 // service, this module forgets the connection, tells the app (`onLink`), and keeps asking for
 // a new one until the service answers again.
 
+import type { Agent } from './agents';
 import type { Activity, AppConfig, Consent, Job, Package, QueuedEvent, Session, System, Usage } from './types';
 
 export const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
@@ -377,6 +378,41 @@ export const saveChat = (id: string, title: string, data: unknown) => json<ChatR
 export const deleteChat = (id: string) => optional('DELETE', `/v1/chats/${enc(id)}`);
 export const deleteAllChats = () => optional('DELETE', '/v1/chats');
 
+// --- agents and artifacts ------------------------------------------------------------------------
+
+/** The agents the person made, or null when the service cannot keep them (an older service). */
+export const agents = async () => (await optional<{ agents: Agent[] }>('GET', '/v1/agents'))?.agents ?? null;
+/** Saves an agent (creates or replaces it) and returns it as stored. */
+export const saveAgent = (agent: Agent) =>
+	json<Agent>('PUT', `/v1/agents/${enc(agent.id)}`, { name: agent.name, instruction: agent.instruction, tools: agent.tools, starter: agent.starter });
+export const deleteAgent = (id: string) => optional('DELETE', `/v1/agents/${enc(id)}`);
+
+const frames = new Map<string, boolean>();
+
+/**
+ * The address of the page a chat artifact is shown in: an empty page from the service that
+ * allows inline styles and scripts and nothing from anywhere else. The app's own window
+ * forbids inline scripts, and a frame made from text inherits that, so a page the model wrote
+ * goes into this one. Null when the service does not have it (an older service).
+ */
+export async function artifactFrame(): Promise<string | null> {
+	let base: string;
+	try {
+		base = (await (connection ??= connect())).base;
+	} catch {
+		return null;
+	}
+	const url = `${base}/v1/artifacts/frame`;
+	if (!frames.has(base)) {
+		try {
+			frames.set(base, (await fetch(url, { cache: 'no-store' })).ok);
+		} catch {
+			return null;
+		}
+	}
+	return frames.get(base) ? url : null;
+}
+
 /** What happened lately, in words, for the profile. Null when the service is too old. */
 export const recentActivity = async (limit = 50) =>
 	(await optional<{ items: { ts_ms: number; kind: string; title: string; detail: string; package: string | null }[] }>('GET', `/v1/activity/recent?limit=${limit}`))?.items ?? null;
@@ -407,14 +443,14 @@ export async function saveImage(name: string, base64: string): Promise<'saved' |
 	return 'downloaded';
 }
 
-/** Saves a JSON text the person asked to keep (the account export), the same way. */
-export async function saveText(name: string, text: string): Promise<'saved' | 'downloaded' | 'cancelled'> {
+/** Saves a text the person asked to keep (the account export, an artifact), the same way. */
+export async function saveText(name: string, text: string, type = 'application/json'): Promise<'saved' | 'downloaded' | 'cancelled'> {
 	if (isTauri) {
 		const { invoke } = await import('@tauri-apps/api/core');
 		const path = await invoke<string | null>('save_text', { name, text });
 		return path ? 'saved' : 'cancelled';
 	}
-	const url = URL.createObjectURL(new Blob([text], { type: 'application/json' }));
+	const url = URL.createObjectURL(new Blob([text], { type }));
 	download(name, url);
 	setTimeout(() => URL.revokeObjectURL(url), 10_000);
 	return 'downloaded';

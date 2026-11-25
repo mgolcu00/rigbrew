@@ -1,9 +1,11 @@
 <script lang="ts">
 	import { getAccount } from '#account';
 	import { app, type Screen } from '#lib/state.svelte.ts';
+	import { agents } from '#lib/agents.svelte.ts';
 	import { chat } from '#lib/chat.svelte.ts';
 	import { guide } from '#lib/guide.svelte.ts';
 	import { mod } from '#lib/words.ts';
+	import AgentsSheet from './AgentsSheet.svelte';
 	import Icon from './Icon.svelte';
 	import Mark from './Mark.svelte';
 
@@ -36,6 +38,7 @@
 		{#each places as p (p.screen)}
 			<button class="row" class:current={app.screen === p.screen} aria-current={app.screen === p.screen ? 'page' : undefined} onclick={() => app.go(p.screen)}><Icon name={p.icon} size={16} /><span>{p.name}</span></button>
 		{/each}
+		<button class="row" class:current={agents.sheet !== null} onclick={() => agents.open('sidebar')} title="Agents: saved ways to use the chat model"><Icon name="person" size={16} /><span>Agents</span></button>
 	</nav>
 
 	<div class="chats scroll">
@@ -64,6 +67,8 @@
 		<button class="ico" onclick={() => app.openSettings()} title="Settings ({mod},)" aria-label="Settings"><Icon name="gear" size={16} /></button>
 	</div>
 </aside>
+
+<AgentsSheet />
 
 <style>
 	.side {
