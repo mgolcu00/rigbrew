@@ -315,6 +315,10 @@ fn system_prompt(folder: &Folder, mode: Mode, web: bool, skills: &[skills::Skill
                 "To change a file use edit_file with the exact text to replace. Use write_file only for a new file or a full rewrite."
                     .into(),
             );
+            lines.push(
+                "One write_file call holds at most about 80 lines. For a longer file: write_file with the first part, then append_file for each next part of about 80 lines, until it is complete."
+                    .into(),
+            );
             lines.push("The person sees each change and command and may say no. After a no, do not try the same thing again.".into());
         }
     }
@@ -845,11 +849,7 @@ async fn work(app: &Shared, id: &str) -> Ended {
             let signature = format!("{name} {raw}");
             repeated = if repeated.0 == signature { (signature, repeated.1 + 1) } else { (signature, 1) };
             let (result, status) = if parsed.is_none() {
-                let why = if cut_off {
-                    "The call was cut off because it was too long. Do it in smaller pieces: edit_file for a change, or a shorter file."
-                } else {
-                    "The arguments were not valid JSON. Call the tool again with a JSON object."
-                };
+                let why = if cut_off { CUT_OFF_HINT } else { "The arguments were not valid JSON. Call the tool again with a JSON object." };
                 (why.to_string(), "failed")
             } else if repeated.1 >= 3 {
                 (
