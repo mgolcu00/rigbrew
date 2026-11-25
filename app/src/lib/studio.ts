@@ -61,20 +61,26 @@ export function remadeByMove(shots: readonly StudioShot[], from: number, to: num
 	return out;
 }
 
-/** Seconds a dissolve lasts, and a fade through black from the last picture to the next first one. */
+/** Seconds a dissolve lasts, and a fade through black from the last picture to the next first one, unless the shot says otherwise. */
 export const JOIN_SECONDS = 0.5;
+export const FPS = 24;
 
 /** One clip in the film as it plays and as it is exported. */
 export interface FilmPart {
 	shot: string;
 	/** Place of the shot in the film's list. */
 	index: number;
+	/** Whether the shot has a clip. A shot without one is only in a plan of every shot. */
+	made: boolean;
 	/** Seconds into the clip where it starts and stops (its trims). */
 	from: number;
 	to: number;
 	/** Seconds into the film where it starts. A dissolve starts before the part before it has ended. */
 	start: number;
 	length: number;
+	/** How it joins the part before it, and the seconds that join was asked to last. */
+	join: 'cut' | 'dissolve' | 'black';
+	joinSeconds: number;
 	/** Seconds this part and the one before it are both on screen. */
 	overlap: number;
 	/** Seconds it comes up from black at its start, and goes down to black at its end. */
@@ -84,26 +90,50 @@ export interface FilmPart {
 	volume: number;
 }
 
+/** The seconds a join into `shot` lasts, as the service holds them: a quarter of a second to two. */
+export const joinSeconds = (shot: StudioShot) => Math.min(2, Math.max(0.25, shot.join_seconds ?? JOIN_SECONDS));
+
 /**
  * The film out of its made shots: which part of each clip plays and when. The same arithmetic
- * as the export, so the player shows what the file will hold.
+ * as the export, counted in frames, so the player shows what the file will hold. With `all`,
+ * the shots that have no clip yet are in it too, at the length that was asked for: the film as
+ * it stands on the timeline.
  */
-export function filmPlan(shots: readonly StudioShot[]): { parts: FilmPart[]; total: number } {
+export function filmPlan(shots: readonly StudioShot[], all = false): { parts: FilmPart[]; total: number } {
 	const parts: FilmPart[] = [];
 	shots.forEach((shot, index) => {
-		if (!hasClip(shot) || !shot.id) return;
+		const made = hasClip(shot) && Boolean(shot.id);
+		if (!made && !all) return;
 		const whole = shotSeconds(shot);
-		const from = Math.min(Math.max(0, shot.trim_start ?? 0), Math.max(0, whole - 0.1));
-		const to = Math.max(from + 0.1, whole - Math.max(0, shot.trim_end ?? 0));
-		const length = to - from;
+		const from = made ? Math.min(Math.max(0, shot.trim_start ?? 0), Math.max(0, whole - 0.1)) : 0;
+		const to = made ? Math.max(from + 0.1, whole - Math.max(0, shot.trim_end ?? 0)) : whole;
+		const frames = Math.max(1, Math.round((to - from) * FPS));
+		const length = frames / FPS;
 		const before = parts[parts.length - 1];
+		const beforeFrames = before ? Math.round(before.length * FPS) : 0;
 		// A shot that continues the one before it joins it with nothing in between.
-		const join = !before || shot.continues ? 'cut' : (shot.join ?? 'cut');
-		const overlap = before && join === 'dissolve' ? Math.min(JOIN_SECONDS, before.length / 2, length / 2) : 0;
-		const fadeIn = before && join === 'black' ? Math.min(JOIN_SECONDS / 2, length / 2) : 0;
-		if (before && join === 'black') before.fadeOut = Math.min(JOIN_SECONDS / 2, before.length / 2);
+		const join = !before || shot.continues ? 'cut' : shot.join || 'cut';
+		const asked = Math.round(joinSeconds(shot) * FPS);
+		const overlap = join === 'dissolve' ? Math.min(asked, Math.floor(beforeFrames / 2), Math.floor(frames / 2)) / FPS : 0;
+		const dip = Math.floor(asked / 2);
+		const fadeIn = join === 'black' ? Math.min(dip, Math.floor(frames / 2)) / FPS : 0;
+		if (before && join === 'black') before.fadeOut = Math.min(dip, Math.floor(beforeFrames / 2)) / FPS;
 		const volume = shot.mute ? 0 : Math.min(1.5, Math.max(0, shot.volume ?? 1));
-		parts.push({ shot: shot.id, index, from, to, start: before ? before.start + before.length - overlap : 0, length, overlap, fadeIn, fadeOut: 0, volume });
+		parts.push({
+			shot: shot.id,
+			index,
+			made,
+			from,
+			to: from + length,
+			start: before ? before.start + before.length - overlap : 0,
+			length,
+			join,
+			joinSeconds: joinSeconds(shot),
+			overlap,
+			fadeIn,
+			fadeOut: 0,
+			volume
+		});
 	});
 	const last = parts[parts.length - 1];
 	return { parts, total: last ? last.start + last.length : 0 };
@@ -116,4 +146,18 @@ export function partAt(parts: readonly FilmPart[], seconds: number): { part: num
 	for (let i = 0; i < parts.length; i++) if (parts[i].start <= seconds) part = i;
 	const p = parts[part];
 	return { part, at: Math.min(p.to, Math.max(p.from, p.from + seconds - p.start)) };
+}
+
+/**
+ * How much of a part is seen at a moment of the film, 0 to 1: its fades through black and the
+ * film's own fade at its start and end (`edge` seconds each, 0 for none).
+ */
+export function partLight(p: FilmPart, film: number, total: number, edgeIn = 0, edgeOut = 0) {
+	const at = film - p.start;
+	let level = 1;
+	if (p.fadeIn > 0) level = Math.min(level, at / p.fadeIn);
+	if (p.fadeOut > 0) level = Math.min(level, (p.length - at) / p.fadeOut);
+	if (edgeIn > 0) level = Math.min(level, film / edgeIn);
+	if (edgeOut > 0) level = Math.min(level, (total - film) / edgeOut);
+	return Math.max(0, Math.min(1, level));
 }
