@@ -87,7 +87,7 @@ status `running`, `waiting`, `done`, `failed`, `denied` or `stopped`. `pending` 
 | `auto_edits` | Changes to files inside the folder apply at once. Commands still wait. |
 
 `"always": true` on a command allows that exact command line for the rest of the task; on a file change it turns
-the task to `auto_edits`. A call the person said no to is not asked again until their next message.
+the task to `auto_edits`. A call the person said no to is not asked again until their next message, and after two refusals of one tool that tool is not asked for again until then.
 
 The tools: `list_files`, `read_file`, `search`, `edit_file`, `write_file`, `run_command`, `use_skill`, `finish`,
 and `web_search` and `fetch_url` when the task was started with `"web": true`.

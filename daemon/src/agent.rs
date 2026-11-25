@@ -482,8 +482,15 @@ const KNOWN_TOOLS: &[&str] =
     &["list_files", "read_file", "search", "edit_file", "write_file", "run_command", "web_search", "fetch_url", "use_skill", "finish"];
 
 const DENIED: &str = "The person did not allow this. Do not try it again. Go on without it, or say what you could not do.";
+const DENIED_TWICE: &str =
+    "The person said no to this kind of step twice. It was not asked again. Finish without it and say what you could not do.";
 const DENIED_BEFORE: &str =
     "The person already said no to exactly this. It was not asked again. Go on without it and say what you could not do.";
+
+/// Whether the person already said no twice to this tool since their last message.
+fn refused_twice(denied: &[String], tool: &str) -> bool {
+    denied.iter().filter(|d| d.split(' ').next() == Some(tool)).count() >= 2
+}
 
 /// Waits for the person's answer to one tool call.
 async fn ask(app: &Shared, id: &str, pending: Pending, signature: &str) -> Decision {
@@ -537,6 +544,11 @@ async fn call_tool(app: &Shared, id: &str, folder: &Folder, call: &str, name: &s
     let signature = format!("{name} {args}");
     if task.denied.contains(&signature) {
         return (DENIED_BEFORE.into(), "denied");
+    }
+    // Two refusals of the same kind of step: a small model keeps trying variations, and the
+    // person should not have to say no a third time.
+    if refused_twice(&task.denied, name) {
+        return (DENIED_TWICE.into(), "denied");
     }
     match name {
         "list_files" => {
@@ -1165,6 +1177,18 @@ mod tests {
         assert_eq!(again.tasks.lock().unwrap().len(), 2);
         again.remove(&"b".repeat(32));
         assert_eq!(Agents::load(&root).tasks.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn two_refusals_of_a_tool_end_the_asking() {
+        let mut denied = vec![format!("run_command {}", json!({"command": "make"}))];
+        assert!(!refused_twice(&denied, "run_command"));
+        denied.push(format!("edit_file {}", json!({"path": "a"})));
+        assert!(!refused_twice(&denied, "run_command"));
+        denied.push(format!("run_command {}", json!({"command": "make test"})));
+        assert!(refused_twice(&denied, "run_command"));
+        assert!(!refused_twice(&denied, "edit_file"));
+        assert!(!refused_twice(&denied, "run"));
     }
 
     #[test]
