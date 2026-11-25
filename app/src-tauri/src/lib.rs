@@ -6,7 +6,8 @@
 //! HTTP on 127.0.0.1, except two things that need the system:
 //!
 //! - saving a file the person asked to keep (`save_image`, `save_text`): a save dialog and a write;
-//! - choosing the folder a Code task works in (`pick_folder`): the system's folder dialog;
+//! - choosing the folder a Code task works in (`pick_folder`), or a video or sound file for a film
+//!   (`pick_file`): the system's own dialogs;
 //! - signing in through the system browser: `account.rs`, only present in official builds (feature `account`).
 
 #[cfg(feature = "account")]
@@ -294,6 +295,29 @@ async fn pick_folder(app: tauri::AppHandle, title: String) -> Result<Option<Stri
     .map_err(|e| e.to_string())?
 }
 
+/// Asks for one file with the system's dialog: a video to bring into a film, or a sound file
+/// for its library. Returns its path, or `None` when the dialog was cancelled.
+#[tauri::command]
+async fn pick_file(app: tauri::AppHandle, title: String, kind: String) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let dialog = app.dialog().file().set_title(&title);
+        let dialog = match kind.as_str() {
+            "video" => dialog.add_filter("Video", &["mp4", "mov", "m4v", "mkv", "webm", "avi"]),
+            "sound" => dialog.add_filter("Sound", &["wav", "mp3", "m4a", "aac", "flac", "ogg", "opus", "aif", "aiff"]),
+            _ => dialog,
+        };
+        let Some(target) = dialog.blocking_pick_file() else {
+            return Ok(None);
+        };
+        let path = target.into_path().map_err(|e| e.to_string())?;
+        Ok(Some(path.display().to_string()))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     #[cfg(unix)]
@@ -312,12 +336,13 @@ pub fn run() {
         save_video,
         save_text,
         pick_folder,
+        pick_file,
         account::signin_listen,
         account::signin_wait,
         account::signin_cancel
     ]);
     #[cfg(not(feature = "account"))]
-    let builder = builder.invoke_handler(tauri::generate_handler![daemon_info, save_image, save_video, save_text, pick_folder]);
+    let builder = builder.invoke_handler(tauri::generate_handler![daemon_info, save_image, save_video, save_text, pick_folder, pick_file]);
     builder
         .setup(|app| {
             // Start the service while the window is still loading.

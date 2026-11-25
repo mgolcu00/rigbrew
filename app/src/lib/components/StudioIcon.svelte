@@ -36,7 +36,10 @@
 		spark: 'M8 2.5v3M8 10.5v3M2.5 8h3M10.5 8h3M4.4 4.4l1.6 1.6M10 10l1.6 1.6M4.4 11.6 6 10M10 6l1.6-1.6',
 		split: 'M8 2.5v11M5.5 5.5 3 8l2.5 2.5M10.5 5.5 13 8l-2.5 2.5',
 		dup: 'M3 5.5h7v7H3zM6 3.5h7v7',
-		back: 'M10 4 6 8l4 4'
+		back: 'M10 4 6 8l4 4',
+		cast: 'M8 8.2a2.6 2.6 0 1 0 0-5.2 2.6 2.6 0 0 0 0 5.2zM3 13.2c.5-2.4 2.5-3.6 5-3.6s4.5 1.2 5 3.6',
+		speech: 'M2.8 3.5h10.4v6.6H7.6l-2.9 2.6v-2.6H2.8zM5.3 6.8h5.4',
+		bring: 'M8 2.5v7M5.2 6.8 8 9.6l2.8-2.8M3 12.8h10'
 	} as const;
 	export type StudioIconName = keyof typeof filled | keyof typeof drawn;
 </script>

@@ -1,114 +1,31 @@
 <script lang="ts">
 	import { onDestroy, onMount, untrack } from 'svelte';
-	import * as api from '#lib/api.ts';
-	import type { StudioView } from '#lib/api.ts';
-	import { videoLengthsOf, videoSizesOf, type SizeName } from '#lib/chat.svelte.ts';
-	import { codeOf, plain } from '#lib/errors.ts';
+	import { codeOf } from '#lib/errors.ts';
 	import { bytes as bytesOf } from '#lib/format.ts';
 	import { guide } from '#lib/guide.svelte.ts';
 	import { app } from '#lib/state.svelte.ts';
 	import { fileName } from '#lib/studio-look.ts';
 	import { FILM, studio } from '#lib/studio.svelte.ts';
 	import { shortTime } from '#lib/studio-time.ts';
-	import { filmWork, roughly } from '#lib/studio.ts';
 	import { isMac, mod } from '#lib/words.ts';
+	import StudioCast from '#lib/components/StudioCast.svelte';
 	import StudioControlBar from '#lib/components/StudioControlBar.svelte';
 	import StudioEditor from '#lib/components/StudioEditor.svelte';
 	import StudioIcon from '#lib/components/StudioIcon.svelte';
 	import StudioInspector from '#lib/components/StudioInspector.svelte';
 	import StudioLibrary from '#lib/components/StudioLibrary.svelte';
 	import StudioMixer from '#lib/components/StudioMixer.svelte';
+	import StudioNeeds from '#lib/components/StudioNeeds.svelte';
+	import StudioStart from '#lib/components/StudioStart.svelte';
 	import StudioTracks from '#lib/components/StudioTracks.svelte';
 	import StudioViewer from '#lib/components/StudioViewer.svelte';
 
 	// Studio: a workstation for films made of shots. A control bar on top; the Library on the
-	// left; the tracks in the middle with the Mixer and the Editor under them; the viewer and the
-	// Inspector on the right. Before a film is open, one sentence and a length make one.
+	// left; the tracks in the middle with the Mixer, the Editor and the Cast under them; the viewer
+	// and the Inspector on the right. Before a film is open, the start screen (StudioStart).
 
 	const video = $derived(app.videoPackage);
-	const lengths = $derived(videoLengthsOf(video));
-	const shapes = $derived(videoSizesOf(video));
-	const say = (e: unknown) => `${plain(e).text} ${codeOf(e)}`;
 	const tilde = (path: string) => path.replace(/^\/Users\/[^/]+/, '~');
-
-	// --- one sentence to a finished film ---------------------------------------------------------
-
-	const filmLengths = [
-		{ seconds: 15, label: '15 s' },
-		{ seconds: 30, label: '30 s' },
-		{ seconds: 60, label: '1 min' },
-		{ seconds: 120, label: '2 min' },
-		{ seconds: 300, label: '5 min' }
-	] as const;
-	let about = $state('');
-	let aboutSeconds = $state<number>(30);
-	let aboutShape = $state<SizeName>('landscape');
-	let aboutFolder = $state('');
-	let askFolder = $state(false);
-	let folderText = $state('');
-	/** What the one-sentence film is doing: '' when idle. */
-	let quick = $state<'' | 'folder' | 'writing' | 'starting'>('');
-	/** The shot length closest to five seconds. */
-	const five = $derived(lengths.reduce((best, l) => (Math.abs(l.frames - 121) < Math.abs(best.frames - 121) ? l : best), lengths[0]).frames);
-	const quickShots = $derived(Math.max(1, Math.round(aboutSeconds / (five / 24))));
-	const quickWork = $derived(studio.pace ? filmWork(quickShots, five, studio.pace, studio.carries) : 0);
-
-	/** A name for the film out of its first words. */
-	function titleOf(text: string) {
-		const words = text
-			.replace(/[^\p{L}\p{N}\s'-]/gu, ' ')
-			.split(/\s+/)
-			.filter(Boolean)
-			.slice(0, 6)
-			.join(' ')
-			.slice(0, 48)
-			.trim();
-		return words ? words[0].toUpperCase() + words.slice(1) : 'Film';
-	}
-
-	async function changeFolder() {
-		const folder = await api.pickFolder('Choose a folder for the film');
-		if (folder) aboutFolder = folder;
-		else if (!api.isTauri) askFolder = true;
-	}
-
-	async function makeFilm() {
-		const text = about.trim();
-		if (!text || quick) return;
-		studio.problem = '';
-		let opened: StudioView | null = null;
-		try {
-			quick = 'folder';
-			opened = await api.studioOpen(aboutFolder.trim(), titleOf(text));
-			const id = opened.project.id;
-			// A folder that already holds a film is opened as it is.
-			if (opened.project.shots.length > 0) return studio.adopt(opened);
-			quick = 'writing';
-			const shots = await api.studioStoryboard(id, text, quickShots);
-			quick = 'starting';
-			const carries = Boolean(opened.can_continue);
-			await api.studioSave(id, {
-				size: `${shapes[aboutShape].width}x${shapes[aboutShape].height}`,
-				auto_export: true,
-				shots: shots.map((s, i) => ({ prompt: s.prompt, frames: five, continues: carries && i > 0 && Boolean(s.continues) }))
-			});
-			studio.adopt(video ? await api.studioRender(id) : await api.studioRead(id));
-			app.track('studio_quick_film', { seconds: aboutSeconds, shots: shots.length, shape: aboutShape, own_folder: Boolean(aboutFolder.trim()) });
-			about = '';
-		} catch (e) {
-			// The folder is there: the film is opened, and the idea can be tried again from its Inspector.
-			if (opened) studio.adopt(opened);
-			studio.problem = say(e);
-		} finally {
-			quick = '';
-			studio.refresh();
-		}
-	}
-
-	async function newEmpty() {
-		const folder = (await api.pickFolder('Choose a folder for the film')) ?? folderText.trim();
-		if (folder) await studio.openFolder(folder);
-	}
 
 	// --- the workstation ----------------------------------------------------------------------------
 
@@ -116,6 +33,15 @@
 	let box = $state({ x: 0, y: 0, w: 0, h: 0 });
 	const layout = $derived(studio.layout);
 	const exported = $derived(studio.view?.export ?? null);
+	/** What the service is doing to the film besides making shots, in a few words. */
+	const working = $derived.by(() => {
+		const count = (job: { done?: number; of?: number }) => (job.of ? ` ${Math.min(job.of, (job.done ?? 0) + 1)} of ${job.of}` : '');
+		const { import: bring, dub, listen } = studio.jobs;
+		if (bring?.state === 'working') return bring.stage === 'cutting' ? `Cutting the video into shots:${count(bring)}` : 'Reading the video…';
+		if (dub?.state === 'working') return dub.stage === 'translating' ? `Translating into ${dub.language}…` : `Reading the lines aloud:${count(dub)}`;
+		if (listen?.state === 'working') return `Listening to the clips:${count(listen)}`;
+		return '';
+	});
 	const unmade = $derived(studio.plan.parts.length - studio.exportPlan.parts.length);
 
 	// Pictures, waveforms and sound files are fetched as the film asks for them.
@@ -181,6 +107,7 @@
 			['I', 'Inspector'],
 			['X', 'Mixer'],
 			['E', 'Editor'],
+			['K', 'Cast'],
 			['V', 'Viewer large or docked'],
 			['?', 'This list']
 		]
@@ -242,6 +169,7 @@
 		else if (key === 'y') studio.set('library', !layout.library);
 		else if (key === 'x') studio.bottom('mixer');
 		else if (key === 'e') studio.bottom('editor');
+		else if (key === 'k') studio.bottom('cast');
 		else if (key === 'v') studio.viewerLarge = !studio.viewerLarge;
 		else used = false;
 		if (used) {
@@ -288,83 +216,10 @@
 
 <section class="daw" bind:this={root} aria-label="Studio" style:--dx="{box.x}px" style:--dy="{box.y}px" style:--dw="{box.w}px" style:--dh="{box.h}px">
 	{#if !studio.doc}
-		<div class="start st-scroll">
-			<div class="column">
-				<header class="hello">
-					<span class="mark"><StudioIcon name="film" size={18} /></span>
-					<h1>Make a film</h1>
-					<p class="lede">Say what the film is about. The chat model writes the shots, the video model makes them one after another with sound, and the film is saved as one MP4 file. Then every shot, cut and sound is yours to change.</p>
-				</header>
-				<div class="quick">
-					<textarea class="st-ta idea" bind:value={about} rows="3" placeholder="What is the film about? For example: a red fox finds a paper boat in a snowy forest and follows it down a stream" aria-label="What is the film about?" disabled={quick !== ''}></textarea>
-					<div class="st-row">
-						<span class="st-lab">Length</span>
-						<span class="st-seg" role="radiogroup" aria-label="Length of the film">
-							{#each filmLengths as l (l.seconds)}
-								<button type="button" role="radio" aria-checked={aboutSeconds === l.seconds} onclick={() => (aboutSeconds = l.seconds)} disabled={quick !== ''}>{l.label}</button>
-							{/each}
-						</span>
-						<span class="st-lab right">Shape</span>
-						<span class="st-seg" role="radiogroup" aria-label="Shape of the film">
-							{#each Object.entries(shapes) as [name, s] (name)}
-								<button type="button" role="radio" aria-checked={aboutShape === name} onclick={() => (aboutShape = name as SizeName)} disabled={quick !== ''} title={s.label} aria-label={s.label}><span class="shape" style:aspect-ratio="{s.width} / {s.height}"></span></button>
-							{/each}
-						</span>
-					</div>
-					<div class="st-row">
-						<button class="st-btn primary large" onclick={makeFilm} disabled={!about.trim() || quick !== '' || app.chatPackages.length === 0}>
-							{quick === 'writing' ? 'Writing the shots…' : quick ? 'Starting…' : 'Make the film'}
-						</button>
-						{#if quick === 'writing'}
-							<span class="st-note" role="status">The chat model is writing {quickShots} {quickShots === 1 ? 'shot' : 'shots'}. This can take a minute or two.</span>
-						{:else}
-							<span class="st-note">
-								{quickShots} {quickShots === 1 ? 'shot' : 'shots'} of {Math.round(five / 24)} s.
-								{#if video && quickWork > 0}About {roughly(quickWork).replace('about ', '')} to make on this machine{studio.pace?.measured ? '' : ', as a first guess'}.{/if}
-							</span>
-						{/if}
-					</div>
-					<p class="st-note">
-						{#if aboutFolder.trim()}
-							Saved in <span class="selectable">{tilde(aboutFolder.trim())}</span>.
-							<button class="link" onclick={() => ((aboutFolder = ''), (askFolder = false))} disabled={quick !== ''}>Use the usual folder</button>
-						{:else}
-							Saved in a new folder in <span class="selectable">{studio.home ? tilde(studio.home) : 'Movies/Rigbrew'}</span>.
-							<button class="link" onclick={changeFolder} disabled={quick !== ''}>Change folder</button>
-						{/if}
-					</p>
-					{#if askFolder}<input class="st-in wide" bind:value={aboutFolder} placeholder="/full/path/to/a/folder" aria-label="Folder for the film" />{/if}
-					{#if app.chatPackages.length === 0}<p class="st-note">Writing the shots needs a chat model. Add one under <button class="link" onclick={() => app.go('models')}>Models</button>.</p>{/if}
-					{#if !video}<p class="st-note">No video model is installed yet. The shots are written now and made once you add Video under <button class="link" onclick={() => app.go('models')}>Models</button>.</p>{/if}
-				</div>
-				{#if studio.problem}<p class="st-problem selectable" role="alert">{studio.problem}</p>{/if}
-				<div class="st-row other">
-					<button class="st-btn" onclick={newEmpty}><StudioIcon name="plus" size={12} /> Start with an empty film</button>
-					<span class="st-note">to write every shot yourself, or to open a film folder.</span>
-				</div>
-				{#if !api.isTauri}
-					<input class="st-in wide" bind:value={folderText} placeholder="/full/path/to/a/folder" aria-label="Folder of an empty or existing film" onkeydown={(e) => e.key === 'Enter' && newEmpty()} />
-				{/if}
-				{#if studio.films.length > 0}
-					<h2 class="st-h films-h">Your films</h2>
-					<ul class="films">
-						{#each studio.films as f (f.id)}
-							<li>
-								<button class="film" onclick={() => studio.open(f.id)} disabled={f.missing}>
-									<StudioIcon name="film" size={14} />
-									<span class="fname">{f.name || 'Film'}</span>
-									<span class="fpath selectable">{tilde(f.folder)}</span>
-									<span class="fmeta">{f.missing ? 'The folder is gone' : `${f.made ?? 0} of ${f.shots ?? 0} made`}</span>
-								</button>
-							</li>
-						{/each}
-					</ul>
-				{/if}
-				{#if video?.credit}<p class="st-note credit">{video.credit}</p>{/if}
-			</div>
-		</div>
+		<StudioStart />
 	{:else}
 		<StudioControlBar />
+		{#if !studio.canMake}<StudioNeeds band chat={false} />{/if}
 		{#if studio.question}
 			{@const q = studio.question}
 			<div class="ask" role="alertdialog" aria-label="A question before going on">
@@ -390,11 +245,12 @@
 						<div class="st-tabs" role="tablist" aria-label="Bottom panel">
 							<button role="tab" aria-selected={layout.tab === 'mixer'} onclick={() => studio.set('tab', 'mixer')}>Mixer</button>
 							<button role="tab" aria-selected={layout.tab === 'editor'} onclick={() => studio.set('tab', 'editor')}>Editor</button>
+							<button role="tab" aria-selected={layout.tab === 'cast'} onclick={() => studio.set('tab', 'cast')}>Cast</button>
 							<span class="grow"></span>
 							<button class="closer" onclick={() => studio.set('bottom', false)} aria-label="Close the panel" title="Close"><StudioIcon name="close" size={10} /></button>
 						</div>
 						<div class="panel">
-							{#if layout.tab === 'mixer'}<StudioMixer />{:else}<StudioEditor />{/if}
+							{#if layout.tab === 'mixer'}<StudioMixer />{:else if layout.tab === 'cast'}<StudioCast />{:else}<StudioEditor />{/if}
 						</div>
 					</div>
 				{/if}
@@ -418,6 +274,8 @@
 				<span class="st-problem selectable" role="alert">The film could not be exported. Try again. {codeOf(exported.error ?? '')}</span>
 			{:else if studio.silent.length > 0}
 				<span class="st-problem selectable">{studio.silent.join(', ')} cannot be played in the app: {studio.silent.length === 1 ? 'it is' : 'they are'} silent here, and heard in the exported film.</span>
+			{:else if working}
+				<span class="note" role="status">{working}</span>
 			{:else if studio.note}
 				<span class="note">{studio.note}</span>
 			{:else if unmade > 0 && studio.exportPlan.parts.length > 0}
@@ -427,7 +285,7 @@
 			{/if}
 			<span class="grow"></span>
 			{#if exported?.state === 'done' && exported.file}
-				<span class="note selectable" title={tilde(exported.file)}>Saved: {fileName(exported.file)}{exported.seconds ? `, ${shortTime(exported.seconds)}` : ''}{exported.bytes ? `, ${bytesOf(exported.bytes)}` : ''}</span>
+				<span class="note selectable" title={tilde(exported.file)}>Saved: {fileName(exported.file)}{exported.seconds ? `, ${shortTime(exported.seconds)}` : ''}{exported.bytes ? `, ${bytesOf(exported.bytes)}` : ''}{exported.subtitles === 'burned' ? ', subtitles in the picture' : exported.subtitles === 'track' ? ', subtitle track' : exported.subtitles === 'file' ? ', subtitles as .srt' : ''}</span>
 				<button class="flink" onclick={() => studio.reveal()}>{isMac ? 'Show in Finder' : 'Show in folder'}</button>
 			{/if}
 			{#if video?.credit}<span class="note credit" title={video.credit}>{video.credit}</span>{/if}
@@ -1054,147 +912,5 @@
 		padding-top: 2px;
 		font-size: 11px;
 		color: var(--st-muted);
-	}
-
-	/* --- the first screen: one sentence ------------------------------------------------------ */
-
-	.start {
-		flex: 1;
-		min-height: 0;
-		background:
-			radial-gradient(1200px 500px at 50% -120px, rgba(91, 157, 240, 0.08), transparent 70%),
-			var(--st-bg);
-		user-select: text;
-		-webkit-user-select: text;
-	}
-
-	.column {
-		width: 100%;
-		max-width: 640px;
-		margin: 0 auto;
-		padding: 7vh 20px 40px;
-		display: grid;
-		gap: 12px;
-	}
-
-	.hello {
-		display: grid;
-		justify-items: start;
-		gap: 8px;
-	}
-
-	.mark {
-		width: 34px;
-		height: 34px;
-		display: grid;
-		place-items: center;
-		border-radius: 5px;
-		background: linear-gradient(180deg, #3a3d45, #2b2d33);
-		box-shadow:
-			inset 0 1px 0 rgba(255, 255, 255, 0.1),
-			0 0 0 1px #000;
-		color: var(--st-ink);
-	}
-
-	h1 {
-		font: 600 24px/1.15 var(--rb-display);
-		letter-spacing: -0.015em;
-		color: #fff;
-	}
-
-	.lede {
-		max-width: 60ch;
-		font-size: 12.5px;
-		line-height: 1.5;
-		color: var(--st-muted);
-	}
-
-	.quick {
-		display: grid;
-		gap: 9px;
-		padding: 10px;
-		border-radius: 5px;
-		background: var(--st-raised);
-		box-shadow:
-			inset 0 1px 0 rgba(255, 255, 255, 0.05),
-			0 0 0 1px #000;
-	}
-
-	.quick :global(.idea) {
-		font-size: 13px;
-		line-height: 1.45;
-	}
-
-	.shape {
-		display: block;
-		height: 10px;
-		max-width: 16px;
-		border: 1.5px solid currentColor;
-		border-radius: 1.5px;
-	}
-
-	.other {
-		margin-top: 4px;
-	}
-
-	.films-h {
-		margin-top: 12px;
-	}
-
-	.films {
-		margin: 0;
-		padding: 0;
-		list-style: none;
-		border-radius: 4px;
-		background: var(--st-panel);
-		box-shadow: 0 0 0 1px #000;
-		overflow: hidden;
-	}
-
-	.film {
-		width: 100%;
-		height: 28px;
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		padding: 0 9px;
-		text-align: left;
-		color: var(--st-muted);
-		border-bottom: 1px solid rgba(0, 0, 0, 0.45);
-	}
-
-	.film:hover:not(:disabled) {
-		background: rgba(255, 255, 255, 0.05);
-	}
-
-	.fname {
-		flex: none;
-		max-width: 46%;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-		font-size: 12px;
-		font-weight: 600;
-		color: var(--st-ink);
-	}
-
-	.fpath {
-		flex: 1;
-		min-width: 0;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-		font-size: 10.5px;
-		color: var(--st-faint);
-	}
-
-	.fmeta {
-		flex: none;
-		font: 500 10.5px/1 var(--rb-data);
-		color: var(--st-muted);
-	}
-
-	.credit {
-		margin-top: 6px;
 	}
 </style>

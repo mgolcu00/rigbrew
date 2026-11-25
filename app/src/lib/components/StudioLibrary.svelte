@@ -23,6 +23,21 @@
 		if (added.length > 0) path = '';
 	}
 
+	/** One sound file, chosen with the system's dialog. */
+	async function addFile() {
+		const file = await api.pickFile('sound', 'Choose a sound file');
+		if (file) await studio.addSound(file);
+	}
+
+	let video = $state('');
+	const bringing = $derived(studio.jobs.import?.state === 'working');
+
+	/** A video file, cut into shots at the end of the film. */
+	async function bring() {
+		const file = api.isTauri ? await api.pickFile('video', 'Choose a video') : video.trim();
+		if (file && (await studio.importVideo(file))) video = '';
+	}
+
 	async function addFolder() {
 		const folder = await api.pickFolder('Choose a folder with sound files');
 		if (folder) await studio.addSound(folder);
@@ -54,9 +69,13 @@
 	<div class="list st-scroll" role="tabpanel">
 		{#if tab === 'films'}
 			<div class="tools">
-				<button class="st-btn" onclick={onnew} title="Back to the first screen: one sentence becomes a film"><StudioIcon name="spark" size={12} /> New from a sentence</button>
-				<button class="st-btn" onclick={newEmpty} title="Start a film without shots, or open a film folder"><StudioIcon name="plus" size={12} /> New empty</button>
+				<button class="st-btn" onclick={onnew} title="Back to the start: a film from a few words, in detail, or from a video"><StudioIcon name="spark" size={12} /> New film</button>
+				<button class="st-btn" onclick={newEmpty} title="Start a film without shots, or open a film folder"><StudioIcon name="plus" size={12} /> Empty</button>
+				<button class="st-btn" onclick={bring} disabled={bringing || (!api.isTauri && !video.trim())} title="Bring a video file into this film: it is cut into shots where its scenes change"><StudioIcon name="bring" size={12} /> {bringing ? 'Bringing in…' : 'Video'}</button>
 			</div>
+			{#if !api.isTauri}
+				<div class="tools"><input class="st-in grow" bind:value={video} placeholder="/full/path/to/a/video.mp4" aria-label="Full path of a video file to bring in" onkeydown={(e) => (e.stopPropagation(), e.key === 'Enter' && bring())} /></div>
+			{/if}
 			<ul>
 				{#each studio.films as f (f.id)}
 					<li class="item film" class:on={f.id === studio.id}>
@@ -108,14 +127,20 @@
 			{/each}
 		{:else}
 			<div class="tools col">
-				<div class="st-row">
-					<input class="st-in grow" bind:value={path} placeholder="/full/path/to/a/sound/file" aria-label="Full path of a sound file or a folder" onkeydown={(e) => (e.stopPropagation(), e.key === 'Enter' && addPath())} />
-					<button class="st-btn" onclick={addPath} disabled={!path.trim() || studio.busy !== ''}>Add file</button>
-				</div>
-				{#if api.isTauri}<button class="st-btn" onclick={addFolder} disabled={studio.busy !== ''}><StudioIcon name="folder" size={12} /> Add a folder of sounds</button>{/if}
+				{#if api.isTauri}
+					<div class="st-row">
+						<button class="st-btn" onclick={addFile} disabled={studio.busy !== ''}><StudioIcon name="plus" size={12} /> Sound file</button>
+						<button class="st-btn" onclick={addFolder} disabled={studio.busy !== ''}><StudioIcon name="folder" size={12} /> Folder</button>
+					</div>
+				{:else}
+					<div class="st-row">
+						<input class="st-in grow" bind:value={path} placeholder="/full/path/to/a/sound/file" aria-label="Full path of a sound file or a folder" onkeydown={(e) => (e.stopPropagation(), e.key === 'Enter' && addPath())} />
+						<button class="st-btn" onclick={addPath} disabled={!path.trim() || studio.busy !== ''}>Add</button>
+					</div>
+				{/if}
 			</div>
 			{#if studio.sounds.length === 0}
-				<p class="st-note pad">No sound files yet. Add one by its full path (wav, mp3, m4a, aac, flac, ogg, opus, aiff), or put files into the film's folder.</p>
+				<p class="st-note pad">No sound files yet.</p>
 			{/if}
 			<ul>
 				{#each studio.sounds as snd (snd.file)}
