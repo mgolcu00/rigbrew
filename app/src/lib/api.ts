@@ -491,6 +491,16 @@ export async function openExternal(url: string) {
 
 // --- Studio: films made of shots, kept in a folder ----------------------------------------------
 
+/** One clip of a shot. Making a shot again keeps the clip before as a take. */
+export interface StudioTake {
+	n: number;
+	/** The seed it was made with: the same seed and description give the same clip again. */
+	seed?: number;
+	seconds?: number;
+	frames: number;
+	made_frames?: number;
+}
+
 export interface StudioShot {
 	id: string;
 	prompt: string;
@@ -511,6 +521,11 @@ export interface StudioShot {
 	/** How loud the shot's own sound is, 0 to 1.5. */
 	volume?: number;
 	mute?: boolean;
+	/** The clips made for this shot (the last four), and the number of the one in use. */
+	takes?: StudioTake[];
+	take?: number;
+	/** A seed to make the next clip with; without one every clip gets a new seed. */
+	seed?: number | null;
 }
 
 export interface StudioProject {
@@ -567,7 +582,7 @@ export interface StudioSave {
 	sound_once?: boolean;
 	fade_in?: boolean;
 	fade_out?: boolean;
-	shots?: { id?: string; prompt: string; frames: number; trim_start?: number; trim_end?: number; continues?: boolean; join?: string; volume?: number; mute?: boolean }[];
+	shots?: { id?: string; prompt: string; frames: number; trim_start?: number; trim_end?: number; continues?: boolean; join?: string; volume?: number; mute?: boolean; seed?: number | null }[];
 }
 export const studioSave = (id: string, body: StudioSave) => json<StudioView>('PUT', `/v1/studio/projects/${enc(id)}`, body);
 /** The voice reads a text; the reading is saved in the film's folder and becomes the film's sound file. */
@@ -588,8 +603,11 @@ export const studioExportState = (id: string) => json<StudioExport>('GET', `/v1/
 export const studioClip = async (id: string, shot: string) => (await send('GET', `/v1/studio/projects/${enc(id)}/clips/${enc(shot)}.webm`)).blob();
 /** The film's sound file, to play under it. */
 export const studioSound = async (id: string) => (await send('GET', `/v1/studio/projects/${enc(id)}/sound`)).blob();
-/** One small picture of a made shot. */
-export const studioPoster = async (id: string, shot: string) => (await send('GET', `/v1/studio/projects/${enc(id)}/clips/${enc(shot)}.jpg`)).blob();
+/** One small picture of a made shot: of the take in use, or of the take named. */
+export const studioPoster = async (id: string, shot: string, take?: number) =>
+	(await send('GET', `/v1/studio/projects/${enc(id)}/clips/${enc(shot)}${take ? `.${take}` : ''}.jpg`)).blob();
+export const studioUseTake = (id: string, shot: string, take: number) => json<StudioView>('POST', `/v1/studio/projects/${enc(id)}/shots/${enc(shot)}/take`, { take });
+export const studioDeleteTake = (id: string, shot: string, take: number) => json<StudioView>('DELETE', `/v1/studio/projects/${enc(id)}/shots/${enc(shot)}/takes/${take}`);
 
 // --- Code: tasks a model works on in a folder (the loop runs in the service) ------------------
 

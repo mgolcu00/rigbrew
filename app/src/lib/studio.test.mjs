@@ -10,6 +10,8 @@ test('a shot is as long as its clip', () => {
 	assert.equal(shotSeconds(shot('a', { made_frames: 56 })), 56 / 24);
 	assert.equal(shotSeconds(shot('a', { made_frames: 56, state: 'empty' })), 49 / 24);
 	assert.equal(shotSeconds(shot('a')), 49 / 24);
+	// A shot that is being made again still has the clip from before.
+	assert.equal(shotSeconds(shot('a', { made_frames: 56, state: 'making' })), 56 / 24);
 	assert.equal(stamp(7.4), '0:07');
 	assert.equal(stamp(150), '2:30');
 });

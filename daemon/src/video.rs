@@ -101,6 +101,12 @@ impl VideoBody {
         }
     }
 
+    /// The same request with a seed of its own, so the same clip can be made again.
+    pub fn with_seed(mut self, seed: i64) -> VideoBody {
+        self.seed = Some(seed);
+        self
+    }
+
     /// The same request, starting from a picture.
     pub fn starting_from(mut self, image: Option<String>) -> VideoBody {
         self.init_image = image;

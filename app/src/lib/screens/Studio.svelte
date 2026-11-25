@@ -123,7 +123,7 @@
 	function clipOf(id: string): Promise<string | null> {
 		const shot = project?.shots.find((s) => s.id === id);
 		if (!project || !shot) return Promise.resolve(null);
-		const key = `${id}:${shot.seconds ?? 0}`;
+		const key = `${id}:${shot.take ?? 0}:${shot.seconds ?? 0}`;
 		const film = project.id;
 		let url = clipUrls.get(key);
 		clipUrls.delete(key);
@@ -153,7 +153,7 @@
 	let posters = $state<Record<string, string>>({});
 	async function posterOf(shot: StudioShot) {
 		if (!project || !shot.id || !hasClip(shot)) return;
-		const key = `${shot.id}:${shot.seconds ?? 0}`;
+		const key = `${shot.id}:${shot.take ?? 0}:${shot.seconds ?? 0}`;
 		if (pictureUrls.has(key)) return;
 		pictureUrls.set(key, '');
 		try {
@@ -164,9 +164,56 @@
 			pictureUrls.delete(key);
 		}
 	}
+	// The takes of a shot with more than one, each with its own small picture.
+	let takePosters = $state<Record<string, string>>({});
+	async function takePosterOf(shot: StudioShot, n: number) {
+		const key = `${shot.id}.${n}`;
+		if (!project || pictureUrls.has(key)) return;
+		pictureUrls.set(key, '');
+		try {
+			const url = URL.createObjectURL(await api.studioPoster(project.id, shot.id, n));
+			pictureUrls.set(key, url);
+			takePosters = { ...takePosters, [key]: url };
+		} catch {
+			pictureUrls.delete(key);
+		}
+	}
 	$effect(() => {
-		for (const s of project?.shots ?? []) posterOf(s);
+		for (const s of project?.shots ?? []) {
+			posterOf(s);
+			if ((s.takes?.length ?? 0) > 1) for (const t of s.takes!) takePosterOf(s, t.n);
+		}
 	});
+
+	const takeOf = (shot: StudioShot) => shot.takes?.find((t) => t.n === shot.take);
+
+	async function useTake(shot: StudioShot, n: number) {
+		if (!project || shot.take === n) return;
+		problem = '';
+		try {
+			await saveNow();
+			view = await api.studioUseTake(project.id, shot.id, n);
+			if (rowClip?.id === shot.id) rowClip = null;
+			app.track('studio_take_used', { takes: shot.takes?.length ?? 0 });
+		} catch (e) {
+			problem = say(e);
+		}
+	}
+
+	/** The shot whose take in use is about to be deleted, asked about first. */
+	let deleting = $state('');
+	async function deleteTake(shot: StudioShot) {
+		deleting = '';
+		if (!project || !shot.take) return;
+		problem = '';
+		try {
+			await saveNow();
+			view = await api.studioDeleteTake(project.id, shot.id, shot.take);
+			if (rowClip?.id === shot.id) rowClip = null;
+		} catch (e) {
+			problem = say(e);
+		}
+	}
 
 	// The shot the timeline and the list both point at.
 	let selected = $state(-1);
@@ -269,7 +316,8 @@
 					continues: Boolean(s.continues),
 					join: s.join ?? 'cut',
 					volume: s.volume ?? 1,
-					mute: Boolean(s.mute)
+					mute: Boolean(s.mute),
+					seed: s.seed ?? null
 				}))
 			});
 			// Keep what is being typed; take the states.
@@ -569,7 +617,7 @@
 						<div class="what">
 							<textarea bind:value={shot.prompt} oninput={saveSoon} rows="3" placeholder="What is seen, what moves, the place, the light, the sound" aria-label="Shot {i + 1}"></textarea>
 							<p class="row">
-								<select bind:value={shot.frames} onchange={saveSoon} aria-label="Length of shot {i + 1}">
+								<select bind:value={shot.frames} onchange={saveSoon} aria-label="Length of shot {i + 1}" title="Make the shot shorter or longer. A made shot is then marked Changed until it is made again; the clip it has stays as a take.">
 									{#each lengths as l (l.frames)}<option value={l.frames}>{l.label}</option>{/each}
 								</select>
 								<span class="state {shot.state}">{stateWords[shot.state]}{shot.state === 'done' && shot.seconds ? `, took ${clock(shot.seconds)}` : ''}</span>
@@ -580,7 +628,7 @@
 								<span class="grow"></span>
 								<button class="tool" onclick={() => move(i, i - 1)} disabled={i === 0} title="Move up" aria-label="Move shot {i + 1} up">↑</button>
 								<button class="tool" onclick={() => move(i, i + 1)} disabled={i === project.shots.length - 1} title="Move down" aria-label="Move shot {i + 1} down">↓</button>
-								{#if shot.id && shot.prompt.trim() && video}<button class="tool" onclick={() => make([shot.id])} disabled={shot.state === 'making' || shot.state === 'queued'} title={shot.state === 'done' ? 'Make this shot again' : 'Make this shot'}>{shot.state === 'done' ? 'Again' : 'Make'}</button>{/if}
+								{#if shot.id && shot.prompt.trim() && video}<button class="tool" onclick={() => make([shot.id])} disabled={shot.state === 'making' || shot.state === 'queued'} title={shot.state === 'done' ? 'Makes this shot again. The clip you have now is kept as a take.' : 'Make this shot'}>{shot.state === 'done' ? 'Try again' : 'Make'}</button>{/if}
 								<button class="tool" onclick={() => removeShot(i)} title="Remove this shot" aria-label="Remove shot {i + 1}"><Icon name="trash" size={13} /></button>
 							</p>
 							<p class="row film">
@@ -615,6 +663,33 @@
 								</button>
 							{:else}
 								<span class="blank" aria-hidden="true"><Icon name="video" size={18} /></span>
+							{/if}
+							{#if hasClip(shot) && (shot.takes?.length ?? 0) > 0}
+								{@const used = takeOf(shot)}
+								{#if shot.takes!.length > 1}
+									<div class="takes" role="group" aria-label="Takes of shot {i + 1}">
+										{#each shot.takes! as t (t.n)}
+											<button class="take" aria-pressed={t.n === shot.take} onclick={() => useTake(shot, t.n)} style:background-image={takePosters[`${shot.id}.${t.n}`] ? `url(${takePosters[`${shot.id}.${t.n}`]})` : undefined} title="Use take {t.n}" aria-label="Take {t.n}{t.n === shot.take ? ', in use' : ''}"></button>
+										{/each}
+									</div>
+								{/if}
+								{#if deleting === shot.id}
+									<p class="takeline" role="alert">
+										<span>Delete take {shot.take}? Its clip is removed from the folder.</span>
+										<button class="tool danger" onclick={() => deleteTake(shot)}>Delete</button>
+										<button class="tool" onclick={() => (deleting = '')}>Keep</button>
+									</p>
+								{:else if used}
+									<p class="takeline">
+										<span>Take {shot.takes!.findIndex((t) => t.n === shot.take) + 1} of {shot.takes!.length}</span>
+										{#if used.seed !== undefined}
+											<label title="With the same seed and the same description the video model makes the same clip again. Keep the seed and change the description a little to change the clip a little.">
+												<input type="checkbox" checked={shot.seed === used.seed} onchange={(e) => ((shot.seed = e.currentTarget.checked ? used.seed : null), saveSoon())} /> Keep its seed
+											</label>
+										{/if}
+										<button class="tool" onclick={() => (deleting = shot.id)} disabled={shot.state === 'making' || shot.state === 'queued'} title="Delete this take" aria-label="Delete take {shot.take} of shot {i + 1}"><Icon name="trash" size={12} /></button>
+									</p>
+								{/if}
 							{/if}
 						</div>
 					</li>
@@ -1016,6 +1091,8 @@
 	}
 
 	.trim {
+		flex: none;
+		white-space: nowrap;
 		display: inline-flex;
 		align-items: center;
 		gap: 4px;
@@ -1079,6 +1156,59 @@
 	.clip {
 		display: grid;
 		justify-items: center;
+		align-content: start;
+		gap: 6px;
+	}
+
+	.takes {
+		display: flex;
+		gap: 4px;
+		width: 100%;
+	}
+
+	.take {
+		flex: 1 1 0;
+		max-width: 64px;
+		aspect-ratio: var(--shape, 5 / 3);
+		border-radius: 5px;
+		background: var(--well) center / cover no-repeat;
+		box-shadow: inset 0 0 0 1px var(--line-soft);
+		opacity: 0.7;
+	}
+
+	.take:hover {
+		opacity: 1;
+	}
+
+	.take[aria-pressed='true'] {
+		opacity: 1;
+		box-shadow:
+			inset 0 0 0 2px var(--accent),
+			inset 0 0 0 3px var(--bg);
+	}
+
+	.takeline {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: center;
+		gap: 2px 8px;
+		width: 100%;
+		font-size: 12px;
+		color: var(--faint);
+	}
+
+	.takeline label {
+		display: inline-flex;
+		align-items: center;
+		gap: 4px;
+	}
+
+	.takeline .tool:last-child {
+		margin-left: auto;
+	}
+
+	.tool.danger {
+		color: var(--fail);
 	}
 
 	.poster {
@@ -1129,6 +1259,8 @@
 	}
 
 	.trim select {
+		flex: none;
+		width: 158px;
 		height: 26px;
 	}
 

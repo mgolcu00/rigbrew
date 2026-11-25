@@ -3,8 +3,9 @@
 
 import type { StudioShot } from './api.ts';
 
-/** A shot with a clip: made, or made and then changed. */
-export const hasClip = (shot: StudioShot) => shot.state === 'done' || shot.state === 'changed';
+/** A shot with a clip: made, made and then changed, or being made again while the clip before is still there. */
+export const hasClip = (shot: StudioShot) =>
+	shot.state === 'done' || shot.state === 'changed' || ((shot.state === 'making' || shot.state === 'queued') && Boolean(shot.made_frames));
 
 /** Seconds of a shot: of its clip when it has one (the model rounds lengths), else what was asked for. */
 export const shotSeconds = (shot: StudioShot) => ((hasClip(shot) && shot.made_frames) || shot.frames) / 24;

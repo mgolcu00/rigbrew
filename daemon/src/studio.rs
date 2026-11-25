@@ -17,10 +17,13 @@
 //!   GET    /v1/studio/projects/{id}/sound       the film's sound file, to play under it in the app
 //!   POST   /v1/studio/projects/{id}/narration   {"text"}: the voice package reads it; the WAV is saved in the
 //!                                               film's folder and becomes the film's sound file
-//!   GET    /v1/studio/projects/{id}/clips/{shot}.webm
-//!   GET    /v1/studio/projects/{id}/clips/{shot}.jpg   one small picture of the shot, for the timeline
+//!   POST   /v1/studio/projects/{id}/shots/{shot}/take          {"take": n}: use that take of the shot
+//!   DELETE /v1/studio/projects/{id}/shots/{shot}/takes/{n}     delete a take and its clip
+//!   GET    /v1/studio/projects/{id}/clips/{shot}.webm          the take in use; `{shot}.{n}.webm` for one take
+//!   GET    /v1/studio/projects/{id}/clips/{shot}.jpg           one small picture of it, for the timeline
 //!
-//! A film is `<folder>/rigbrew-film.json` plus `<folder>/clips/<shot>.webm` (and `<shot>.jpg`); the list of folders is
+//! A film is `<folder>/rigbrew-film.json` plus `<folder>/clips/<shot>.<take>.webm` (and `.jpg`; a film
+//! from before takes has `<shot>.webm`, which becomes take 1 when the shot is made again); the list of folders is
 //! `<data dir>/studio.json`. Shots are made one after another by the installed video package through
 //! the same path as `/v1/videos/generations`, so a long film renders unattended, shot by shot. A film
 //! with `auto_export` is exported by the same worker when its last shot is made.
@@ -87,6 +90,18 @@ pub struct Shot {
     pub volume: f32,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub mute: bool,
+    /// The clips made for this shot, and the number of the one in use (0 before the first take).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub takes: Vec<Take>,
+    #[serde(default, skip_serializing_if = "is_none_yet")]
+    pub take: u32,
+    /// A seed the person wants the next clip made with; without one every clip gets a new seed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed: Option<i64>,
+}
+
+fn is_none_yet(n: &u32) -> bool {
+    *n == 0
 }
 
 impl Default for Shot {
@@ -106,6 +121,9 @@ impl Default for Shot {
             join: String::new(),
             volume: 1.0,
             mute: false,
+            takes: Vec::new(),
+            take: 0,
+            seed: None,
         }
     }
 }
@@ -114,6 +132,93 @@ impl Shot {
     /// The length of the shot in seconds: of its clip when there is one, else what was asked for.
     fn length(&self) -> f32 {
         self.made_frames.filter(|_| self.state == "done" || self.state == "changed").unwrap_or(self.frames) as f32 / 24.0
+    }
+}
+
+/// One clip of a shot. Making a shot again keeps the clip before as a take.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Take {
+    pub n: u32,
+    /// The seed it was made with: the same seed and description give the same clip again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seconds: Option<f32>,
+    /// The frames that were asked for, and the frames the clip has.
+    pub frames: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub made_frames: Option<u32>,
+    /// Whether it started from the last picture of the shot before it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub continued: bool,
+}
+
+/// A shot keeps this many takes; the oldest one that is not in use goes when another is made.
+const MAX_TAKES: usize = 4;
+
+impl Shot {
+    /// Notes that making the shot did not work. A shot that has a clip keeps it, and its place in the film.
+    fn fail(&mut self, why: String) {
+        if self.take == 0 && self.made_frames.is_none() {
+            self.state = "failed".into();
+        }
+        self.error = Some(why);
+    }
+
+    /// Keeps a new take and puts it in use. Answers with the takes that have to go.
+    fn add_take(&mut self, take: Take) -> Vec<u32> {
+        self.take = take.n;
+        self.state = "done".into();
+        self.error = None;
+        self.seconds = take.seconds;
+        self.made_frames = take.made_frames;
+        self.takes.retain(|t| t.n != take.n);
+        self.takes.push(take);
+        let mut gone = Vec::new();
+        while self.takes.len() > MAX_TAKES {
+            let Some(at) = self.takes.iter().position(|t| t.n != self.take) else { break };
+            gone.push(self.takes.remove(at).n);
+        }
+        gone
+    }
+
+    /// Puts a take in use: the shot is then as long as that clip and counts as made.
+    fn use_take(&mut self, n: u32) -> bool {
+        let Some(take) = self.takes.iter().find(|t| t.n == n).cloned() else { return false };
+        self.take = n;
+        self.frames = take.frames;
+        self.seconds = take.seconds;
+        self.made_frames = take.made_frames;
+        self.state = "done".into();
+        self.error = None;
+        // Trims that fitted a longer clip leave at least half a second of this one.
+        let length = self.length();
+        self.trim_start = self.trim_start.clamp(0.0, (length - 0.5).max(0.0));
+        self.trim_end = self.trim_end.clamp(0.0, (length - 0.5 - self.trim_start).max(0.0));
+        true
+    }
+
+    /// Takes a take away. When it was the one in use, the newest one left is; with none left the shot is not made.
+    fn remove_take(&mut self, n: u32) -> bool {
+        let before = self.takes.len();
+        self.takes.retain(|t| t.n != n);
+        if self.takes.len() == before {
+            return false;
+        }
+        if self.take == n {
+            match self.takes.iter().map(|t| t.n).max() {
+                Some(newest) => {
+                    self.use_take(newest);
+                }
+                None => {
+                    self.take = 0;
+                    self.state = empty();
+                    self.seconds = None;
+                    self.made_frames = None;
+                }
+            }
+        }
+        true
     }
 }
 
@@ -214,12 +319,27 @@ fn store(p: &mut Project) -> std::io::Result<()> {
     std::fs::rename(tmp, path)
 }
 
+/// The clip of a shot: of the take in use, or the one clip of a shot from before takes.
 fn clip_path(p: &Project, shot: &str) -> PathBuf {
-    FsPath::new(&p.folder).join("clips").join(format!("{shot}.webm"))
+    FsPath::new(&p.folder).join("clips").join(format!("{}.webm", clip_stem(p, shot)))
+}
+
+/// "<shot>.<take>" for the take in use; "<shot>" for a shot from before takes.
+fn clip_stem(p: &Project, shot: &str) -> String {
+    match p.shots.iter().find(|s| s.id == shot).map(|s| s.take).filter(|n| *n > 0) {
+        Some(n) => format!("{shot}.{n}"),
+        None => shot.to_string(),
+    }
+}
+
+/// The clip of one take, and its small picture.
+fn take_files(p: &Project, shot: &str, n: u32) -> (PathBuf, PathBuf) {
+    let dir = FsPath::new(&p.folder).join("clips");
+    (dir.join(format!("{shot}.{n}.webm")), dir.join(format!("{shot}.{n}.jpg")))
 }
 
 fn poster_path(p: &Project, shot: &str) -> PathBuf {
-    FsPath::new(&p.folder).join("clips").join(format!("{shot}.jpg"))
+    FsPath::new(&p.folder).join("clips").join(format!("{}.jpg", clip_stem(p, shot)))
 }
 
 fn valid_id(id: &str) -> bool {
@@ -379,6 +499,8 @@ struct ShotIn {
     volume: Option<f32>,
     #[serde(default)]
     mute: bool,
+    #[serde(default)]
+    seed: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -439,6 +561,7 @@ fn merge_shots(old: &[Shot], new: Vec<ShotIn>, size_changed: bool) -> Result<Vec
         };
         shot.volume = s.volume.filter(|v| v.is_finite()).unwrap_or(1.0).clamp(0.0, 1.5);
         shot.mute = s.mute;
+        shot.seed = s.seed.filter(|seed| (0..=u32::MAX as i64).contains(seed));
         // Trims leave at least half a second of the shot.
         let length = shot.length();
         shot.trim_start = s.trim_start.clamp(0.0, (length - 0.5).max(0.0));
@@ -619,11 +742,13 @@ async fn work(app: Shared) {
         } else {
             None
         };
+        // The seed the person asked for, else a new one: it is kept with the take.
+        let seed = s.seed.unwrap_or_else(|| uuid::Uuid::new_v4().as_u128() as u32 as i64);
         // Another clip (from the chat) may be in the making: wait for the engine to be free.
         let job = loop {
             let resp = video::generate(
                 State(app.clone()),
-                Json(video::VideoBody::new(&model, &s.prompt, &p.size, s.frames).starting_from(first.clone())),
+                Json(video::VideoBody::new(&model, &s.prompt, &p.size, s.frames).with_seed(seed).starting_from(first.clone())),
             )
             .await;
             let status = resp.status();
@@ -644,10 +769,7 @@ async fn work(app: Shared) {
         let job = match job {
             Ok(job) => job,
             Err(e) => {
-                set_shot(&app, &project, &shot, |s| {
-                    s.state = "failed".into();
-                    s.error = Some(e);
-                });
+                set_shot(&app, &project, &shot, |s| s.fail(e));
                 continue;
             }
         };
@@ -672,43 +794,143 @@ async fn work(app: Shared) {
             }
         };
         with_queue(|q| q.now = None);
-        let made = state == "done"
-            && file.as_ref().and_then(|v| v["path"].as_str()).and_then(|path| path.rsplit('/').next()).is_some_and(|name| {
-                let from = app.root.join("videos").join(name);
-                let to = clip_path(&p, &shot);
-                to.parent().is_some_and(|d| std::fs::create_dir_all(d).is_ok()) && std::fs::copy(&from, &to).is_ok()
-            });
-        // What the clip really holds, and a small picture of it for the timeline.
-        let frames = if made { look_at(&app, &clip_path(&p, &shot), &poster_path(&p, &shot)).await } else { None };
-        set_shot(&app, &project, &shot, |s| {
-            if made {
-                s.state = "done".into();
-                s.error = None;
-                s.seconds = Some(seconds);
-                s.made_frames = frames;
-            } else if state == "cancelled" {
-                // Stopped by the person: the shot is as it was before.
-                s.error = None;
-            } else {
-                s.state = "failed".into();
-                s.error = Some(error.unwrap_or_else(|| "the clip could not be saved in the film's folder".into()));
+        let from = file
+            .as_ref()
+            .and_then(|v| v["path"].as_str())
+            .and_then(|path| path.rsplit('/').next())
+            .map(|name| app.root.join("videos").join(name));
+        let made = match from.filter(|_| state == "done") {
+            Some(from) => {
+                keep_take(
+                    &app,
+                    &project,
+                    &shot,
+                    &from,
+                    Take {
+                        n: 0,
+                        seed: Some(seed),
+                        seconds: Some(seconds),
+                        frames: s.frames,
+                        made_frames: None,
+                        continued: first.is_some(),
+                    },
+                )
+                .await
             }
-        });
+            None => false,
+        };
+        if !made {
+            set_shot(&app, &project, &shot, |s| {
+                if state == "cancelled" {
+                    // Stopped by the person: the shot is as it was before.
+                    s.error = None;
+                } else {
+                    s.fail(error.unwrap_or_else(|| "the clip could not be saved in the film's folder".into()));
+                }
+            });
+        }
         if made {
             app.record("studio_shot_made", json!({"frames": s.frames, "seconds": seconds, "continues": s.continues}));
-            // A made shot that continues this one started from the old last picture.
-            if let Some(mut p) = load(&app, &project) {
-                let after = p.shots.iter().position(|x| x.id == shot).map(|i| i + 1);
-                if let Some(next) = after.and_then(|i| p.shots.get_mut(i)).filter(|n| n.continues && n.state == "done") {
-                    next.state = "changed".into();
-                    store(&mut p).ok();
-                }
-            }
+            stale_after(&app, &project, &shot);
         }
         // The last waiting shot of a film that exports by itself: join it now, with the screen open or not.
         if made && !with_queue(|q| q.waiting.iter().any(|(pid, _)| *pid == project)) {
             export_when_complete(&app, &project).await;
         }
+    }
+}
+
+/// A made shot that continues `shot` started from a last picture that is not the last picture any more.
+fn stale_after(app: &App, project: &str, shot: &str) {
+    if let Some(mut p) = load(app, project) {
+        let after = p.shots.iter().position(|x| x.id == shot).map(|i| i + 1);
+        if let Some(next) = after.and_then(|i| p.shots.get_mut(i)).filter(|n| n.continues && n.state == "done") {
+            next.state = "changed".into();
+            store(&mut p).ok();
+        }
+    }
+}
+
+/// Puts a finished clip into the film's folder as a new take of its shot and puts it in use.
+/// The clip the shot had stays as a take; a film from before takes has its one clip named as take 1.
+async fn keep_take(app: &Shared, project: &str, shot: &str, from: &FsPath, mut take: Take) -> bool {
+    let Some(p) = load(app, project) else { return false };
+    let Some(now) = p.shots.iter().find(|s| s.id == shot) else { return false };
+    let dir = FsPath::new(&p.folder).join("clips");
+    if std::fs::create_dir_all(&dir).is_err() {
+        return false;
+    }
+    let old = (dir.join(format!("{shot}.webm")), dir.join(format!("{shot}.jpg")));
+    let adopted = (now.takes.is_empty() && old.0.is_file()).then(|| {
+        let (clip, picture) = take_files(&p, shot, 1);
+        std::fs::rename(&old.0, clip).ok();
+        std::fs::rename(&old.1, picture).ok();
+        Take { n: 1, seed: None, seconds: now.seconds, frames: now.frames, made_frames: now.made_frames, continued: now.continues }
+    });
+    take.n = now.takes.iter().map(|t| t.n).max().unwrap_or(0).max(adopted.as_ref().map_or(0, |t| t.n)) + 1;
+    let (clip, picture) = take_files(&p, shot, take.n);
+    if std::fs::copy(from, &clip).is_err() {
+        return false;
+    }
+    // What the clip really holds, and a small picture of it for the timeline.
+    take.made_frames = look_at(app, &clip, &picture).await;
+    let mut gone = Vec::new();
+    set_shot(app, project, shot, |s| {
+        s.takes.extend(adopted);
+        gone = s.add_take(take);
+    });
+    for n in gone {
+        let (clip, picture) = take_files(&p, shot, n);
+        std::fs::remove_file(clip).ok();
+        std::fs::remove_file(picture).ok();
+    }
+    true
+}
+
+#[derive(Deserialize)]
+struct UseTake {
+    take: u32,
+}
+
+async fn use_take(State(app): State<Shared>, Path((id, shot)): Path<(String, String)>, Json(body): Json<UseTake>) -> Response {
+    let mut found = false;
+    set_shot(&app, &id, &shot, |s| found = s.use_take(body.take));
+    if !found {
+        return fail(StatusCode::NOT_FOUND, "no such take");
+    }
+    stale_after(&app, &id, &shot);
+    app.record("studio_take_used", json!({"take": body.take}));
+    match load(&app, &id) {
+        Some(p) => Json(view(&app, p)).into_response(),
+        None => fail(StatusCode::NOT_FOUND, "no such film"),
+    }
+}
+
+async fn delete_take(State(app): State<Shared>, Path((id, shot, n)): Path<(String, String, u32)>) -> Response {
+    let Some(p) = load(&app, &id) else {
+        return fail(StatusCode::NOT_FOUND, "no such film");
+    };
+    if with_queue(|q| q.now.as_ref().is_some_and(|(pid, sid, _)| *pid == id && *sid == shot)) {
+        return fail(StatusCode::CONFLICT, "This shot is being made. Stop it or wait for it first.");
+    }
+    let (mut found, mut used) = (false, false);
+    set_shot(&app, &id, &shot, |s| {
+        used = s.take == n;
+        found = s.remove_take(n);
+    });
+    if !found {
+        return fail(StatusCode::NOT_FOUND, "no such take");
+    }
+    let (clip, picture) = take_files(&p, &shot, n);
+    std::fs::remove_file(clip).ok();
+    std::fs::remove_file(picture).ok();
+    if used {
+        stale_after(&app, &id, &shot);
+    }
+    app.record("studio_take_deleted", json!({"take": n}));
+    match load(&app, &id) {
+        Some(p) => Json(view(&app, p)).into_response(),
+        None => fail(StatusCode::NOT_FOUND, "no such film"),
     }
 }
 
@@ -777,21 +999,38 @@ async fn look_at(app: &Shared, clip: &FsPath, poster: &FsPath) -> Option<u32> {
     frames
 }
 
+/// "<shot>.webm", "<shot>.jpg", or with a take: "<shot>.<n>.webm": the shot, the take, and whether it is the picture.
+fn clip_name(name: &str) -> Option<(&str, Option<u32>, bool)> {
+    let (rest, picture) = match name.rsplit_once('.')? {
+        (rest, "webm") => (rest, false),
+        (rest, "jpg") => (rest, true),
+        _ => return None,
+    };
+    let (shot, take) = match rest.split_once('.') {
+        Some((shot, n)) => (shot, Some(n.parse::<u32>().ok().filter(|n| (1..100_000).contains(n))?)),
+        None => (rest, None),
+    };
+    valid_id(shot).then_some((shot, take, picture))
+}
+
 async fn clip(State(app): State<Shared>, Path((id, name)): Path<(String, String)>) -> Response {
-    let (shot, picture) = match (name.strip_suffix(".webm"), name.strip_suffix(".jpg")) {
-        (Some(shot), _) if valid_id(shot) => (shot, false),
-        (_, Some(shot)) if valid_id(shot) => (shot, true),
-        _ => return fail(StatusCode::BAD_REQUEST, "bad clip name"),
+    let Some((shot, take, picture)) = clip_name(&name) else {
+        return fail(StatusCode::BAD_REQUEST, "bad clip name");
     };
     let Some(p) = load(&app, &id) else {
         return fail(StatusCode::NOT_FOUND, "no such film");
     };
-    let clip = clip_path(&p, shot);
-    let file = if picture { poster_path(&p, shot) } else { clip.clone() };
+    let (clip, poster) = match take {
+        Some(n) => take_files(&p, shot, n),
+        None => (clip_path(&p, shot), poster_path(&p, shot)),
+    };
+    let file = if picture { poster } else { clip.clone() };
     // A film made before pictures were kept gets them when they are first asked for.
     if picture && !file.is_file() && clip.is_file() {
         let frames = look_at(&app, &clip, &file).await;
-        set_shot(&app, &id, shot, |s| s.made_frames = s.made_frames.or(frames));
+        if take.is_none() {
+            set_shot(&app, &id, shot, |s| s.made_frames = s.made_frames.or(frames));
+        }
     }
     match tokio::fs::read(file).await {
         Ok(bytes) => Response::builder()
@@ -1237,6 +1476,8 @@ pub fn router() -> Router<Shared> {
         .route("/v1/studio/projects/{id}/export", get(export_state).post(export))
         .route("/v1/studio/projects/{id}/sound", get(sound))
         .route("/v1/studio/projects/{id}/narration", post(narration))
+        .route("/v1/studio/projects/{id}/shots/{shot}/take", post(use_take))
+        .route("/v1/studio/projects/{id}/shots/{shot}/takes/{n}", axum::routing::delete(delete_take))
         .route("/v1/studio/projects/{id}/clips/{name}", get(clip))
 }
 
@@ -1501,6 +1742,75 @@ mod tests {
         .unwrap();
         assert_eq!((kept[0].state.as_str(), kept[0].join.as_str(), kept[0].volume, kept[0].mute), ("done", "black", 1.5, true));
         assert_eq!((kept[1].join.as_str(), kept[1].volume), ("", 1.0));
+    }
+
+    fn take(n: u32, frames: u32) -> Take {
+        Take { n, seed: Some(n as i64 * 11), seconds: Some(n as f32 * 10.0), frames, made_frames: Some(frames + 7), continued: false }
+    }
+
+    #[test]
+    fn a_shot_keeps_its_last_takes() {
+        let mut s = shot("a1", "fox", "changed");
+        assert!(s.add_take(take(1, 49)).is_empty());
+        assert_eq!((s.take, s.state.as_str(), s.made_frames, s.seconds), (1, "done", Some(56), Some(10.0)));
+        for n in 2..=4 {
+            assert!(s.add_take(take(n, 49)).is_empty());
+        }
+        // The fifth take pushes out the oldest; the one in use is never the one to go.
+        assert_eq!(s.add_take(take(5, 121)), [1]);
+        assert_eq!(s.takes.iter().map(|t| t.n).collect::<Vec<_>>(), [2, 3, 4, 5]);
+        assert!(s.use_take(2) && !s.use_take(1));
+        assert_eq!((s.take, s.frames, s.made_frames, s.seconds), (2, 49, Some(56), Some(20.0)));
+        assert_eq!(s.add_take(take(6, 49)), [2]);
+        assert_eq!(s.take, 6);
+        // Trims that fitted a long take are held against the shorter one.
+        s.use_take(5);
+        s.trim_start = 4.0;
+        s.use_take(3);
+        assert!(s.trim_start <= 56.0 / 24.0 - 0.5);
+        // Another try that fails leaves the shot made, with what went wrong next to it.
+        s.fail("no memory".into());
+        assert_eq!((s.state.as_str(), s.error.as_deref()), ("done", Some("no memory")));
+        let mut never = shot("n1", "never made", "empty");
+        never.fail("no memory".into());
+        assert_eq!(never.state, "failed");
+        // Deleting the take in use falls back to the newest one left; deleting the last leaves the shot not made.
+        assert!(s.remove_take(3) && !s.remove_take(3));
+        assert_eq!(s.take, 6);
+        assert!(s.remove_take(4) && s.remove_take(5) && s.remove_take(6));
+        assert_eq!((s.take, s.state.as_str(), s.made_frames, s.takes.len()), (0, "empty", None, 0));
+    }
+
+    #[test]
+    fn clips_are_asked_for_by_shot_and_take() {
+        assert_eq!(clip_name("a1b2.webm"), Some(("a1b2", None, false)));
+        assert_eq!(clip_name("a1b2.jpg"), Some(("a1b2", None, true)));
+        assert_eq!(clip_name("a1b2.3.webm"), Some(("a1b2", Some(3), false)));
+        assert_eq!(clip_name("a1b2.12.jpg"), Some(("a1b2", Some(12), true)));
+        for bad in ["a1b2", "a1b2.mp4", "a1b2.0.webm", "a1b2.x.webm", "../a1.webm", "a1b2.1.2.webm", ".webm", "A1.webm"] {
+            assert_eq!(clip_name(bad), None, "{bad}");
+        }
+        // The clip of a shot is the take in use; a shot from before takes has one clip.
+        let mut with = shot("a1", "fox", "done");
+        with.take = 3;
+        let p = Project {
+            id: "p".into(),
+            name: "Film".into(),
+            folder: "/films/fox".into(),
+            size: "640x384".into(),
+            shots: vec![with, shot("b2", "boat", "done")],
+            auto_export: false,
+            sound: String::new(),
+            sound_volume: 0.5,
+            sound_once: false,
+            fade_in: false,
+            fade_out: false,
+            updated_ms: 0,
+        };
+        assert_eq!(clip_path(&p, "a1"), FsPath::new("/films/fox/clips/a1.3.webm"));
+        assert_eq!(poster_path(&p, "a1"), FsPath::new("/films/fox/clips/a1.3.jpg"));
+        assert_eq!(clip_path(&p, "b2"), FsPath::new("/films/fox/clips/b2.webm"));
+        assert_eq!(take_files(&p, "b2", 2).0, FsPath::new("/films/fox/clips/b2.2.webm"));
     }
 
     #[test]
