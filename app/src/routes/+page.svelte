@@ -34,6 +34,9 @@
 		return watchFaults();
 	});
 
+	// The window follows the screen: dark while Studio is shown, the person's own choice elsewhere.
+	$effect(() => app.applyTheme());
+
 	// Keep a valid chat model selected as installs come and go, whatever screen is open.
 	$effect(() => {
 		const models = app.chatPackages;
