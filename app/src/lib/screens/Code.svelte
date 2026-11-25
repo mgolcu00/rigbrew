@@ -1,9 +1,12 @@
 <script lang="ts">
 	import { onMount, tick } from 'svelte';
 	import { copyText, isTauri, openExternal, type AgentToolStep } from '#lib/api.ts';
+	import { shownArguments } from '#lib/chattools.ts';
 	import { code, isActive, modes, purposeOf } from '#lib/code.svelte.ts';
+	import { connectors } from '#lib/connectors.svelte.ts';
 	import { ago } from '#lib/format.ts';
 	import { renderMarkdown } from '#lib/markdown.ts';
+	import { skills } from '#lib/skills.svelte.ts';
 	import { app } from '#lib/state.svelte.ts';
 	import { isMac, machine, mod } from '#lib/words.ts';
 	import Icon from '#lib/components/Icon.svelte';
@@ -166,6 +169,12 @@
 				return 'Updated the plan';
 			case 'use_skill':
 				return `Read the skill ${text(step, 'name')}`;
+			case 'read_skill_file':
+				return `Read ${short(text(step, 'path'), 40)} of the skill ${text(step, 'name')}`;
+			case 'find_tool':
+				return `Looked for a tool: “${short(text(step, 'query'), 48)}”`;
+			case 'call_tool':
+				return `${step.status === 'failed' ? 'Tried to use' : verb('Used', 'use')} ${short(text(step, 'tool'), 40)} from the connector ${short(text(step, 'connector'), 30)}`;
 			default:
 				return step.name;
 		}
@@ -217,6 +226,9 @@
 		openExternal(link.href);
 	}
 
+	/** The step a waiting connector tool belongs to: it holds the tool and the arguments. */
+	const asked = $derived(task?.pending?.tool === 'call_tool' ? task.steps.find((s) => s.kind === 'tool' && s.call === task.pending?.call) : undefined);
+
 	const ideas = ['Summarise this folder', 'Why does the test fail?', 'Write a README'];
 </script>
 
@@ -255,6 +267,12 @@
 				<input type="checkbox" checked={code.web} onchange={(e) => code.setWeb(e.currentTarget.checked)} />
 				<span>Allow web search</span>
 			</label>
+			{#if connectors.list.length > 0}
+				<label class="switch" title="Lets the model use the tools of your running connectors. It asks you each time.">
+					<input type="checkbox" checked={code.connectors} onchange={(e) => code.setConnectors(e.currentTarget.checked)} />
+					<span>Use connectors</span>
+				</label>
+			{/if}
 			<span class="grow"></span>
 			{#if working}
 				<button class="go stop" onclick={stop} title="Stops the work where it is (Esc)">Stop</button>
@@ -279,6 +297,9 @@
 			Web search is on: the search words go to DuckDuckGo and the pages the model opens are fetched from the internet. Your files are not sent.
 		{:else}
 			Everything stays on this {machine}. Web search is off; if you switch it on, the search words go to DuckDuckGo.
+		{/if}
+		{#if code.connectors && connectors.list.length > 0}
+			Connectors are on: {connectors.usable.length === 0 ? 'none is running, so start one under Connectors first' : 'the model may ask to use a tool of a running connector, and you are asked each time'}.
 		{/if}
 	</p>
 {/snippet}
@@ -404,6 +425,11 @@
 								{#if purposeOf(p.command)}<p class="purpose">{purposeOf(p.command)}</p>{/if}
 								{#if isMac}<p class="fine">It can change files only inside this folder{code.web ? '' : ', and it has no internet'}.</p>{/if}
 								<p class="why">It runs in {folderName} with your own rights, so it can do anything you can do in a terminal. Allow it only if you know what it does.</p>
+							{:else if p.tool === 'call_tool'}
+								<h2>Use {asked?.kind === 'tool' ? String(asked.arguments.tool ?? 'a tool') : 'a tool'} from the connector {p.path}?</h2>
+								<p class="cap">With these arguments</p>
+								<pre class="raw selectable">{shownArguments(asked?.kind === 'tool' ? asked.arguments.arguments : undefined)}</pre>
+								<p class="why">This tool belongs to the connector, not to Rigbrew. It works outside this folder and may reach other files, programs or the internet. Allow it only if you know what it does.</p>
 							{:else}
 								<h2>{p.tool === 'write_file' ? 'Write' : 'Change'} {p.path}?</h2>
 								{#if p.diff}{@render diffView(p.diff)}{/if}
@@ -412,8 +438,13 @@
 								<button class="go" onclick={() => code.answer(true)} disabled={code.busy} title="Allow ({mod}Enter)">Allow</button>
 								<button class="plainbtn" onclick={() => code.answer(false)} disabled={code.busy}>Deny</button>
 								<span class="grow"></span>
-								<button class="plainbtn" onclick={() => code.answer(true, true)} disabled={code.busy} title={p.command ? 'Runs this exact command without asking again in this task' : 'Applies every file change in this task without asking'}>
-									{p.command ? 'Always allow this command' : 'Always allow file changes'}
+								<button
+									class="plainbtn"
+									onclick={() => code.answer(true, true)}
+									disabled={code.busy}
+									title={p.command ? 'Runs this exact command without asking again in this task' : p.tool === 'call_tool' ? 'Uses this tool without asking again in this task' : 'Applies every file change in this task without asking'}
+								>
+									{p.command ? 'Always allow this command' : p.tool === 'call_tool' ? 'Always allow this tool' : 'Always allow file changes'}
 								</button>
 							</div>
 							<p class="keys">{mod}Enter allows it.</p>
@@ -535,7 +566,7 @@
 							{/each}
 						</ul>
 						<p class="lede selectable">
-							To add your own, make a folder with a SKILL.md file in it and put it in {code.skillsDir || 'the skills folder of Rigbrew'}, or in .rigbrew/skills inside the project. The file starts with a name and a description, then the instructions.
+							<button class="link" onclick={() => skills.open('code', code.folder)}>Manage skills</button> to read, switch off, write or import one. A project can carry its own in .rigbrew/skills.
 						</p>
 					</details>
 				</div>

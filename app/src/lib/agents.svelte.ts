@@ -59,14 +59,14 @@ class AgentsState {
 	startNew(from: string, then?: (agent: Agent) => void) {
 		this.problem = '';
 		this.#then = then ?? null;
-		this.draft = { id: '', name: '', instruction: '', tools: [], starter: '', saved: false };
+		this.draft = { id: '', name: '', instruction: '', tools: [], starter: '', connectors: false, skills: [], saved: false };
 		if (this.sheet === null) app.track('screen_viewed', { screen: 'agents', from });
 		this.sheet = 'form';
 	}
 
 	edit(agent: Agent) {
 		this.problem = '';
-		this.draft = { ...$state.snapshot(agent), saved: true };
+		this.draft = { connectors: false, skills: [], ...$state.snapshot(agent), saved: true };
 		this.sheet = 'form';
 	}
 

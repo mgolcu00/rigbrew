@@ -5,11 +5,15 @@
 	import { agents } from '#lib/agents.svelte.ts';
 	import { chat } from '#lib/chat.svelte.ts';
 	import { code } from '#lib/code.svelte.ts';
+	import { connectors } from '#lib/connectors.svelte.ts';
 	import { guide } from '#lib/guide.svelte.ts';
+	import { skills } from '#lib/skills.svelte.ts';
 	import { mod } from '#lib/words.ts';
 	import AgentsSheet from './AgentsSheet.svelte';
+	import ConnectorsSheet from './ConnectorsSheet.svelte';
 	import Icon from './Icon.svelte';
 	import Mark from './Mark.svelte';
+	import SkillsSheet from './SkillsSheet.svelte';
 
 	// The one piece of chrome: a new chat, the few places, the chats, and who is using it.
 	// Everything else is the conversation. It is also where the window is dragged from.
@@ -23,6 +27,11 @@
 
 	// A task may be working already when the window opens (it runs in the service): follow it.
 	onMount(() => void code.wake());
+	// What the chat is told about skills and connectors comes from these two lists.
+	onMount(() => {
+		void skills.load();
+		void connectors.load();
+	});
 
 	function newChat() {
 		chat.newChat();
@@ -55,6 +64,11 @@
 			</button>
 		{/each}
 		<button class="row" class:current={agents.sheet !== null} onclick={() => agents.open('sidebar')} title="Agents: saved ways to use the chat model"><Icon name="person" size={16} /><span>Agents</span></button>
+		<button class="row" class:current={skills.sheet !== null} onclick={() => skills.open('sidebar', code.folder)} title="Skills: instructions for one kind of work"><Icon name="library" size={16} /><span>Skills</span></button>
+		<button class="row" class:current={connectors.sheet !== null} onclick={() => connectors.open('sidebar')} title="Connectors: tools from outside Rigbrew">
+			<Icon name="external" size={16} /><span>Connectors</span>
+			{#if connectors.usable.length > 0}<span class="count" title="{connectors.usable.length} running">{connectors.usable.length}</span>{/if}
+		</button>
 	</nav>
 
 	<div class="chats scroll">
@@ -85,6 +99,8 @@
 </aside>
 
 <AgentsSheet />
+<SkillsSheet />
+<ConnectorsSheet />
 
 <style>
 	.side {
@@ -174,6 +190,13 @@
 		font: 600 11px/18px var(--rb-text);
 		text-align: center;
 		overflow: visible;
+	}
+
+	.row .count {
+		margin-left: auto;
+		overflow: visible;
+		font: 500 11px/1 var(--rb-data);
+		color: var(--faint);
 	}
 
 	.row .busy {

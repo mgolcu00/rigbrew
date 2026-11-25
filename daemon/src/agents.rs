@@ -1,5 +1,6 @@
 //! Agents the person makes: a saved way to use the chat model (a name, an instruction, the
-//! abilities it may use, a first message to suggest). They live in `<data dir>/agents.json`, so
+//! abilities it may use, whether it may use connectors, the skills pinned to it, a first message
+//! to suggest). They live in `<data dir>/agents.json`, so
 //! they outlive the app's own storage. Nothing here leaves the machine; the usage event for a
 //! new agent carries its id and how many abilities it has, never its name or instruction.
 //!
@@ -24,6 +25,8 @@ pub const MAX_INSTRUCTION_CHARS: usize = 4000;
 pub const MAX_STARTER_CHARS: usize = 300;
 pub const MAX_ID_CHARS: usize = 40;
 pub const MAX_AGENTS: usize = 200;
+/// Skills that can be pinned to one agent.
+pub const MAX_PINNED_SKILLS: usize = 12;
 
 /// The abilities an agent can be given: the chat's own tools.
 pub const TOOLS: &[&str] = &["generate_image", "read_aloud", "generate_video"];
@@ -37,6 +40,12 @@ pub struct Agent {
     pub tools: Vec<String>,
     #[serde(default)]
     pub starter: String,
+    /// "May use connectors": off unless the person switched it on for this agent.
+    #[serde(default)]
+    pub connectors: bool,
+    /// Names of the skills pinned to it: a chat that runs as this agent is offered these.
+    #[serde(default)]
+    pub skills: Vec<String>,
     #[serde(default)]
     pub created_ms: i64,
     #[serde(default)]
@@ -54,6 +63,10 @@ pub struct AgentBody {
     tools: Vec<String>,
     #[serde(default)]
     starter: String,
+    #[serde(default)]
+    connectors: bool,
+    #[serde(default)]
+    skills: Vec<String>,
 }
 
 /// What `PUT /v1/agents` takes: the whole list.
@@ -112,7 +125,19 @@ pub fn validate(id: &str, body: AgentBody) -> Result<Agent, String> {
             tools.push(tool);
         }
     }
-    Ok(Agent { id: id.to_string(), name, instruction, tools, starter, created_ms: 0, updated_ms: 0 })
+    let mut skills: Vec<String> = Vec::new();
+    for skill in body.skills {
+        if !crate::agent::skills::valid_name(&skill) {
+            return Err(format!("not the name of a skill: {}", skill.chars().take(40).collect::<String>()));
+        }
+        if !skills.contains(&skill) {
+            skills.push(skill);
+        }
+    }
+    if skills.len() > MAX_PINNED_SKILLS {
+        return Err(format!("at most {MAX_PINNED_SKILLS} skills can be pinned to an agent"));
+    }
+    Ok(Agent { id: id.to_string(), name, instruction, tools, starter, connectors: body.connectors, skills, created_ms: 0, updated_ms: 0 })
 }
 
 fn now_ms() -> i64 {
@@ -321,6 +346,7 @@ mod tests {
             instruction: instruction.into(),
             tools: tools.iter().map(|t| t.to_string()).collect(),
             starter: starter.into(),
+            ..AgentBody::default()
         }
     }
 
@@ -361,6 +387,27 @@ mod tests {
         assert!(validate("a", body("a", &"ü".repeat(4000), &[], "")).is_ok());
         assert!(validate("a", body("a", &"x".repeat(4001), &[], "")).is_err());
         assert!(validate("a", body("a", "b", &[], &"x".repeat(301))).is_err());
+    }
+
+    #[test]
+    fn connectors_are_off_and_no_skill_is_pinned_unless_asked() {
+        let plain = validate("a", body("a", "b", &[], "")).unwrap();
+        assert!(!plain.connectors && plain.skills.is_empty());
+        // An agent saved before these existed reads as off and empty.
+        let old: Agent = serde_json::from_str(r#"{"id":"a","name":"a","instruction":"b"}"#).unwrap();
+        assert!(!old.connectors && old.skills.is_empty());
+        let pin = |skills: &[&str]| AgentBody {
+            connectors: true,
+            skills: skills.iter().map(|s| s.to_string()).collect(),
+            ..body("a", "b", &[], "")
+        };
+        let with = validate("a", pin(&["write-an-email", "plan-a-project", "write-an-email"])).unwrap();
+        assert!(with.connectors);
+        assert_eq!(with.skills, ["write-an-email", "plan-a-project"]);
+        assert!(validate("a", pin(&["Not A Skill"])).is_err());
+        assert!(validate("a", pin(&["../x"])).is_err());
+        let many: Vec<String> = (0..13).map(|i| format!("skill-{i}")).collect();
+        assert!(validate("a", pin(&many.iter().map(String::as_str).collect::<Vec<_>>())).is_err());
     }
 
     #[test]

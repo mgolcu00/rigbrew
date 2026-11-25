@@ -4,24 +4,26 @@
 //! at another screen, and can be listed, followed and stopped. Every task is kept in memory and
 //! as one JSON file under `<data dir>/agent/`, so finished tasks are there after a restart.
 //!
-//!   POST   /v1/agent/tasks                {folder, prompt, model?, mode, web?} starts a task
+//!   POST   /v1/agent/tasks                {folder, prompt, model?, mode, web?, connectors?} starts a task
 //!   GET    /v1/agent/tasks?folder=        tasks, newest first
 //!   GET    /v1/agent/tasks/{id}           state, steps so far, what waits for an answer, and the
 //!                                         answer being written (`writing`); ?brief=true leaves the steps out
 //!   POST   /v1/agent/tasks/{id}/approve   {call, allow, always?}
-//!   POST   /v1/agent/tasks/{id}/message   {text, mode?, web?} continues the task
+//!   POST   /v1/agent/tasks/{id}/message   {text, mode?, web?, connectors?} continues the task
 //!   POST   /v1/agent/tasks/{id}/undo      takes back what the newest request changed
 //!   DELETE /v1/agent/tasks/{id}           stops it; ?remove=true also forgets it
 //!   GET    /v1/agent/skills?folder=       the skills a task there can use
 //!
 //! What a task may touch: files inside its folder (see `files`), commands the person allowed,
-//! and, only when the person switched it on, a web search and public pages (see `web`).
+//! and, only when the person switched it on, a web search and public pages (see `web`) and the
+//! tools of the connectors they added (see `mcp`).
 
 mod extra;
 mod files;
+pub mod mcp;
 mod outline;
 mod plan;
-mod skills;
+pub mod skills;
 mod stream;
 mod undo;
 mod verify;
@@ -134,6 +136,9 @@ struct Task {
     /// What the harness keeps with the task: see `extra`.
     #[serde(flatten)]
     extra: extra::Extra,
+    /// "Use connectors", and the connector tools allowed for the rest of this task.
+    #[serde(default)]
+    mcp: mcp::TaskState,
 }
 
 impl Task {
@@ -545,6 +550,12 @@ async fn ask(app: &Shared, id: &str, pending: Pending, signature: &str) -> Decis
 async fn call_tool(app: &Shared, id: &str, folder: &Folder, call: &str, name: &str, args: &Value) -> (String, &'static str) {
     let agents = &app.agent;
     let Some(task) = agents.get(id) else { return ("The task is gone.".into(), "failed") };
+    if let Some(out) = skills::dispatch(app, folder.root(), name, args) {
+        return out;
+    }
+    if let Some(out) = mcp::dispatch(app, id, call, name, args).await {
+        return out;
+    }
     let offered = match name {
         "edit_file" | "write_file" | "run_command" => task.mode != Mode::ReadOnly,
         "web_search" | "fetch_url" => task.web,
@@ -645,7 +656,7 @@ async fn call_tool(app: &Shared, id: &str, folder: &Folder, call: &str, name: &s
             let wanted = arg_str(args, "name").unwrap_or("").trim().to_string();
             let all = skills::load(&app.root, Some(folder.root()));
             match all.iter().find(|s| s.name == wanted) {
-                Some(s) => (format!("Skill {}:\n{}", s.name, s.body), "done"),
+                Some(s) => (skills::used(app, s, "code"), "done"),
                 None => (
                     format!(
                         "There is no skill named {wanted}. The skills are: {}.",
@@ -686,13 +697,17 @@ async fn work(app: &Shared, id: &str) -> Ended {
             };
         }
         let skills = skills::load(&app.root, Some(folder.root()));
-        let mut messages =
-            vec![json!({"role": "system", "content": system_prompt(&folder, task.mode, task.web, &skills) + &extra::context(&task)})];
+        let system =
+            format!("{}{}{}", system_prompt(&folder, task.mode, task.web, &skills), mcp::prompt(app, &task.mcp), extra::context(&task));
+        let mut messages = vec![json!({"role": "system", "content": system})];
         messages.extend(fit(&task.messages, budget));
+        let mut tools = tool_defs(task.mode, task.web, !skills.is_empty());
+        tools.extend(skills::extra_tools(&skills));
+        tools.extend(mcp::tool_defs(app, &task.mcp));
         let body = json!({
             "model": package.id,
             "messages": messages,
-            "tools": tool_defs(task.mode, task.web, !skills.is_empty()),
+            "tools": tools,
             "parallel_tool_calls": false,
             "stream": true,
             "temperature": 0.2,
@@ -856,6 +871,9 @@ pub struct NewTask {
     /// "Allow web search": offer `web_search` and `fetch_url`.
     #[serde(default)]
     web: bool,
+    /// "Use connectors": offer `find_tool` and `call_tool`.
+    #[serde(default)]
+    connectors: bool,
 }
 
 pub async fn task_create(State(app): State<Shared>, Json(body): Json<NewTask>) -> Response {
@@ -908,6 +926,7 @@ pub async fn task_create(State(app): State<Shared>, Json(body): Json<NewTask>) -
         turns: 0,
         messages: vec![json!({"role": "user", "content": prompt})],
         extra: Default::default(),
+        mcp: mcp::TaskState::new(body.connectors),
     };
     let (id, view) = (task.id.clone(), task.view());
     app.agent.insert(task);
@@ -972,6 +991,8 @@ pub struct FollowUp {
     mode: Option<Mode>,
     #[serde(default)]
     web: Option<bool>,
+    #[serde(default)]
+    connectors: Option<bool>,
 }
 
 pub async fn task_message(State(app): State<Shared>, Path(id): Path<String>, Json(body): Json<FollowUp>) -> Response {
@@ -1005,6 +1026,9 @@ pub async fn task_message(State(app): State<Shared>, Path(id): Path<String>, Jso
         }
         if let Some(web) = body.web {
             t.web = web;
+        }
+        if let Some(on) = body.connectors {
+            t.mcp.on = on;
         }
         true
     });
@@ -1162,6 +1186,7 @@ mod tests {
             turns: 1,
             messages: vec![json!({"role": "user", "content": "secret"})],
             extra: Default::default(),
+            mcp: Default::default(),
         };
         let view = task.view();
         assert!(view.get("messages").is_none());
@@ -1199,6 +1224,7 @@ mod tests {
             turns: 3,
             messages: vec![],
             extra: Default::default(),
+            mcp: Default::default(),
         };
         agents.insert(task.clone());
         task.id = "b".repeat(32);

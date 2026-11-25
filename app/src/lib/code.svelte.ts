@@ -58,6 +58,8 @@ class Code {
 	recent = $state<string[]>(recentFolders());
 	/** "Allow web search": off until the person switches it on. */
 	web = $state(remembered.get('code.web') === 'on');
+	/** "Use connectors": off until the person switches it on. */
+	connectors = $state(remembered.get('code.connectors') === 'on');
 	/** Every task the service knows, newest first. */
 	all = $state<AgentTaskRow[]>([]);
 	/** The open task, or null on the folder's start page. */
@@ -90,6 +92,11 @@ class Code {
 	setWeb(on: boolean) {
 		this.web = on;
 		remembered.set('code.web', on ? 'on' : 'off');
+	}
+
+	setConnectors(on: boolean) {
+		this.connectors = on;
+		remembered.set('code.connectors', on ? 'on' : 'off');
 	}
 
 	async setFolder(path: string) {
@@ -231,8 +238,8 @@ class Code {
 		try {
 			this.#show(
 				this.task
-					? await api.tellAgentTask(this.task.id, { text: prompt, mode: this.mode, web: this.web })
-					: await api.startAgentTask({ folder: this.folder, prompt, mode: this.mode, web: this.web, ...(model ? { model } : {}) })
+					? await api.tellAgentTask(this.task.id, { text: prompt, mode: this.mode, web: this.web, connectors: this.connectors })
+					: await api.startAgentTask({ folder: this.folder, prompt, mode: this.mode, web: this.web, connectors: this.connectors, ...(model ? { model } : {}) })
 			);
 			this.#watch();
 			return true;

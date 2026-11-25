@@ -94,6 +94,7 @@ Only models under Apache-2.0, MIT or CC-BY-4.0 are packaged. More in [docs/model
 - **Studio.** A film is a list of shots in a folder of yours. The chat model can write the shots from an idea; the video model makes them one after another, a shot can continue the one before it, and the film exports as one MP4.
 - **Community models.** Paste the link of an open GGUF chat model from Hugging Face or GitHub and it is added next to Rigbrew's own. Rigbrew has not tested these.
 - **Agents and artifacts.** Save your own instructions as agents; pages, drawings, documents and long code open beside the chat.
+- **Skills and connectors.** Skills are short instructions for one kind of work that the model reads when a request fits: twelve come with Rigbrew, and you can write your own or add one from a folder or from GitHub. Connectors give the model tools from outside (any Model Context Protocol server, as a program on your machine or a web address); it asks you before it uses one.
 
 ## Measured, not promised
 

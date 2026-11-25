@@ -17,6 +17,10 @@ export interface Agent {
 	tools: ToolName[];
 	/** A first message to suggest in a new chat; may be empty. */
 	starter: string;
+	/** "May use connectors": off unless the person switched it on. */
+	connectors?: boolean;
+	/** Names of the skills pinned to it. With none pinned the chat is offered every skill that is on. */
+	skills?: string[];
 	created_ms?: number;
 	updated_ms?: number;
 }
@@ -25,6 +29,7 @@ export const MAX_NAME = 60;
 export const MAX_INSTRUCTION = 4000;
 export const MAX_STARTER = 300;
 export const MAX_ID = 40;
+export const MAX_PINNED_SKILLS = 12;
 
 /** The abilities, in the words the form uses. */
 export const abilities: { tool: ToolName; label: string; does: string }[] = [
@@ -106,7 +111,9 @@ export function tidy(agent: Agent): Agent {
 		name: agent.name.trim(),
 		instruction: agent.instruction.trim(),
 		tools: known.filter((t) => agent.tools.includes(t)),
-		starter: (agent.starter ?? '').trim()
+		starter: (agent.starter ?? '').trim(),
+		connectors: agent.connectors === true,
+		skills: [...new Set(agent.skills ?? [])].slice(0, MAX_PINNED_SKILLS)
 	};
 }
 

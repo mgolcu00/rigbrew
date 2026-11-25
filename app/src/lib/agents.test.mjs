@@ -46,7 +46,14 @@ test('the examples are good agents', () => {
 
 test('tidy trims and orders the abilities', () => {
 	const t = tidy(agent({ name: '  Tutor ', instruction: ' Do it. \n', tools: ['generate_video', 'generate_image', 'generate_image'], starter: ' Hello ' }));
-	assert.deepEqual(t, { id: 'tutor-ab12c', name: 'Tutor', instruction: 'Do it.', tools: ['generate_image', 'generate_video'], starter: 'Hello' });
+	assert.deepEqual(t, { id: 'tutor-ab12c', name: 'Tutor', instruction: 'Do it.', tools: ['generate_image', 'generate_video'], starter: 'Hello', connectors: false, skills: [] });
+});
+
+test('connectors are off and no skill is pinned unless asked', () => {
+	assert.equal(tidy(agent()).connectors, false);
+	assert.equal(tidy(agent({ connectors: true })).connectors, true);
+	assert.deepEqual(tidy(agent({ skills: ['write-an-email', 'plan-a-project', 'write-an-email'] })).skills, ['write-an-email', 'plan-a-project']);
+	assert.equal(tidy(agent({ skills: Array.from({ length: 20 }, (_, i) => `skill-${i}`) })).skills.length, 12);
 });
 
 test('new ids are valid, follow the name and are never taken', () => {

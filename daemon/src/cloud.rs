@@ -416,6 +416,7 @@ mod tests {
             videos: std::sync::Mutex::new(std::collections::HashMap::new()),
             image_progress: std::sync::Mutex::new(None),
             agent: crate::agent::Agents::load(&dir),
+            connectors: crate::connectors::Connectors::new(&dir),
         };
         (app, dir)
     }
