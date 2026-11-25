@@ -32,13 +32,16 @@ pub async fn chat_get(State(app): State<Shared>, Path(id): Path<String>) -> Resp
 pub struct ChatBody {
     #[serde(default)]
     title: String,
+    /// Who wrote the title: "words", "model" or "person". Left out, the chat keeps what it has.
+    #[serde(default)]
+    title_by: Option<String>,
     #[serde(default)]
     data: Value,
 }
 
 pub async fn chat_put(State(app): State<Shared>, Path(id): Path<String>, Json(body): Json<ChatBody>) -> Response {
     use rigbrew_core::chats::ChatError;
-    match app.chats.lock().unwrap().put(&id, &body.title, &body.data) {
+    match app.chats.lock().unwrap().put_titled(&id, &body.title, body.title_by.as_deref(), &body.data) {
         Ok(meta) => Json(json!(meta)).into_response(),
         Err(ChatError::BadId) => fail(StatusCode::BAD_REQUEST, ChatError::BadId.to_string()),
         Err(e @ ChatError::TooLarge(_)) => fail(StatusCode::PAYLOAD_TOO_LARGE, e.to_string()),
