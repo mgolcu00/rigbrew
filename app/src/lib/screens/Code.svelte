@@ -8,6 +8,7 @@
 	import { connectors } from '#lib/connectors.svelte.ts';
 	import { ago } from '#lib/format.ts';
 	import { renderMarkdown } from '#lib/markdown.ts';
+	import { remembered } from '#lib/remember.ts';
 	import { skills } from '#lib/skills.svelte.ts';
 	import { app } from '#lib/state.svelte.ts';
 	import { isMac, machine, mod } from '#lib/words.ts';
@@ -29,7 +30,15 @@
 
 	const task = $derived(code.task);
 	const working = $derived(isActive(task));
-	const model = $derived(app.chatPackages[0] ?? null);
+	// The model that does the work: the one chosen here, else the heaviest chat model installed,
+	// since the bigger one writes better code. Small things (titles) stay with whatever is loaded.
+	const weight = (p: (typeof app.chatPackages)[number]) => Math.max(0, ...p.variants.filter((v) => p.installed.includes(v.id)).map((v) => v.disk_mb));
+	let chosenModel = $state(remembered.get('code.model') ?? '');
+	const model = $derived(app.chatPackages.find((p) => p.id === chosenModel) ?? [...app.chatPackages].sort((a, b) => weight(b) - weight(a))[0] ?? null);
+	function chooseModel(id: string) {
+		chosenModel = id;
+		remembered.set('code.model', id);
+	}
 	// The name of the open task: click it to change it. A name typed here is never written over.
 	let renaming = $state(false);
 	let newTitle = $state('');
@@ -313,6 +322,16 @@
 					{/each}
 				</select>
 			</label>
+			{#if app.chatPackages.length > 1 && model}
+				<label class="perm" title="The model that does the work">
+					<span class="sr">Model</span>
+					<select value={model.id} onchange={(e) => chooseModel(e.currentTarget.value)} aria-label="Model">
+						{#each app.chatPackages as p (p.id)}
+							<option value={p.id}>{p.name}</option>
+						{/each}
+					</select>
+				</label>
+			{/if}
 			<label class="switch" title="Lets the model search the web and open pages. Search words leave this computer; your files do not.">
 				<input type="checkbox" checked={code.web} onchange={(e) => code.setWeb(e.currentTarget.checked)} />
 				<span>Web</span>
