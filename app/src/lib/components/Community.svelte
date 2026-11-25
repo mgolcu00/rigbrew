@@ -1,12 +1,13 @@
 <script lang="ts">
-	import { tick } from 'svelte';
+	import { tick, untrack } from 'svelte';
 	import * as api from '#lib/api.ts';
+	import { groups, siteOf } from '#lib/catalog.ts';
 	import { app } from '#lib/state.svelte.ts';
 	import { chat } from '#lib/chat.svelte.ts';
 	import { plain } from '#lib/errors.ts';
 	import { bytes, size } from '#lib/format.ts';
 	import { machine, usesMemory } from '#lib/words.ts';
-	import type { CommunityFound, Package } from '#lib/types.ts';
+	import type { CatalogModel, CommunityFound, Package } from '#lib/types.ts';
 	import ErrorLine from './ErrorLine.svelte';
 	import Icon from './Icon.svelte';
 	import InstallControl from './InstallControl.svelte';
@@ -14,6 +15,8 @@
 	// Community models: open chat models a person adds by pasting a link to Hugging Face or
 	// GitHub. They sit under Rigbrew's own models and every one of them says, in a full
 	// sentence, that Rigbrew has not tested it, who it comes from and under which licence.
+	// Under them is the pool Rigbrew suggests (a signed file the service reads): its chat models
+	// go through the same lookup as a pasted link, the rest are links to read.
 
 	let link = $state('');
 	let looking = $state(false);
@@ -25,6 +28,14 @@
 	let adding = $state(false);
 	let removing = $state<Record<string, 'ask' | 'busy'>>({});
 	let list = $state<HTMLElement | null>(null);
+	let panel = $state<HTMLElement | null>(null);
+
+	let pool = $state<CatalogModel[]>([]);
+	let poolError = $state<unknown>(null);
+	/** The row of the pool whose link is being looked up, and the one whose lookup failed. */
+	let asking = $state('');
+	let failed = $state<{ id: string; error: unknown } | null>(null);
+	const shelves = $derived(groups(pool));
 
 	const models = $derived(app.communityPackages);
 	const file = $derived(found?.files.find((f) => f.file === chosen) ?? null);
@@ -32,12 +43,31 @@
 	/** The service writes its own sentences for links it refuses and repos it cannot find. */
 	const say = (e: unknown) => (e instanceof api.ApiError && [400, 404, 409, 502].includes(e.status) ? e.message : plain(e).text);
 
-	async function lookUp(what = link) {
+	async function loadPool(refresh = false) {
+		try {
+			pool = (await api.communityCatalog(refresh)).models ?? [];
+			poolError = null;
+		} catch (e) {
+			// A service from before the catalog has nothing to show; that is not an error.
+			poolError = e instanceof api.ApiError && e.status === 404 ? null : e;
+		}
+	}
+
+	// Read when the section opens, and again when a model is added or removed ("Added").
+	$effect(() => {
+		void models.length;
+		untrack(() => void loadPool());
+	});
+
+	/** Looks a link up. `row` is the model of the pool it belongs to, when it was not pasted. */
+	async function lookUp(what = link, row: CatalogModel | null = null) {
 		const url = what.trim();
 		if (!url || looking) return;
 		link = url;
 		looking = true;
 		problem = '';
+		failed = null;
+		asking = row?.id ?? '';
 		found = null;
 		try {
 			const answer = await api.communityLookup(url);
@@ -45,11 +75,20 @@
 			asked = url;
 			chosen = answer.pick ?? '';
 			// The suggested file is often far down a long list.
-			tick().then(() => list?.querySelector('input:checked')?.scrollIntoView({ block: 'nearest' }));
+			tick().then(() => {
+				list?.querySelector('input:checked')?.scrollIntoView({ block: 'nearest' });
+				// The files open next to the paste box, which is above the pool.
+				if (row) {
+					panel?.focus({ preventScroll: true });
+					panel?.scrollIntoView({ block: 'center' });
+				}
+			});
 		} catch (e) {
-			problem = say(e);
+			if (row) failed = { id: row.id, error: e };
+			else problem = say(e);
 		} finally {
 			looking = false;
+			asking = '';
 		}
 	}
 
@@ -88,7 +127,6 @@
 		app.go('chat');
 	}
 
-	const siteOf = (url: string) => (url.startsWith('https://github.com/') ? 'GitHub' : 'Hugging Face');
 	const ownerOf = (pkg: Package) => pkg.source.name.split('/')[0];
 	const stated = (licence: string | null | undefined) => Boolean(licence) && licence !== 'no licence stated';
 
@@ -127,7 +165,7 @@
 
 	{#if found}
 		{@const where = `${found.owner}/${found.repo}`}
-		<div class="found" aria-live="polite">
+		<div class="found" aria-live="polite" tabindex="-1" bind:this={panel}>
 			<p class="from">
 				<b class="selectable">{where}</b>
 				<span class="sep">{found.site}</span>
@@ -244,6 +282,56 @@
 				</li>
 			{/each}
 		</ul>
+	{/if}
+
+	{#if shelves.length > 0 || poolError}
+		<div class="pool">
+			<h3>From the community</h3>
+			<p class="hint">Open models people recommend. Rigbrew has not measured them.</p>
+			{#if shelves.length === 0}
+				<ErrorLine error={poolError} lead="The list did not load." onretry={() => loadPool(true)} compact where="community" />
+			{/if}
+			{#each shelves as shelf (shelf.kind)}
+				<h4 id="pool-{shelf.kind}">{shelf.name}</h4>
+				<ul aria-labelledby="pool-{shelf.kind}">
+					{#each shelf.models as m (m.id)}
+						<li>
+							<div class="what">
+								<p class="who">
+									<span class="mname selectable">{m.name}</span>
+									{#if m.by}<span class="by">{m.by}</span>{/if}
+									{#if m.license}<span class="by" class:sep={Boolean(m.by)}>{m.license}</span>{/if}
+									{#if m.status !== 'add'}<span class="tag">Not runnable here yet</span>{/if}
+								</p>
+								{#if m.about || m.note || m.more?.length}
+									<p class="about">
+										{#if m.about}<span>{m.about}</span>{/if}
+										{#if m.note}<span class="mnote">{m.note}</span>{/if}
+										{#each m.more ?? [] as extra (extra.url)}
+											<button class="link" onclick={() => api.openExternal(extra.url)} title="Opens on {siteOf(extra.url)}">{extra.label}</button>
+										{/each}
+									</p>
+								{/if}
+								{#if failed?.id === m.id}
+									<ErrorLine error={failed.error} lead="Could not look up {m.name}." onretry={() => lookUp(m.url, m)} compact where="community" />
+								{/if}
+							</div>
+							<div class="act">
+								{#if m.status !== 'add'}
+									<button class="btn quiet" onclick={() => api.openExternal(m.url)} aria-label="Open {m.name} on {siteOf(m.url)}">Open</button>
+								{:else if m.added}
+									<span class="tag accent">Added</span>
+								{:else}
+									<button class="btn" onclick={() => lookUp(m.url, m)} disabled={looking} aria-label="Add {m.name}">
+										{asking === m.id ? 'Looking…' : 'Add'}
+									</button>
+								{/if}
+							</div>
+						</li>
+					{/each}
+				</ul>
+			{/each}
+		</div>
 	{/if}
 </section>
 
@@ -493,6 +581,85 @@
 		justify-content: flex-end;
 		gap: 6px;
 		font-size: 12px;
+	}
+
+	/* The pool Rigbrew suggests: one compact row per model, grouped by kind. */
+	.pool {
+		max-width: 760px;
+		margin-top: 22px;
+	}
+
+	.found:focus {
+		outline: none;
+	}
+
+	h3 {
+		font: 600 13px/1.2 var(--rb-display);
+		letter-spacing: -0.045em;
+	}
+
+	.hint {
+		margin-top: 3px;
+		font-size: 12.5px;
+		color: var(--muted);
+	}
+
+	h4 {
+		margin-top: 14px;
+		padding-bottom: 4px;
+		border-bottom: 1px solid var(--line);
+		font: 400 11px/16px var(--rb-label);
+		letter-spacing: 0.02em;
+		text-transform: uppercase;
+		color: var(--muted);
+	}
+
+	.pool li {
+		display: grid;
+		grid-template-columns: minmax(0, 1fr) auto;
+		align-items: center;
+		gap: 2px 12px;
+		padding: 7px 0;
+		border-bottom: 1px solid var(--line-soft);
+	}
+
+	.who {
+		display: flex;
+		align-items: center;
+		flex-wrap: wrap;
+		gap: 2px 8px;
+		font-size: 12.5px;
+	}
+
+	.mname {
+		font: 600 13px/1.3 var(--rb-display);
+		letter-spacing: -0.045em;
+		overflow-wrap: anywhere;
+	}
+
+	.by {
+		color: var(--muted);
+	}
+
+	.by.sep {
+		margin-left: -8px;
+	}
+
+	.about {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 0 10px;
+		margin-top: 1px;
+		font-size: 12.5px;
+		color: var(--muted);
+	}
+
+	.about > span:first-child {
+		color: var(--ink);
+	}
+
+	.pool .act {
+		padding-top: 0;
 	}
 
 	@media (max-width: 760px) {

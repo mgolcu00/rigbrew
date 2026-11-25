@@ -83,6 +83,33 @@ export interface CommunityFile {
 	installed: boolean;
 }
 
+/** One model of the community catalog: a suggestion, not something Rigbrew measured. */
+export interface CatalogModel {
+	id: string;
+	name: string;
+	/** chat, image, video, speech, listen, music, tool; anything else is listed under "Other". */
+	kind: string;
+	by: string;
+	/** A page on huggingface.co or github.com. */
+	url: string;
+	license: string;
+	about: string;
+	/** `add`: a chat model Rigbrew can run now. `listed`: one to read about. */
+	status: 'add' | 'listed';
+	/** For `add`: a file of this repo is already among the person's community models. */
+	added?: boolean;
+	note?: string;
+	more?: { label: string; url: string }[];
+}
+
+/** `GET /v1/community/catalog`. */
+export interface CommunityCatalog {
+	updated: string;
+	/** The list is the copy the service kept, because the file could not be fetched or checked. */
+	stale: boolean;
+	models: CatalogModel[];
+}
+
 /** `POST /v1/community/lookup`: what a pasted link holds. */
 export interface CommunityFound {
 	host: 'huggingface' | 'github';

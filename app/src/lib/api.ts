@@ -8,7 +8,7 @@
 // a new one until the service answers again.
 
 import type { Agent } from './agents';
-import type { Activity, AppConfig, CommunityFound, Consent, Job, Package, QueuedEvent, Session, System, Usage } from './types';
+import type { Activity, AppConfig, CommunityCatalog, CommunityFound, Consent, Job, Package, QueuedEvent, Session, System, Usage } from './types';
 
 export const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 
@@ -205,6 +205,8 @@ export const removePackage = (id: string, variant?: string) =>
 export const communityLookup = (url: string) => json<CommunityFound>('POST', '/v1/community/lookup', { url });
 /** Adds one file of a looked-up repo as a community chat model and starts its download. */
 export const communityAdd = (repo: string, file: string) => json<{ job: string; id: string; name: string }>('POST', '/v1/community', { repo, file });
+/** The community models Rigbrew suggests. `refresh` makes the service ask for the list again now. */
+export const communityCatalog = (refresh = false) => json<CommunityCatalog>('GET', `/v1/community/catalog${refresh ? '?refresh=1' : ''}`);
 /** Removes a community model: its files and its place in the list. */
 export const communityRemove = (id: string) => json<{ removed: string; freed_bytes: number }>('DELETE', `/v1/community/${enc(id)}`);
 

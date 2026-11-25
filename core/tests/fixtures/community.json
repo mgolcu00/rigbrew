@@ -1,0 +1,51 @@
+{
+  "version": 1,
+  "updated": "2026-11-25",
+  "models": [
+    {
+      "id": "example-chat",
+      "name": "Example Chat",
+      "kind": "chat",
+      "by": "Example Lab",
+      "url": "https://huggingface.co/example-owner/Example-Chat-GGUF",
+      "license": "Apache-2.0",
+      "about": "Coding and reasoning; about 20 GB of memory.",
+      "status": "add",
+      "more": [
+        {"label": "Original", "url": "https://huggingface.co/example-lab/Example-Chat"},
+        {"label": "Elsewhere", "url": "https://example.invalid/model"}
+      ]
+    },
+    {
+      "id": "example-video",
+      "name": "Example Video",
+      "kind": "video",
+      "by": "Example Studio",
+      "url": "https://github.com/example-studio/example-video",
+      "license": "CC-BY-NC-4.0",
+      "about": "Short clips from a sentence.",
+      "status": "listed",
+      "note": "Non-commercial licence"
+    },
+    {
+      "id": "example-elsewhere",
+      "name": "Example Elsewhere",
+      "kind": "chat",
+      "by": "Somebody",
+      "url": "https://example.invalid/owner/model",
+      "license": "MIT",
+      "about": "Hosted on a site Rigbrew does not open.",
+      "status": "add"
+    },
+    {
+      "id": "example-new-kind",
+      "name": "Example New Kind",
+      "kind": "smell",
+      "by": "Example Lab",
+      "url": "https://huggingface.co/example-lab/example-new-kind",
+      "license": "MIT",
+      "about": "A kind this build has not heard of.",
+      "status": "someday"
+    }
+  ]
+}

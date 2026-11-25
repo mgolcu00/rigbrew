@@ -4,14 +4,19 @@
 //!   POST   /v1/community/lookup   {"url"}: what the link holds
 //!   POST   /v1/community          {"repo", "file"}: add it and start the download
 //!   DELETE /v1/community/{id}     remove it and its files
+//!   GET    /v1/community/catalog  the models Rigbrew suggests, from a signed file (`?refresh=1` asks again now)
 //!
 //! The checks on links and file names, and the list kept in `community.json`, are in
 //! `rigbrew_core::community`. Downloads go through the same jobs as every other package.
 
-use axum::extract::{Path, State};
+use std::time::{Duration, Instant};
+
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+use futures_util::StreamExt;
+use rigbrew_core::catalog::{self, Settled};
 use rigbrew_core::community::{self as models, Found, Host, LookupError};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -205,4 +210,92 @@ pub async fn remove(State(app): State<Shared>, Path(id): Path<String>) -> Respon
     }
     app.record("community_removed", json!({"host": host_label(entry.host), "freed_bytes": freed}));
     Json(json!({"removed": id, "freed_bytes": freed})).into_response()
+}
+
+/// How long a fetched catalog is shown before the service asks for it again.
+const CATALOG_FRESH: Duration = Duration::from_secs(6 * 60 * 60);
+/// How soon the service asks again after a fetch that failed.
+const CATALOG_RETRY: Duration = Duration::from_secs(10 * 60);
+
+/// The catalog as it was last settled in this run.
+#[derive(Default)]
+pub struct CatalogState {
+    settled: Settled,
+    tried: Option<Instant>,
+}
+
+/// Reads at most `cap` bytes of text from `url`.
+async fn fetch_text(client: &reqwest::Client, url: &str, cap: usize) -> Result<String, String> {
+    let resp = client.get(url).timeout(Duration::from_secs(15)).send().await.map_err(|e| format!("{url}: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("{url} answered HTTP {}", resp.status().as_u16()));
+    }
+    let mut body = Vec::new();
+    let mut stream = resp.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| format!("{url}: {e}"))?;
+        if body.len() + chunk.len() > cap {
+            return Err(format!("{url} is larger than {cap} bytes"));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    String::from_utf8(body).map_err(|_| format!("{url} is not text"))
+}
+
+/// Gets the catalog from where it is published (`RIGBREW_COMMUNITY_URL` names another place: a
+/// URL, or a file for development) and checks its signature. What cannot be fetched or does not
+/// check out leaves the kept copy in place.
+async fn settle_catalog(app: &App) -> Settled {
+    let source =
+        std::env::var("RIGBREW_COMMUNITY_URL").ok().filter(|s| !s.trim().is_empty()).unwrap_or_else(|| catalog::DEFAULT_URL.into());
+    let key = rigbrew_core::manifest::PUBLIC_KEY;
+    let settled = if source.starts_with("https://") || source.starts_with("http://") {
+        let sig_url = format!("{source}.minisig");
+        let fetched =
+            tokio::try_join!(fetch_text(&app.net, &source, catalog::MAX_BYTES), fetch_text(&app.net, &sig_url, catalog::MAX_SIG_BYTES));
+        catalog::settle(&app.root, fetched, key)
+    } else {
+        match catalog::load_file(std::path::Path::new(&source), key) {
+            Ok(catalog) => Settled { catalog, stale: false, problem: None },
+            Err(e) => Settled { stale: true, problem: Some(e.to_string()), ..Settled::default() },
+        }
+    };
+    if let Some(problem) = &settled.problem {
+        eprintln!("rigbrewd: community catalog: {problem}");
+    }
+    settled
+}
+
+#[derive(Deserialize)]
+pub struct CatalogQuery {
+    /// `1` asks the site again now.
+    refresh: Option<String>,
+}
+
+pub async fn catalog(State(app): State<Shared>, Query(q): Query<CatalogQuery>) -> Json<Value> {
+    let force = q.refresh.is_some_and(|r| !matches!(r.as_str(), "" | "0" | "false"));
+    let mut state = app.catalog.lock().await;
+    let due = match state.tried {
+        None => true,
+        Some(at) => force || at.elapsed() >= if state.settled.stale { CATALOG_RETRY } else { CATALOG_FRESH },
+    };
+    if due {
+        state.settled = settle_catalog(&app).await;
+        state.tried = Some(Instant::now());
+    }
+    let have = app.community.lock().unwrap();
+    let models: Vec<Value> = state
+        .settled
+        .catalog
+        .models
+        .iter()
+        .map(|entry| {
+            let mut row = serde_json::to_value(entry).unwrap_or_default();
+            if entry.status == catalog::ADD {
+                row["added"] = json!(catalog::added(entry, have.list()));
+            }
+            row
+        })
+        .collect();
+    Json(json!({"updated": state.settled.catalog.updated, "stale": state.settled.stale, "models": models}))
 }

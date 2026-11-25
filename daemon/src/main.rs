@@ -11,6 +11,7 @@
 //!   POST   /v1/community/lookup           {"url"}: what a link to a model on Hugging Face or GitHub holds (GGUF files, sizes, licence)
 //!   POST   /v1/community                  {"repo", "file"}: add a community chat model and start its download; answers {"job", "id"}
 //!   DELETE /v1/community/{id}             remove a community model and its files
+//!   GET    /v1/community/catalog          models Rigbrew suggests, from a signed file: {updated, stale, models}; ?refresh=1 asks again now
 //!   GET    /v1/jobs                       all download jobs of this run
 //!   GET    /v1/jobs/{id}                  download progress
 //!   DELETE /v1/jobs/{id}                  cancel a running download (the partial file is kept for resume)
@@ -175,6 +176,8 @@ struct App {
     manifest: Manifest,
     /// Chat models the person added by link (`community.json`). Not in the manifest, not tested by Rigbrew.
     community: Mutex<rigbrew_core::community::Store>,
+    /// The catalog of suggested community models, as it was last fetched and checked.
+    catalog: tokio::sync::Mutex<community::CatalogState>,
     root: PathBuf,
     token: String,
     events: Mutex<EventStore>,
@@ -1282,6 +1285,7 @@ async fn main() {
         profile,
         manifest,
         community: Mutex::new(rigbrew_core::community::Store::load(&root)),
+        catalog: tokio::sync::Mutex::new(community::CatalogState::default()),
         root: root.clone(),
         token: token.clone(),
         events: Mutex::new(events),
@@ -1326,6 +1330,7 @@ async fn main() {
         .route("/v1/packages/{id}", axum::routing::delete(package_remove))
         .route("/v1/community/lookup", post(community::lookup))
         .route("/v1/community", post(community::add))
+        .route("/v1/community/catalog", get(community::catalog))
         .route("/v1/community/{id}", axum::routing::delete(community::remove))
         .route("/v1/jobs", get(jobs))
         .route("/v1/jobs/{id}", get(job).delete(job_cancel))
