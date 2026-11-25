@@ -3,6 +3,8 @@
 	import { MAX_INSTRUCTION, MAX_NAME, MAX_STARTER, abilities, chars, checkAgent, examples, type Agent } from '#lib/agents.ts';
 	import { agents } from '#lib/agents.svelte.ts';
 	import { chat } from '#lib/chat.svelte.ts';
+	import { connectors } from '#lib/connectors.svelte.ts';
+	import { skills } from '#lib/skills.svelte.ts';
 	import { app } from '#lib/state.svelte.ts';
 
 	// Agents: the list of the ones the person made and three examples to copy, and the small
@@ -17,8 +19,12 @@
 	const problems = $derived(draft ? checkAgent({ ...draft, id: draft.saved ? draft.id : 'new' }) : {});
 	const summary = (agent: Agent) => {
 		const can = abilities.filter((a) => agent.tools.includes(a.tool)).map((a) => a.label.toLowerCase());
-		return can.length ? `Can ${can.join(', ')}.` : 'Answers in words only.';
+		if (agent.connectors) can.push('use connectors');
+		const pinned = agent.skills?.length ? ` ${agent.skills.length === 1 ? '1 skill' : `${agent.skills.length} skills`} pinned.` : '';
+		return (can.length ? `Can ${can.join(', ')}.` : 'Answers in words only.') + pinned;
 	};
+	/** The skills an agent can be given: the ones that are on and not only for Code. */
+	const pinnable = $derived(skills.list.filter((s) => s.enabled && s.where !== 'code'));
 
 	$effect(() => {
 		const form = agents.sheet === 'form';
@@ -44,6 +50,12 @@
 		tried = true;
 		if (Object.keys(problems).length > 0) return;
 		await agents.save();
+	}
+
+	function pin(name: string, on: boolean) {
+		if (!draft) return;
+		const now = (draft.skills ?? []).filter((n) => n !== name);
+		draft.skills = on ? [...now, name] : now;
 	}
 
 	function toggle(tool: Agent['tools'][number], on: boolean) {
@@ -94,7 +106,32 @@
 								</label>
 							{/each}
 							<span class="hint">Each one needs its model installed. With none ticked it answers in words only.</span>
+							<label class="check" title="It may use the tools of the connectors you added and started">
+								<input type="checkbox" checked={draft.connectors === true} onchange={(e) => (draft.connectors = e.currentTarget.checked)} />
+								<span>Use connectors</span>
+							</label>
+							<span class="hint">
+								{#if connectors.list.length === 0}
+									You have no connectors yet. <button type="button" class="link" onclick={() => connectors.open('agent')}>Add one</button> to give it tools from outside.
+								{:else}
+									It may use the tools of your running connectors. You are asked before each use.
+								{/if}
+							</span>
 						</fieldset>
+						{#if pinnable.length > 0}
+							<fieldset class="field">
+								<legend class="what">Skills <span class="count">optional</span></legend>
+								<div class="pins">
+									{#each pinnable as s (s.name)}
+										<label class="check" title={s.description}>
+											<input type="checkbox" checked={draft.skills?.includes(s.name) ?? false} onchange={(e) => pin(s.name, e.currentTarget.checked)} />
+											<span>{s.name}</span>
+										</label>
+									{/each}
+								</div>
+								<span class="hint">Tick the skills this agent should have at hand. With none ticked it is offered every skill that is switched on.</span>
+							</fieldset>
+						{/if}
 						<label class="field">
 							<span class="what">First message to suggest <span class="count">optional</span></span>
 							<input bind:value={draft.starter} maxlength={MAX_STARTER} placeholder="Tighten this text:" autocomplete="off" />
@@ -339,6 +376,17 @@
 
 	.check input {
 		accent-color: var(--accent);
+	}
+
+	.pins {
+		display: grid;
+		grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+		gap: 0 12px;
+	}
+
+	.pins span {
+		font-family: var(--rb-data);
+		font-size: 12.5px;
 	}
 
 	@media (max-width: 620px) {
