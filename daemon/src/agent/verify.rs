@@ -140,9 +140,12 @@ pub fn unchecked(steps: &[Step]) -> Option<&'static str> {
     let last_change = request.iter().rposition(changed)?;
     let mut ran = false;
     for step in &request[last_change + 1..] {
-        if let Step::Tool { name, status, .. } = step {
+        if let Step::Tool { name, status, result, .. } = step {
             let checks = name == "run_command" || name == "check_project";
-            if checks && status == "done" {
+            // A check_project that found nothing to run, or could run nothing, checked nothing.
+            let empty = name == "check_project"
+                && result.as_deref().is_some_and(|r| r.starts_with("Checks: none found") || r.starts_with("Checks: nothing ran"));
+            if checks && status == "done" && !empty {
                 return None;
             }
             ran |= checks && status == "failed";
@@ -285,6 +288,16 @@ mod tests {
         assert_eq!(unchecked(&[user(), tool("edit_file", "done"), tool("run_command", "failed"), tool("run_command", "done")]), None);
         assert_eq!(unchecked(&[user(), tool("edit_file", "done"), tool("check_project", "done")]), None);
         assert_eq!(unchecked(&[user(), tool("edit_file", "done"), tool("check_project", "failed")]), Some(NOT_PASSED));
+        let nothing = Step::Tool {
+            call: "c".into(),
+            name: "check_project".into(),
+            arguments: json!({"what": "ui"}),
+            status: "done".into(),
+            result: Some("Checks: none found. This project has no checks Rigbrew knows how to run.".into()),
+            diff: None,
+            image: None,
+        };
+        assert_eq!(unchecked(&[user(), tool("edit_file", "done"), nothing]), Some(NOT_RUN), "a check that ran nothing checked nothing");
         assert_eq!(
             unchecked(&[
                 user(),

@@ -20,10 +20,17 @@
 //!   POST   /v1/agent/tasks/{id}/undo      takes back what the newest request changed
 //!   DELETE /v1/agent/tasks/{id}           stops it; ?remove=true also forgets it
 //!   GET    /v1/agent/skills?folder=       the skills a task there can use
+//!   DELETE /v1/agent/tasks/{id}/app       stops the app the task started
+//!   POST   /v1/agent/tasks/{id}/device    a new picture of the phone's screen
+//!   GET    /v1/agent/tasks/{id}/shots/{name}.png  a picture the task took
+//!   POST   /v1/agent/look                 {task?, url?, size?, do?} looks at a page on this computer
+//!   GET    /v1/agent/looks/next, POST /v1/agent/looks/{id}  the app takes a look and answers it
 //!
 //! What a task may touch: files inside its folder (see `files`), commands the person allowed,
 //! and, only when the person switched it on, a web search and public pages (see `web`) and the
-//! tools of the connectors they added (see `mcp`).
+//! tools of the connectors they added (see `mcp`). It can also run, look at and check its own
+//! work (see `see`): start the project's app, open its pages (this computer only), take a
+//! picture of the phone it runs on, and run the project's checks.
 
 mod apps;
 mod checks;

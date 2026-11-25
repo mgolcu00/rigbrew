@@ -438,4 +438,145 @@ mod tests {
         assert!(all.len() == TOOLS.len() || !devices::available());
         assert!(all.iter().all(|t| TOOLS.contains(&t["function"]["name"].as_str().unwrap())));
     }
+
+    /// One call the way the loop makes it: a step, the tool, the step's end.
+    #[cfg(unix)]
+    async fn run(app: &Shared, id: &str, folder: &Folder, name: &str, args: Value) -> (String, &'static str) {
+        let step_id = uuid::Uuid::new_v4().simple().to_string()[..12].to_string();
+        app.agent.change(id, |t| {
+            t.steps.push(Step::Tool {
+                call: step_id.clone(),
+                name: name.into(),
+                arguments: args.clone(),
+                status: "running".into(),
+                result: None,
+                diff: None,
+                image: None,
+            })
+        });
+        let (text, status) = call(app, id, folder, &step_id, name, &args).await;
+        app.agent.change(id, |t| t.set_tool(&step_id, status, Some(text.clone()), None));
+        (text, status)
+    }
+
+    /// The four tools against a real folder, a real server and a real test runner. There is no
+    /// app window here, so the look reads the HTML.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_task_starts_its_app_looks_at_it_and_checks_the_project() {
+        if crate::connectors::find_program("python3").is_none() {
+            return;
+        }
+        let (app, _data) = crate::studio::tests::bare_app(false);
+        let root = files::scratch("see-run");
+        std::fs::write(root.join("index.html"), "<title>Tea Shop</title><h1>Hello from the shop</h1>").unwrap();
+        std::fs::write(root.join("shop.py"), "def total(prices):\n    return sum(prices) + 1\n").unwrap();
+        std::fs::write(
+            root.join("test_shop.py"),
+            "import unittest\nfrom shop import total\n\nclass TestShop(unittest.TestCase):\n    def test_total(self):\n        self.assertEqual(total([1, 2]), 3)\n\n    def test_empty(self):\n        self.assertEqual(total([]), 1)\n",
+        )
+        .unwrap();
+        let folder = Folder::open(root.to_str().unwrap()).unwrap();
+        let mut made = task(folder.root(), "ask", json!([user()]));
+        made.id = uuid::Uuid::new_v4().simple().to_string();
+        let id = made.id.clone();
+        app.agent.insert(made);
+
+        // Ask first: the command waits for the person, who sees it and says no. Nothing starts.
+        app.agent.running.lock().unwrap().insert(
+            id.clone(),
+            super::super::Running {
+                abort: tokio::spawn(async {}).abort_handle(),
+                started: std::time::Instant::now(),
+                approve: None,
+                writing: Default::default(),
+            },
+        );
+        for (tool, shown) in [("start_app", "python3 -m http.server {port} --bind 127.0.0.1"), ("check_project", "python3 -m unittest")] {
+            let (a, i, f) = (app.clone(), id.clone(), folder.clone());
+            let waiting = tokio::spawn(async move { run(&a, &i, &f, tool, json!({})).await });
+            let pending = loop {
+                match app.agent.get(&id).unwrap().pending {
+                    Some(p) => break p,
+                    None => tokio::time::sleep(std::time::Duration::from_millis(20)).await,
+                }
+            };
+            assert_eq!((pending.tool.as_str(), pending.command.as_deref()), (tool, Some(shown)));
+            let answer = super::super::Approval { call: pending.call, allow: false, always: false };
+            super::super::task_approve(axum::extract::State(app.clone()), axum::extract::Path(id.clone()), axum::Json(answer)).await;
+            assert_eq!(waiting.await.unwrap().1, "denied");
+        }
+        assert!(app.agent.apps.view(&id).is_none());
+        assert!(app.agent.get(&id).unwrap().pending.is_none());
+        // Looking changes nothing and is not asked for; with no app there is nothing to look at.
+        let (nothing, status) = run(&app, &id, &folder, "look_at_page", json!({})).await;
+        assert!(status == "failed" && nothing.contains("start_app starts it"), "{nothing}");
+        let (refused, status) = run(&app, &id, &folder, "look_at_page", json!({"url": "https://example.com/"})).await;
+        assert!(status == "failed" && refused.contains("only opens pages on this computer"), "{refused}");
+
+        app.agent.change(&id, |t| {
+            // The person's next message, with a mode that does not ask.
+            t.mode = Mode::Bypass;
+            t.denied.clear();
+            t.steps.push(Step::User { text: "Go on, and do not ask.".into() });
+        });
+        let (started, status) = run(&app, &id, &folder, "start_app", json!({})).await;
+        assert_eq!(status, "done", "{started}");
+        let port = app.agent.apps.port(&id).unwrap();
+        assert!(started
+            .starts_with(&format!("Started the app on http://localhost:{port}/ with `python3 -m http.server {port} --bind 127.0.0.1`.")));
+        let shown = super::super::stream::shown(&app, &app.agent.get(&id).unwrap(), &Default::default());
+        assert_eq!((shown["app"]["alive"].as_bool(), shown["app"]["port"].as_u64()), (Some(true), Some(port as u64)));
+        assert!(shown.get("eye").is_none());
+
+        // The address is the app's when none is given.
+        let (seen, status) = run(&app, &id, &folder, "look_at_page", json!({})).await;
+        assert_eq!(status, "done", "{seen}");
+        assert!(seen.starts_with(&format!("Looked at http://localhost:{port}/ (not rendered)\nTitle: Tea Shop\n")), "{seen}");
+        assert!(seen.contains("Hello from the shop") && seen.contains("Not rendered"), "{seen}");
+        let page = app.agent.get(&id).unwrap().extra.page.unwrap();
+        assert_eq!((page.title.as_str(), page.rendered, page.shot), ("Tea Shop", false, None));
+
+        let (checked, status) = run(&app, &id, &folder, "check_project", json!({})).await;
+        assert_eq!(status, "failed", "{checked}");
+        assert!(checked.starts_with("Checks: 1 passed, 1 failed\nFAILED   python3 -m unittest: 1 passed, 1 failed\n"), "{checked}");
+        assert!(checked.ends_with("Fix what failed, then call check_project again."), "{checked}");
+        assert_eq!(run(&app, &id, &folder, "check_project", json!({"what": "everything"})).await.1, "failed");
+        // A project with no tests that drive the app says so and does not fail.
+        let (none, status) = run(&app, &id, &folder, "check_project", json!({"what": "ui"})).await;
+        assert!(status == "done" && none.starts_with("Checks: none found."), "{none}");
+        // The request cannot end as it is: a file was changed and the check after it failed.
+        app.agent.change(&id, |t| {
+            let at = t.steps.len() - 3;
+            t.steps.insert(at, serde_json::from_value(step("edit_file", "done")).unwrap());
+        });
+        assert_eq!(unchecked(&app.agent.get(&id).unwrap(), folder.root()), Some(CHECK_FAILED));
+
+        // The person stops the app from the preview; removing the task leaves nothing behind.
+        let stopped = api::app_stop(axum::extract::State(app.clone()), axum::extract::Path(id.clone())).await;
+        assert_eq!(stopped.status(), axum::http::StatusCode::OK);
+        assert!(app.agent.apps.view(&id).is_none());
+        for _ in 0..50 {
+            if !apps::answers(port).await {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert!(!apps::answers(port).await, "the app is still there");
+        assert_eq!(
+            run(&app, &id, &folder, "start_app", json!({"command": "python3 -m http.server {port} --bind 127.0.0.1"})).await.1,
+            "done"
+        );
+        let again = app.agent.apps.port(&id).unwrap();
+        look::keep_shot(&app.agent.dir, &id, &[0x89, b'P', b'N', b'G']).unwrap();
+        app.agent.remove(&id);
+        assert!(app.agent.apps.view(&id).is_none() && !app.agent.dir.join("shots").join(&id).exists());
+        for _ in 0..50 {
+            if !apps::answers(again).await {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert!(!apps::answers(again).await, "the app outlived its task");
+    }
 }

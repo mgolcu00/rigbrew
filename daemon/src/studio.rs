@@ -2652,7 +2652,7 @@ pub fn router() -> Router<Shared> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn shot(id: &str, prompt: &str, state: &str) -> Shot {
@@ -3267,7 +3267,7 @@ mod tests {
     }
 
     /// A service with nothing in it, or with a video model that counts as installed.
-    fn bare_app(video: bool) -> (Shared, PathBuf) {
+    pub(crate) fn bare_app(video: bool) -> (Shared, PathBuf) {
         use std::collections::HashMap;
         let dir = std::env::temp_dir().join(format!("rigbrewd-studio-{}", uuid::Uuid::new_v4().simple()));
         std::fs::create_dir_all(&dir).unwrap();

@@ -439,7 +439,7 @@
 						{@const p = task.pending}
 						<div class="ask" role="group" aria-label="Waiting for your answer">
 							{#if p.command}
-								<h2>Run this command?</h2>
+								<h2>{p.tool === 'start_app' ? 'Start the app with this command?' : p.tool === 'check_project' ? 'Run the checks of this project?' : 'Run this command?'}</h2>
 								<pre class="raw selectable">{p.command}</pre>
 								{#if purposeOf(p.command)}<p class="purpose">{purposeOf(p.command)}</p>{/if}
 								{#if !isMac}<p class="why">It runs with your own rights.</p>{/if}

@@ -582,8 +582,9 @@ pub fn confined(folder: &Path, program: &str) -> std::process::Command {
 /// runs in a sandbox: it cannot write outside the folder, and reaches only what `net` allows.
 /// It is the head of its own process group, so everything it starts can be stopped with it.
 pub fn shell(folder: &Folder, command: &str, net: Net, env: &[(&str, String)]) -> tokio::process::Command {
+    // Only macOS has a sandbox to tell this to.
     #[cfg(not(target_os = "macos"))]
-    let _ = net;
+    let _ = (net.web, net.listen, net.app_port);
     #[cfg(unix)]
     let mut cmd = {
         #[cfg(target_os = "macos")]
