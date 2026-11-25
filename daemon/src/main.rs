@@ -1070,6 +1070,8 @@ async fn main() {
             }
         }
     }
+    // From here on a panic leaves a record for the next start (see `rigbrew_core::crash`).
+    rigbrew_core::crash::install(root.clone(), "service", env!("CARGO_PKG_VERSION"));
     let events = EventStore::open(&root.join("events.db")).unwrap_or_else(|e| {
         eprintln!("{e}");
         std::process::exit(1);
@@ -1080,6 +1082,10 @@ async fn main() {
     });
     if events.fresh_install() {
         events.record("app_installed", json!({"version": env!("CARGO_PKG_VERSION"), "tier": profile.tier, "os": profile.os.family, "os_version": profile.os.version, "arch": profile.os.arch})).ok();
+    }
+    // What crashed since the last start, the desktop shell included.
+    for crash in rigbrew_core::crash::take(&root) {
+        events.record("crash", crash).ok();
     }
     events.record("daemon_started", json!({"version": env!("CARGO_PKG_VERSION"), "tier": profile.tier, "os": profile.os.family})).ok();
 

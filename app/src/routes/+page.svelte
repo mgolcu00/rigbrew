@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import { watchFaults } from '#lib/faults.ts';
 	import { isTauri } from '#lib/api.ts';
 	import { APP_VERSION, app, screens } from '#lib/state.svelte.ts';
 	import { chat } from '#lib/chat.svelte.ts';
@@ -34,6 +35,7 @@
 		app.applyTheme();
 		ux.applyTextSize();
 		app.boot();
+		return watchFaults();
 	});
 
 	// Keep a valid chat model selected as installs come and go, whatever screen is open.

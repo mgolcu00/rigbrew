@@ -68,6 +68,39 @@ fn info_path() -> PathBuf {
         .join("daemon.json")
 }
 
+/// When the shell panics, a short record goes where the service looks for them at its next start
+/// (`<data dir>/crashes/`, the same form as `rigbrew_core::crash`): the message, the place in the
+/// code, the version. Nothing that was typed or made; home folders in paths become `~`.
+fn report_panics() {
+    let earlier = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let home = dirs::home_dir().and_then(|h| h.to_str().map(str::to_owned)).unwrap_or_default();
+        let short = |text: String| -> String {
+            let text = if home.len() > 1 { text.replace(&home, "~") } else { text };
+            text.replace('\n', " ").chars().take(120).collect()
+        };
+        let message =
+            info.payload().downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| info.payload().downcast_ref::<String>().cloned());
+        let at_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+        let record = serde_json::json!({
+            "program": "app",
+            "version": env!("CARGO_PKG_VERSION"),
+            "message": short(message.unwrap_or_else(|| "panic".into())),
+            "location": short(info.location().map(|l| format!("{}:{}", l.file(), l.line())).unwrap_or_default()),
+            "thread": short(std::thread::current().name().unwrap_or("unnamed").to_string()),
+            "os": std::env::consts::OS,
+            "arch": std::env::consts::ARCH,
+            "at_ms": at_ms,
+        });
+        if let Some(dir) = info_path().parent().map(|d| d.join("crashes")) {
+            if std::fs::create_dir_all(&dir).is_ok() {
+                std::fs::write(dir.join(format!("app-{at_ms}-{}.json", std::process::id())), record.to_string()).ok();
+            }
+        }
+        earlier(info);
+    }));
+}
+
 fn read_info() -> Option<DaemonFile> {
     serde_json::from_str(&std::fs::read_to_string(info_path()).ok()?).ok()
 }
@@ -237,6 +270,7 @@ pub fn run() {
         // SAFETY: installs a handler that only calls async-signal-safe functions.
         unsafe { libc::signal(signal, on_signal as extern "C" fn(libc::c_int) as libc::sighandler_t) };
     }
+    report_panics();
     let builder =
         tauri::Builder::default().plugin(tauri_plugin_opener::init()).plugin(tauri_plugin_dialog::init()).manage(Daemon::default());
     // Sign-in lives in a module that is not part of the public source; without it the app has no accounts.
