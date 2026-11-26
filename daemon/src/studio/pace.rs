@@ -29,8 +29,9 @@ pub const DRAFT_PIXELS: u32 = 640 * 384;
 
 /// How the work of a shot grows with its points (frames times width times height): more than
 /// evenly, because every point of a clip looks at every other. Measured on an M5 Max with the
-/// video model at three sizes (see the lab's results).
-pub const GROWTH: f64 = 1.3;
+/// video model: five seconds at 384x640 took 435 s and at 512x896 880 s, 1.87 times the points
+/// and 2.03 times the time (the sampling alone 2.25 times).
+pub const GROWTH: f64 = 1.15;
 
 /// The newest measurements are kept; a machine changes, and so does what else runs on it.
 const KEPT: usize = 60;
