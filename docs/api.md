@@ -351,7 +351,8 @@ sends grows with it: about 12,000 characters at 8,192 tokens and four times that
 
 A model with the long context is asked to think before it answers (`enable_thinking`, and a medium
 `reasoning_effort` for templates that take one); one with the short context is not, and is asked for a low effort:
-measured on the Code tasks, a small model spends on thinking the room it needs for the files it reads. Some models
+measured on the Code tasks, the small model's thinking came out of the 3,072 tokens one answer may take, and the files it
+wrote were cut off until the task failed. Some models
 think either way. What the engine hands back as `reasoning_content` becomes a `thought` step before what the model
 did next, with the time from its first word of thinking to its first word of answer; it is not sent back to the
 model.

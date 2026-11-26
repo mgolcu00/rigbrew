@@ -47,10 +47,11 @@ pub struct Context {
 /// Longest thought kept with a step.
 const MAX_THOUGHT_CHARS: usize = 20_000;
 
-/// Whether the model is asked to think before it answers. A model with a short context (a small
-/// one) spends on thinking what it needs for the files it reads, and goes round in circles
-/// sooner: measured on the Code tasks, it does better without. One with a long context thinks.
-/// A model that always thinks does so either way.
+/// Whether the model is asked to think before it answers. With a short context (a small model)
+/// the thinking comes out of the 3,072 tokens one answer may take: measured on the Code tasks,
+/// the small model thinking wrote its Python package in calls that were cut off until the task
+/// failed, and took as long for the Rust fix in fewer turns. One with a long context thinks. A
+/// model that always thinks does so either way.
 pub fn thinks(context: u32) -> bool {
     context > 8192
 }
