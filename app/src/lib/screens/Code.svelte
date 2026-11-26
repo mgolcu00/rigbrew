@@ -302,8 +302,8 @@
 	</ul>
 {/snippet}
 
-{#snippet composerBox(placeholder: string)}
-	<CodeComposer bind:this={composer} bind:draft bind:pictures {placeholder} disabled={!model} folder={code.folder} skills={code.skills} {sees} {choices} onsend={send} {onapp}>
+{#snippet composerBox(placeholder: string, below = false)}
+	<CodeComposer bind:this={composer} bind:draft bind:pictures {placeholder} {below} disabled={!model} folder={code.folder} skills={code.skills} {sees} {choices} onsend={send} {onapp}>
 		{#snippet tools()}
 			<label class="perm" class:danger={code.mode === 'bypass'} title={mode.does}>
 				<span class="sr">Permissions</span>
@@ -609,7 +609,7 @@
 					{#if !model}
 						<p class="lede">Code needs a chat model. <button class="link" onclick={() => app.go('models')}>Install one under Models</button>, then come back.</p>
 					{/if}
-					{@render composerBox('Say it in plain words')}
+					{@render composerBox('Say it in plain words', true)}
 					{#if code.instructions.length}<p class="reads" title="The model follows the instructions in these files">{code.instructions.join(' · ')}</p>{/if}
 					{#if code.problem}<ErrorLine error={code.problem} where="code" />{/if}
 

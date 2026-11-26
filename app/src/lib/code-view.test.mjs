@@ -46,6 +46,7 @@ test('pictures go with the message, and a thought is a row except before a look-
 		thought('Found it.', 4000),
 		tool('edit_file', { path: 'a.css' }),
 		thought('Done.'),
+		thought('Really done.', 500),
 		said('model', 'Fixed.'),
 		thought('Still going')
 	]);
@@ -55,6 +56,7 @@ test('pictures go with the message, and a thought is a row except before a look-
 	);
 	assert.deepEqual(rows[0].images, ['a1', 'b2']);
 	assert.deepEqual([rows[2].text, rows[2].ms], ['Found it.', 4000]);
+	assert.deepEqual([rows[4].text, rows[4].ms], ['Done.\n\nReally done.', 2000]);
 });
 
 test('a failed plan update is shown, and tools of a connector are never folded', () => {

@@ -34,7 +34,7 @@ export type Row =
  * question or an answer comes. The plan has its own place on the screen, so a step that only
  * updated it is no row and does not end a run. Pictures the person sent go with their message.
  * What the model thought is a row of its own before what it did next, except before a look-up:
- * there it would only break the run.
+ * there it would only break the run. Thoughts one after the other are one row.
  */
 export function fold(steps: readonly AgentStep[]): Row[] {
 	const rows: Row[] = [];
@@ -46,7 +46,11 @@ export function fold(steps: readonly AgentStep[]): Row[] {
 		}
 		if (step.kind === 'thought') {
 			const next = steps.slice(at + 1).find((s) => s.kind !== 'thought');
-			if (!next || !isLookup(next)) rows.push({ kind: 'thought', at, text: step.text, ms: step.ms });
+			if (next && isLookup(next)) return;
+			// Turns that only thought (an answer sent back) are one line.
+			const last = rows.at(-1);
+			if (last?.kind === 'thought') Object.assign(last, { text: `${last.text}\n\n${step.text}`, ms: last.ms + step.ms });
+			else rows.push({ kind: 'thought', at, text: step.text, ms: step.ms });
 			return;
 		}
 		if (step.kind !== 'tool') {

@@ -23,6 +23,7 @@
 		choices,
 		onsend,
 		onapp,
+		below = false,
 		tools
 	}: {
 		draft?: string;
@@ -39,6 +40,8 @@
 		onsend: () => void;
 		/** A command the app does itself: `clear`, or a model or mode that was chosen. */
 		onapp: (name: 'clear' | 'model' | 'mode', value?: string) => void;
+		/** The menu opens under the box (at the top of a page) instead of over it. */
+		below?: boolean;
 		tools: Snippet;
 	} = $props();
 
@@ -233,11 +236,11 @@
 
 <div class="composer" class:off={disabled} class:dragging role="group" aria-label="Message" {ondrop} {ondragover} ondragleave={() => (dragging = false)}>
 	{#if items.length}
-		<ul class="menu" role="listbox" aria-label={sub ? `Choose the ${sub}` : open?.kind === 'at' ? 'Files' : 'Commands'}>
+		<ul class="menu" class:below role="listbox" aria-label={sub ? `Choose the ${sub}` : open?.kind === 'at' ? 'Files' : 'Commands'}>
 			{#each items as item, i (item.key)}
 				<li role="option" aria-selected={i === active}>
 					<button type="button" class:on={i === active} onmousedown={(e) => e.preventDefault()} onclick={() => item.pick()} onmouseenter={() => (active = i)}>
-						<span class="label">{item.label}</span>
+						<span class="cmd">{item.label}</span>
 						{#if item.hint}<span class="hint">{item.hint}</span>{/if}
 					</button>
 				</li>
@@ -344,6 +347,11 @@
 		box-shadow: 0 8px 24px -12px color-mix(in srgb, var(--ink) 28%, transparent);
 	}
 
+	.menu.below {
+		top: calc(100% + 6px);
+		bottom: auto;
+	}
+
 	.menu button {
 		display: flex;
 		align-items: baseline;
@@ -360,7 +368,7 @@
 		background: var(--hover);
 	}
 
-	.menu .label {
+	.menu .cmd {
 		flex: none;
 		max-width: 70%;
 		overflow: hidden;
