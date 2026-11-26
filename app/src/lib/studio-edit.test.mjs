@@ -4,6 +4,8 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { filmPlan, partLight } from './studio.ts';
 import {
+	ASSISTANT_STEP,
+	AssistTurn,
 	History,
 	balance,
 	dbLabel,
@@ -21,6 +23,7 @@ import {
 	gainToFader,
 	heard,
 	joinFromDrag,
+	mergeDocs,
 	meterFill,
 	moveRegion,
 	moveShots,
@@ -492,4 +495,48 @@ test('work the service did is put into the film as it was edited meanwhile', () 
 	assert.deepEqual([afterListen.shots[0].lines[0].text, afterListen.shots[1].lines[0].text, afterListen.language], ['A fox walks.', 'Then the boat came.', 'English']);
 	// The film handed in is left as it was.
 	assert.deepEqual([mine.tracks.length, mine.shots.length, mine.shots[1].lines.length], [0, 2, 0]);
+});
+
+const filmOf = (shots, over = {}) => docOf({ id: 'p', name: 'Rain', folder: '/f', size: '640x384', updated_ms: 1, shots: shots.map(([id, prompt]) => ({ id, prompt, frames: 121, state: 'done' })), ...over });
+
+test('everything the assistant does in one request is one step of undo', () => {
+	const h = new History();
+	h.push(filmOf([['a1', 'a fox']]), 'Add shot');
+	const before = filmOf([['a1', 'a fox'], ['b2', 'a boat']], { look: 'warm' });
+	const turn = new AssistTurn('p', before);
+	// Step by step the workstation follows the service: no step of its own in the history.
+	const one = turn.follow(before, filmOf([['a1', 'a fox at night'], ['b2', 'a boat']], { look: 'warm' }), false);
+	assert.equal(one.shots[0].prompt, 'a fox at night');
+	assert.equal(turn.follow(one, filmOf([['a1', 'a fox at night'], ['b2', 'a boat']], { look: 'warm' }), false), null, 'nothing new');
+	const two = turn.follow(one, filmOf([['a1', 'a fox at night'], ['b2', 'a boat at night']], { look: 'night, blue' }), false);
+	const three = turn.follow(two, filmOf([['a1', 'a fox at night'], ['b2', 'a boat at night'], ['c3', 'the moon']], { look: 'night, blue' }), false);
+	assert.equal(h.steps, 1);
+	assert.equal(turn.end(h, three), true);
+	assert.deepEqual([h.steps, h.undoLabel], [2, ASSISTANT_STEP]);
+	// One undo brings back the film as it was before the request, whole.
+	const back = h.undo(three);
+	assert.deepEqual(back.state, before);
+	assert.equal(back.label, 'What the assistant did');
+	assert.deepEqual(h.redo(back.state).state, three, 'and redo puts all of it back');
+	// A request that changed nothing leaves no step.
+	const idle = new AssistTurn('p', three);
+	assert.equal(idle.end(h, three), false);
+	assert.equal(h.steps, 2);
+});
+
+test('what the person edits while the assistant works is kept', () => {
+	const base = filmOf([['a1', 'a fox'], ['b2', 'a boat'], ['c3', 'rain']], { name: 'Rain' });
+	const mine = filmOf([['a1', 'a red fox'], ['b2', 'a boat'], ['n9', 'mine, new']], { name: 'My name' });
+	// The service: shot 2 changed, a shot added at the start, the look set.
+	const theirs = filmOf([['z0', 'title card'], ['a1', 'a fox'], ['b2', 'a boat at night'], ['c3', 'rain']], { name: 'Rain', look: 'night' });
+	const out = mergeDocs(base, mine, theirs);
+	// Shot 1 as edited here, shot 2 as the service has it, shot 3 taken out here, the new one after shot 2 (its place here).
+	assert.deepEqual(
+		out.shots.map((s) => [s.id, s.prompt]),
+		[['z0', 'title card'], ['a1', 'a red fox'], ['b2', 'a boat at night'], ['n9', 'mine, new']]
+	);
+	assert.deepEqual([out.name, out.look], ['My name', 'night']);
+	const turn = new AssistTurn('p', base);
+	assert.deepEqual(turn.follow(mine, theirs, true), out);
+	assert.deepEqual(mine.shots.map((s) => s.id), ['a1', 'b2', 'n9'], 'the films handed in are left as they were');
 });
