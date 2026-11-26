@@ -8,7 +8,7 @@ existing clients work against your own machine.
 
 `rigbrewd` listens on `127.0.0.1` only, on a random port, and writes the port and a random token to
 `daemon.json` in the data folder (`~/Library/Application Support/Rigbrew` on macOS) with mode `0600`.
-Every request needs `Authorization: Bearer <token>` (all but `/v1/artifacts/frame`, see below).
+Every request needs `Authorization: Bearer <token>` (all but `/v1/artifacts/frame` and `/v1/media`, see below).
 
 ```sh
 D="$HOME/Library/Application Support/Rigbrew/daemon.json"
@@ -40,7 +40,7 @@ Browsers are refused unless the request comes from the app's own origin.
 | `POST /v1/audio/transcriptions` | OpenAI-compatible, multipart: `file` (16-bit PCM WAV, any sample rate, up to 10 minutes), `model` (optional), `language` (optional, such as `tr`; the model tells otherwise). Answers `{"text", "language", "duration"}`. The recording is deleted when the answer is sent. |
 | `POST /v1/videos/generations` | `{"model": "pour-14b", "prompt", "size": "640x384", "frames": 121, "seed"}` (sizes, lengths and steps come from the package's `defaults`). Starts a clip in the background and answers `202 {"job"}` at once. While a clip is being made, requests that would load another model are refused with 409. |
 | `GET /v1/videos/jobs`, `GET/DELETE /v1/videos/jobs/{id}` | Progress (`stage`, `step` of `steps`, `elapsed_ms`) and, when done, `video: {id, path}`; DELETE stops it at the next step. |
-| `GET/DELETE /v1/videos/files/{id}.webm` | A saved clip (VP8 WebM, 24 frames per second). |
+| `GET/DELETE /v1/videos/files/{id}.webm` | A saved clip (VP8 and PCM in WebM, 24 frames per second). On macOS the answer is its playable copy, `Content-Type: video/mp4`; see [Clips the app plays](#clips-the-app-plays). DELETE removes the clip and its copy. |
 | `GET/POST /v1/studio/projects`, `GET/PUT/DELETE /v1/studio/projects/{id}` | Studio films: a film is `rigbrew-film.json` and a `clips/` folder inside a folder the person chooses. `POST {folder?, name}` starts or opens one (without a folder: a new folder named after the film in `Movies/Rigbrew`, which the list gives as `home`); `PUT {name, size, auto_export, fade_in, fade_out, master, shots: [{id?, prompt, frames, continues, trim_start, trim_end, join, join_seconds, volume, mute}], shot_track: {volume, pan, mute, solo}, tracks: [{id?, name, color, volume, pan, mute, solo, regions: [{id?, file, start, offset, length, gain, fade_in, fade_out, loops}]}]}` saves it. `fade_in` and `fade_out` fade the film for half a second at its start and end; `master` (0 to 2) is how loud the whole film is. Per shot: `join` is how the film goes into it (`cut`, `dissolve` or `black`; not used when the shot continues the one before) and `join_seconds` how long that takes (0.25 to 2, half a second unless set), `volume` 0 to 1.5 and `mute` are for its own sound. `shot_track` is the channel strip of the shots' own sound as a whole. A sound track holds regions: `file` is a sound file by its full path or by its name inside the film's folder (wav, mp3, m4a, aac, flac, ogg, opus, aiff; a file the film did not use before has to exist), `start` is seconds into the film, `offset` seconds into the file, `length` how long it plays from there, `loops` how many times in a row, `gain` 0 to 2, `fade_in` and `fade_out` seconds at its ends. Track `volume` is 0 to 2, `pan` -1 (left) to 1 (right) turns down the other side, `mute` leaves the track out and `solo` leaves every other strip out. At most 32 tracks of 400 regions. Ids are lowercase letters and digits; one that is missing or used twice is replaced. A shot keeps its clip until its description, length or the film's shape changes, and counts as made again when they are changed back. A shot with a clip that is taken out of the list comes back with its clip and takes when a later save names its id again (the last 40 are kept). A film from before sound tracks (`sound`, `sound_volume`, `sound_once`) gets one track named "Music" with one region when it is read. A film with `auto_export` is exported by the service when its last shot is made. The film's answer carries `export` (where its export is) and `estimate: {all, left}`: about how many seconds the shots that are not made will take, and the ones waiting or being made now. The times come from the shots already made on this machine (`studio-pace.json` in the data folder; before anything is measured, 25 seconds of work for a second of film, 80 when the shot continues another). The list carries `pace`: what a five-second shot takes here. |
 | `POST/DELETE /v1/studio/projects/{id}/render` | Make the shots that are not made yet (or `{"shots": [id]}`), one after another, with the installed video package; DELETE stops. |
 | `POST /v1/studio/projects/{id}/storyboard` | `{idea, shots, as_written?}` (up to 60): the chat model writes that many shots in scenes for the film as it is saved, `{prompt, continues, lines: [{who, text}]}` each: a scene starts with a cut and its other shots continue the shot before; the cast is named and never described; the look of the film is left out (both are added when a shot is made); with `speech` the shots get spoken lines (`who` is a cast member's id, or empty for the narrator). With `as_written` every line of the idea is one shot as it stands and the chat model is not asked. A long film is written in parts. Nothing is saved. Needs the video model, and the chat model unless `as_written`: `409` with one short sentence otherwise. |
@@ -53,12 +53,13 @@ Browsers are refused unless the request comes from the app's own origin.
 | `POST /v1/studio/projects/{id}/narration` | `{text, at?, track?}`: the installed voice package reads it; the WAV is saved in the film's folder (`narration.wav`, `narration 2.wav`, ...) and becomes one region at `at` seconds on the track `track`, or on the track named "Narration", which is made when there is none. Answers with the film and `region: {track, id, seconds}`. |
 | `POST/GET /v1/studio/projects/{id}/export` | Join the made shots, with their trims, joins and volumes, and mix the sound tracks into them, into `<folder>/<name>.mp4` (H.264 and AAC, 24 frames per second). A film of plain cuts without tracks is joined as a list; dissolves, fades, volumes and tracks go through a filter graph: every region at its place, repeated, faded, at its gain and side, with muted tracks left out and soloed ones alone, the master volume last and the peaks held under full level. The film is as long as its pictures; sound after them is cut. A sound file that is gone stops the export with a message that names it. The film's `export: {scale, quality, name}` (saved through PUT, or given in the POST for one export) says how the file is written: `scale` 2 enlarges the picture to twice its width and height with Lanczos (no detail is added), `quality` is `small`, `balanced` or `best` (3.4, 7.9 or 15.7 Mbit/s at 640x384), `name` is the file's name without its ending. `{music, music_volume}` in the POST lays one more sound file under the whole film for that export. The answer of a finished export has `file`, `bytes` and `seconds`. GET says where the export is: `{state: none, working, done or failed, file, error}`. |
 | `POST /v1/studio/projects/{id}/reveal` | Show the exported file in the system's file manager (the film's folder when there is no file yet). |
+| `POST /v1/studio/projects/{id}/media` | `{}` for the exported film, `{shot, take?}` for a clip (its playable copy): a short-lived address the app's `<video>` plays it from, `{url: "/v1/media?token=…", type, bytes}`. `404` before the first export. The film's answer carries `film: {file, bytes, modified_ms, current}` (null before the first export): `current` is true when no edit came after what the file was made from. See [Playing the whole film](#playing-the-whole-film). |
 | `GET /v1/studio/projects/{id}/sound?file=` | A sound file of the film, so the app can play it: one in the film's folder, one added to its library, or one a region plays (up to 200 MB). Nothing else is read. |
 | `GET/POST/DELETE /v1/studio/projects/{id}/sounds` | The film's library of sounds: `{sounds: [{file, name, bytes, from: folder, added or used, missing}]}`, the sound files in its folder and one folder down, and the ones added from elsewhere. `POST {path}` adds a file, or every sound file directly in a folder; `DELETE ?file=` takes an added one out of the list (the file stays). |
 | `GET /v1/studio/projects/{id}/peaks?shot=` or `?file=` | The small picture of a sound for the timeline: `{rate: 50, seconds, peaks: [low, high, low, high, ...]}`, the lowest and highest value of every fiftieth of a second, each from -127 to 127, of the clip of a shot (the take in use) or of a sound file of the film. Read once with FFmpeg and kept next to the clips as `.peaks.json`. A clip without sound has no peaks. |
 | `POST /v1/studio/projects/{id}/shots/{shot}/rewrite` | `{hint?, prompt?}`: the chat model writes the description of one shot again, in the words of the shots around it (`prompt` is the description as it stands when it is not saved yet, `hint` what should be different). Answers `{prompt}`; nothing is saved. |
 | `POST /v1/studio/projects/{id}/shots/{shot}/take`, `DELETE .../shots/{shot}/takes/{n}` | Takes: making a shot again keeps the clip before as a take (the last four; `takes: [{n, seed, seconds, frames, made_frames}]` and `take`, the one in use, on the shot). `POST {take: n}` puts a take in use; DELETE removes one and its clip. A shot's `seed`, when set through PUT, is used for its next clip: the same seed and description give the same clip again. |
-| `GET /v1/studio/projects/{id}/clips/{shot}.webm`, `.../clips/{shot}.jpg` | A made shot (the take in use; `{shot}.{n}.webm` and `{shot}.{n}.jpg` for one take), and one small picture of it (from its middle) for the timeline. A shot carries `made_frames`: the frames its clip really has. A made shot that continues another is marked `changed` when a save puts it behind a different shot. |
+| `GET /v1/studio/projects/{id}/clips/{shot}.webm`, `.../clips/{shot}.jpg` | A made shot (the take in use; `{shot}.{n}.webm` and `{shot}.{n}.jpg` for one take), and one small picture of it (from its middle) for the timeline. A shot carries `made_frames`: the frames its clip really has. A made shot that continues another is marked `changed` when a save puts it behind a different shot. On macOS a made clip is answered as its playable copy (`video/mp4`); a clip brought in from a video is an MP4 already. See [Clips the app plays](#clips-the-app-plays). |
 | `POST /v1/agent/tasks` | Code: start a task on a folder. `{"folder", "prompt", "model", "mode", "web", "connectors"}`; see [Code tasks](#code-tasks). With `{"film", "prompt", "model", "mode", "selection"}` instead of a folder: a conversation of Studio's assistant about a film; see [Studio's assistant](#studios-assistant). Answers `{"task"}`. |
 | `GET /v1/agent/tasks`, `GET /v1/agent/tasks/{id}` | Tasks of Code, newest first (`?folder=` for one folder; `?film=` lists the assistant's conversations about one film instead); one task with its state, its steps so far and what waits for an answer. |
 | `PUT /v1/agent/tasks/{id}` | `{"title"}`: the person names the task (80 characters at most). Answers `{"task"}`; see [Titles](#titles). |
@@ -86,7 +87,8 @@ Browsers are refused unless the request comes from the app's own origin.
 | `GET/DELETE /v1/chats`, `GET/PUT/DELETE /v1/chats/{id}` | Saved conversations. `PUT {title, title_by, data}`; `data` is the app's own JSON, 8 MB at most. `title_by` says who wrote the title (`words`, `model` or `person`); left out, the chat keeps what it has. See [Titles](#titles). |
 | `POST /v1/title` | `{"text", "answer", "model", "load"}`: a name for a conversation that began with `text`. Answers `{"title", "by"}`; see [Titles](#titles). |
 | `GET/PUT/DELETE /v1/agents`, `GET/PUT/DELETE /v1/agents/{id}` | Agents the person made, kept in `agents.json` in the data folder. `PUT /v1/agents/{id}` takes `{name, instruction, tools, starter, connectors, skills}`: a name of at most 60 characters, an instruction of at most 4000, `tools` from `generate_image`, `read_aloud` and `generate_video`, an optional first message of at most 300, `connectors` (may it use connectors; off when left out) and `skills` (up to 12 names of skills pinned to it). The id is 1 to 40 of `a-z`, `0-9` and `-`. `PUT /v1/agents` takes `{agents: [...]}` and replaces the list. |
-| `GET /v1/artifacts/frame` | The empty page the app shows a chat artifact in. It allows inline styles and scripts and nothing from anywhere else, holds no data, and is the one address that needs no token. |
+| `GET /v1/artifacts/frame` | The empty page the app shows a chat artifact in. It allows inline styles and scripts and nothing from anywhere else, holds no data, and needs no token. |
+| `GET /v1/media?token=` | A file the service made, for the app's own `<video>`, which cannot send the bearer token: the token in the address is for one file. See [Playing the whole film](#playing-the-whole-film). |
 | `GET /v1/usage` | Totals for today, the last 7 days and all time, disk used per package, and what is waiting to be sent. |
 | `GET /v1/activity?days=365`, `GET /v1/activity/recent` | Day-by-day activity and a readable list of recent actions (the profile page). |
 | `GET/POST/DELETE /v1/consent` | The consent state; accept the current version; withdraw. |
@@ -104,6 +106,39 @@ curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
 
 The first request for a model loads it into memory, which takes a few seconds. A chat model and a picture or video
 model share memory when both fit the budget; otherwise asking for the other one unloads the first.
+
+## Clips the app plays
+
+The video engine writes WebM: VP8 pictures and 16-bit PCM sound. The app's webview on macOS is WebKit, which
+plays neither PCM in WebM nor decodes it for Web Audio. So on macOS every made clip gets a playable copy next to it,
+`<stem>.play.mp4` (`clips/<shot>.<take>.play.mp4` in a film, `videos/<id>.play.mp4` for a chat's clip): H.264 from
+the hardware encoder (`h264_videotoolbox`, constant quality 85, a keyframe every half second), AAC at 48 kHz stereo,
+192 kbit/s, with its index at the front. It holds the same frames as the clip and measures about 48 dB PSNR against
+it. The copy is made right after the clip (Studio's queue, a chat's clip), and for a clip from before on the first
+request for it. One copy of a file is made at a time (a second request waits for it), two files at most at once,
+written under a temporary name and renamed. A copy older than its clip is made again. When it cannot be made, the
+clip is answered as it is.
+
+The WebM stays the master: an export, the waveform, the last picture a continuing shot starts from and the
+listening model read it, so nothing in a film goes through a second encoding. Deleting a take or a chat's clip
+removes its copy; forgetting a film removes the copies in its `clips/` folder and leaves the clips.
+
+On Windows the webview is Chromium and on Linux WebKitGTK plays through GStreamer (`matroskademux`, `vp8dec`, raw
+PCM); both play the WebM as it is, and no copy is made there.
+
+### Playing the whole film
+
+An exported film is a file of 100 MB and more, and a `<video src>` cannot send the bearer token. So the app asks
+`POST /v1/studio/projects/{id}/media` for an address, and its `<video>` plays `GET /v1/media?token=…` by itself:
+the service answers `Range` requests (`206` with `Content-Range`, `Accept-Ranges: bytes`, `416` past the end), so
+the film starts at once and is never read into memory as one piece. Clips stay small and are fetched with the token
+as before, through object URLs, so Web Audio can mix their sound.
+
+A token is two random UUIDs (64 hex digits), for one file the service resolved itself (a film's export, a clip or its playable
+copy), never for a path the app sends. It goes after 20 minutes without a request, or after 12 hours; the app asks
+for a new one each time the player opens, and once more when an address stops answering. `/v1/media` answers only
+when it is asked for by `127.0.0.1`, `localhost` or `[::1]`, so a page that points a name of its own at this
+machine gets `403`. The app's content security policy lets media load from `http://127.0.0.1:*` and nowhere else.
 
 ## Titles
 

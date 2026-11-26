@@ -18,6 +18,7 @@
 	import StudioLibrary from '#lib/components/StudioLibrary.svelte';
 	import StudioMixer from '#lib/components/StudioMixer.svelte';
 	import StudioNeeds from '#lib/components/StudioNeeds.svelte';
+	import StudioPlayer from '#lib/components/StudioPlayer.svelte';
 	import StudioStart from '#lib/components/StudioStart.svelte';
 	import StudioTracks from '#lib/components/StudioTracks.svelte';
 	import StudioViewer from '#lib/components/StudioViewer.svelte';
@@ -57,6 +58,12 @@
 	const sideWidth = $derived(asking ? Math.max(layout.inspectorWidth, 340) : layout.inspectorWidth);
 	// The mixer hears every change at once.
 	$effect(() => studio.mix());
+	// An export that has just been written opens the film player once.
+	$effect(() => {
+		void studio.view?.film?.modified_ms;
+		void studio.view?.export?.state;
+		untrack(() => studio.noticeExport());
+	});
 	// Regions that change while the film plays are set again from where the playhead is.
 	$effect(() => {
 		void JSON.stringify(studio.doc?.tracks.map((t) => [t.id, t.regions]));
@@ -85,6 +92,7 @@
 	const KEYS: [string, string][][] = [
 		[
 			['Space', 'Play or pause'],
+			['P', 'Play the film'],
 			['Return', 'Go to the start'],
 			[', and .', 'One frame back or on'],
 			['Shift , and .', 'One second back or on'],
@@ -124,7 +132,7 @@
 	];
 
 	function keys(e: KeyboardEvent) {
-		if (!studio.doc || e.defaultPrevented || app.palette || app.sheet || guide.helpOpen) return;
+		if (!studio.doc || e.defaultPrevented || app.palette || app.sheet || guide.helpOpen || studio.player) return;
 		const t = e.target as HTMLElement | null;
 		const typing = t instanceof HTMLTextAreaElement || t instanceof HTMLSelectElement || (t instanceof HTMLInputElement && !['range', 'checkbox', 'radio', 'button'].includes(t.type)) || Boolean(t?.isContentEditable);
 		if (studio.question) {
@@ -185,6 +193,7 @@
 		else if (key === 'e') studio.bottom('editor');
 		else if (key === 'k') studio.bottom('cast');
 		else if (key === 'v') studio.viewerLarge = !studio.viewerLarge;
+		else if (key === 'p') studio.playFilm();
 		else used = false;
 		if (used) {
 			e.preventDefault();
@@ -329,6 +338,7 @@
 				</div>
 			</div>
 		{/if}
+		{#if studio.player}<StudioPlayer />{/if}
 	{/if}
 </section>
 

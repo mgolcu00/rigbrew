@@ -125,6 +125,9 @@
 		<button class="st-btn" onclick={() => studio.make()} disabled={studio.todo === 0 || !video || studio.view?.rendering} title={video ? `Make the shots that are not made (${mod}Return)` : 'Needs the video model'}>
 			Make{studio.todo > 0 ? ` ${studio.todo}` : ''}
 		</button>
+		<button class="st-btn" onclick={() => studio.playFilm()} disabled={studio.exportPlan.parts.length === 0 && !studio.exportCurrent} title={studio.exportCurrent ? 'Play the exported film (P)' : studio.view?.film ? 'Play the film as it is now, large (P): it changed after its export' : 'Play the film, large (P)'}>
+			<StudioIcon name="play" size={10} /> Play film
+		</button>
 		<button class="st-btn primary" onclick={() => studio.exportFilm()} disabled={studio.exportPlan.parts.length === 0 || exporting} title="Join the made shots and the sound tracks into one MP4 file in the film's folder ({mod}B)">{exporting ? 'Exporting…' : 'Export'}</button>
 		<button class="cb" class:on={studio.keysOpen} onclick={() => (studio.keysOpen = !studio.keysOpen)} title="Keys (?)" aria-label="List of keys"><StudioIcon name="keys" /></button>
 	</div>
