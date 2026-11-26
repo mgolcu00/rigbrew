@@ -2,7 +2,7 @@
 // Run with: node --test src/lib/*.test.mjs  (Node 22.18 or newer reads the .ts files as they are)
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { filmPlan, filmWork, partAt, remadeByMove, reorder, roughly, shotSeconds, stamp } from './studio.ts';
+import { filmPlan, filmWork, partAt, qualityOf, remadeByMove, reorder, roughly, shapeOf, shotLevel, shotSeconds, sizeAt, stamp } from './studio.ts';
 
 const shot = (id, over = {}) => ({ id, prompt: id, frames: 49, state: 'done', ...over });
 
@@ -78,4 +78,32 @@ test('the film plan follows trims and joins', () => {
 	const short = filmPlan([shot('a', { made_frames: 48 }), shot('b', { made_frames: 12, join: 'dissolve' })]);
 	assert.equal(short.parts[1].overlap, 0.25);
 	assert.equal(short.total, 2.25);
+});
+
+test('a size is of a shape and of a quality', () => {
+	const qualities = [
+		{ id: 'draft', label: 'Draft', sizes: { landscape: [640, 384], portrait: [384, 640], square: [512, 512] }, five: 250, fits: true },
+		{ id: 'standard', label: 'Standard', sizes: { landscape: [896, 512], portrait: [512, 896] }, five: 600, fits: true }
+	];
+	assert.deepEqual([shapeOf('640x384'), shapeOf('512x896'), shapeOf('512x512')], ['landscape', 'portrait', 'square']);
+	assert.equal(qualityOf(qualities, '512x896')?.id, 'standard');
+	assert.equal(qualityOf(qualities, '512x512')?.id, 'draft');
+	assert.equal(qualityOf(qualities, '700x400'), undefined);
+	assert.equal(qualityOf(undefined, '640x384'), undefined);
+	assert.equal(sizeAt(qualities[1], 'landscape'), '896x512');
+	// A quality without the shape has no size for it.
+	assert.equal(sizeAt(qualities[1], 'square'), undefined);
+});
+
+test('every shot plays toward one loudness, as the export has it', () => {
+	assert.equal(shotLevel(-24), 0);
+	assert.equal(shotLevel(-30.5), 6.5);
+	assert.equal(shotLevel(-10.5), -12);
+	assert.equal(shotLevel(-56.1), 12);
+	assert.deepEqual([shotLevel(-75), shotLevel(undefined), shotLevel(null), shotLevel(-Infinity)], [0, 0, 0, 0]);
+	const quiet = shot('a', { made_frames: 48, take: 2, takes: [{ n: 1, frames: 49, lufs: -10 }, { n: 2, frames: 49, lufs: -36 }], volume: 0.5 });
+	const plan = filmPlan([quiet, shot('b', { made_frames: 48 })]);
+	// The take in use is 12 dB too quiet: four times its volume. A shot not measured stays as it is.
+	assert.ok(Math.abs(plan.parts[0].volume - 0.5 * 10 ** (12 / 20)) < 1e-9);
+	assert.equal(plan.parts[1].volume, 1);
 });

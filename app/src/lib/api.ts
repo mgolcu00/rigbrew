@@ -523,6 +523,10 @@ export interface StudioTake {
 	ext?: string;
 	/** The clip has twice the film's width and height. */
 	large?: boolean;
+	/** "WxH" it was made at; missing for a take made at the film's size before sizes were kept. */
+	size?: string;
+	/** How loud its sound is (LUFS), once measured. */
+	lufs?: number;
 }
 
 /** One spoken line of a shot: by a cast member (`who` is their id) or, without one, the narrator. */
@@ -598,6 +602,8 @@ export interface StudioShot {
 	lines?: StudioLine[];
 	/** The id of a cast member whose portrait the shot starts from. */
 	from?: string;
+	/** "WxH" when the shot is made at a quality of its own; missing or empty for the film's. */
+	size?: string;
 }
 
 /** A stretch of a sound file at a place in the film. */
@@ -713,6 +719,18 @@ export interface StudioView {
 	voices?: number;
 	jobs?: { import: StudioJob; dub: StudioJob; listen: StudioJob };
 	has?: { video: boolean; chat: boolean; voice: boolean; image: boolean };
+	/** The qualities the installed video model makes shots at, and the one a film is made at when nobody chose. */
+	qualities?: StudioQuality[];
+	usual_quality?: string;
+}
+
+/** One quality of the video model: its size for each shape, what a five-second shot of it takes here, and whether it fits this machine. */
+export interface StudioQuality {
+	id: string;
+	label: string;
+	sizes: Partial<Record<'landscape' | 'portrait' | 'square', [number, number]>>;
+	five: number;
+	fits: boolean;
 }
 
 /** What a shot of `frames` frames takes on this machine, in seconds: plain, and continuing the shot before. */
@@ -734,7 +752,8 @@ export interface StudioListing {
 }
 
 /** The films, and `home`: the folder new films go into when none is chosen. */
-export const studioList = () => json<{ projects: StudioListing[]; home?: string | null; pace?: StudioPace; can_continue?: boolean; voices?: number }>('GET', '/v1/studio/projects');
+export const studioList = () =>
+	json<{ projects: StudioListing[]; home?: string | null; pace?: StudioPace; can_continue?: boolean; voices?: number; qualities?: StudioQuality[]; usual_quality?: string }>('GET', '/v1/studio/projects');
 /** Opens the film in `folder`, or starts one there. Without a folder the service makes one named after the film. */
 export const studioOpen = (folder: string, name = '') => json<StudioView>('POST', '/v1/studio/projects', { folder, name });
 export const studioRead = (id: string) => json<StudioView>('GET', `/v1/studio/projects/${enc(id)}`);
@@ -772,6 +791,7 @@ export interface StudioSave {
 		seed?: number | null;
 		lines?: { id?: string; who?: string; text: string; said?: Record<string, string> }[];
 		from?: string;
+		size?: string;
 	}[];
 	look?: string;
 	cast?: { id?: string; name: string; look?: string; voice?: number | null }[];
@@ -832,6 +852,8 @@ export interface StudioBrief {
 	title: string;
 	shape: 'landscape' | 'portrait' | 'square';
 	size: string;
+	/** The quality `size` is of. */
+	quality?: string;
 	seconds: number;
 	frames: number;
 	shots: number;

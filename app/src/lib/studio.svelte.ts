@@ -3,7 +3,7 @@
 // none of them talks to the service on its own.
 
 import * as api from './api.ts';
-import type { StudioBrief, StudioJob, StudioListing, StudioPace, StudioShot, StudioSound, StudioView } from './api.ts';
+import type { StudioBrief, StudioJob, StudioListing, StudioPace, StudioQuality, StudioShot, StudioSound, StudioView } from './api.ts';
 import { drawCaption } from './studio-captions.ts';
 import { codeOf, plain } from './errors.ts';
 import { remembered } from './remember.ts';
@@ -32,7 +32,7 @@ import {
 	type DocShot,
 	type DocTrack
 } from './studio-edit.ts';
-import { filmPlan, hasClip, shotSeconds } from './studio.ts';
+import { filmPlan, hasClip, qualityOf, shapeOf, shotSeconds, sizeAt } from './studio.ts';
 import { FPS, MAX_PPS, MIN_PPS, snapFrame } from './studio-time.ts';
 
 export { MASTER, SHOTS };
@@ -104,6 +104,9 @@ class Studio {
 	carries = $state(false);
 	/** How many voices the installed voice has. */
 	voices = $state(0);
+	/** The qualities the video model makes shots at, and the one a film is made at when nobody chose. */
+	qualities = $state<StudioQuality[]>([]);
+	usualQuality = $state('');
 
 	// --- the film that is open ----------------------------------------------------------------------
 	/** The film as the service last sent it: states, takes, progress, export. */
@@ -255,6 +258,8 @@ class Studio {
 			this.pace = all.pace ?? null;
 			this.carries = Boolean(all.can_continue);
 			this.voices = all.voices ?? 0;
+			this.qualities = all.qualities ?? [];
+			this.usualQuality = all.usual_quality ?? '';
 		} catch (e) {
 			this.problem = say(e);
 		}
@@ -515,6 +520,48 @@ class Studio {
 	/** The length a new shot gets: the video package's usual one. */
 	get usualFrames() {
 		return app.videoPackage?.defaults?.frames ?? 121;
+	}
+
+	// --- quality ------------------------------------------------------------------------------------
+
+	/** The qualities of the video model, as the open film's view has them, else the list. */
+	get qualityList(): StudioQuality[] {
+		return this.view?.qualities ?? this.qualities;
+	}
+
+	/** The quality a "WxH" size is of. */
+	qualityOfSize(size: string) {
+		return qualityOf(this.qualityList, size);
+	}
+
+	/**
+	 * The film in another shape or at another quality: its size in both, and every shot that has a
+	 * quality of its own at that quality in the new shape.
+	 */
+	reshape(shape: 'landscape' | 'portrait' | 'square', quality = this.qualityOfSize(this.doc?.size ?? '')?.id) {
+		const doc = this.doc;
+		if (!doc) return;
+		const size = sizeAt(this.qualityList.find((q) => q.id === quality), shape) ?? sizeAt(this.qualityList[0], shape);
+		if (!size) return;
+		this.edit(shape === shapeOf(doc.size) ? 'Quality of the film' : 'Shape of the film', (d) => {
+			d.size = size;
+			for (const s of d.shots) {
+				if (!s.size) continue;
+				const own = sizeAt(this.qualityOfSize(s.size), shape);
+				s.size = own && own !== size ? own : '';
+			}
+		});
+	}
+
+	/** A shot made at a quality of its own, or ('') at the film's. */
+	setShotQuality(shot: string, quality: string) {
+		const doc = this.doc;
+		if (!doc) return;
+		const size = sizeAt(this.qualityList.find((q) => q.id === quality), shapeOf(doc.size)) ?? '';
+		this.edit('Quality of the shot', (d) => {
+			const s = d.shots.find((x) => x.id === shot);
+			if (s) s.size = size === d.size ? '' : size;
+		});
 	}
 
 	addShot(at?: number, prompt = '') {
@@ -1158,8 +1205,11 @@ class Studio {
 			}
 			const frames = brief.frames ?? this.usualFrames;
 			const count = wish.shots ?? brief.shots ?? Math.max(1, Math.round((brief.seconds ?? 30) / (frames / 24)));
+			// A quality that was chosen, in the shape the director chose when the shape was left to it.
+			const quality = this.qualities.find((q) => q.id === wish.quality);
+			const shape = brief.shape ?? (brief.size ? shapeOf(brief.size) : 'landscape');
 			await api.studioSave(id, {
-				size: brief.size,
+				size: (wish.size ? undefined : sizeAt(quality, shape)) ?? brief.size,
 				look: brief.look ?? '',
 				cast: (brief.cast ?? []).map((m) => ({ name: m.name, look: m.look })),
 				speech: Boolean(brief.speech),

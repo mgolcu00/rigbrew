@@ -21,6 +21,8 @@ export interface DocShot {
 	lines: DocLine[];
 	/** The id of a cast member whose portrait the shot starts from; empty for none. */
 	from: string;
+	/** "WxH" when the shot is made at a quality of its own; empty for the film's. */
+	size: string;
 }
 
 /** One spoken line: by a cast member (`who` is their id) or, with none, the narrator. */
@@ -116,7 +118,8 @@ export const docShot = (s: Partial<StudioShot> & { id: string }): DocShot => ({
 	mute: Boolean(s.mute),
 	seed: s.seed ?? null,
 	lines: (s.lines ?? []).map((l) => ({ id: l.id, who: l.who ?? '', text: l.text, said: { ...l.said } })),
-	from: s.from ?? ''
+	from: s.from ?? '',
+	size: s.size ?? ''
 });
 
 export const docMember = (m: Partial<StudioMember> & { id: string }): DocMember => ({ id: m.id, name: m.name ?? '', look: m.look ?? '', voice: m.voice ?? null });

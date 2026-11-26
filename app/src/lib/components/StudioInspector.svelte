@@ -6,7 +6,7 @@
 	import { STATE_WORD, fileName } from '#lib/studio-look.ts';
 	import { SHOTS, TRACK_COLORS, studio } from '#lib/studio.svelte.ts';
 	import { shortTime, timecode } from '#lib/studio-time.ts';
-	import { hasClip, roughly, shotSeconds } from '#lib/studio.ts';
+	import { hasClip, roughly, shapeOf, shotSeconds } from '#lib/studio.ts';
 	import { isMac } from '#lib/words.ts';
 	import StudioFader from './StudioFader.svelte';
 	import StudioIcon from './StudioIcon.svelte';
@@ -76,11 +76,18 @@
 	const liveRegion = (change: (r: DocRegion) => void) => studio.live(() => found && change(studio.region(found.region.id)!.region));
 	const liveTrack = (change: (t: DocTrack) => void) => studio.live(() => track && change(studio.trackOf(track.id)!));
 
-	// What a shot of this length takes here, from the shots made on this machine.
+	// The qualities the video model makes shots at; the film's, and the selected shot's own.
+	const qualities = $derived(studio.qualityList);
+	const filmQuality = $derived(doc ? studio.qualityOfSize(doc.size) : undefined);
+	const shotQuality = $derived(shot?.size ? (studio.qualityOfSize(shot.size)?.id ?? '') : '');
+
+	// What a shot of this length and quality takes here, from the shots made on this machine.
 	const estimate = $derived.by(() => {
 		const pace = studio.pace;
-		if (!shot || !pace) return 0;
-		return (shot.continues && shotAt > 0 ? pace.continuing : pace.plain) * (shot.frames / pace.frames);
+		if (!shot || !pace || !doc) return 0;
+		const five = studio.qualityOfSize(shot.size || doc.size)?.five ?? pace.plain;
+		const kind = shot.continues && shotAt > 0 ? pace.continuing / Math.max(1, pace.plain) : 1;
+		return five * kind * (shot.frames / pace.frames);
 	});
 	const used = $derived(shot?.takes?.find((t) => t.n === shot.take));
 
@@ -134,12 +141,20 @@
 	}
 
 	function setShape(name: SizeName) {
-		const size = `${shapes[name].width}x${shapes[name].height}`;
-		if (!doc || doc.size === size) return;
+		if (!doc || shapeOf(doc.size) === name) return;
 		const made = studio.shots.filter((s) => s.state === 'done').length;
-		const act = () => studio.edit('Shape of the film', (d) => (d.size = size));
+		const act = () => (qualities.length > 0 ? studio.reshape(name) : studio.edit('Shape of the film', (d) => (d.size = `${shapes[name].width}x${shapes[name].height}`)));
 		if (made === 0) act();
 		else studio.question = { text: `Every shot of a film has the same shape. The ${made} made ${made === 1 ? 'shot has' : 'shots have'} to be made again in the new one.`, yes: 'Change the shape', no: 'Keep it', act };
+	}
+
+	function setQuality(id: string) {
+		if (!doc || filmQuality?.id === id) return;
+		const label = qualities.find((q) => q.id === id)?.label ?? id;
+		const made = studio.shots.filter((s) => s.state === 'done' && !s.size).length;
+		const act = () => studio.reshape(shapeOf(doc.size), id);
+		if (made === 0) act();
+		else studio.question = { text: `The ${made} made ${made === 1 ? 'shot keeps its clip' : 'shots keep their clips'} and ${made === 1 ? 'is' : 'are'} marked Changed until made again at ${label}.`, yes: `Make it ${label}`, no: 'Keep it', act };
 	}
 	const [filmWidth, filmHeight] = $derived((doc?.size ?? '640x384').split('x').map(Number));
 </script>
@@ -239,6 +254,15 @@
 					{/each}
 				</span>
 			</div>
+			{#if qualities.length > 1}
+				<div class="st-row">
+					<span class="st-lab">Quality</span>
+					<select class="st-in" value={shotQuality} aria-label="Quality of the shot" title={made ? 'A made shot is marked Changed until it is made again. Its clip stays as a take.' : ''} onchange={(e) => studio.setShotQuality(shot.id, e.currentTarget.value)}>
+						<option value="">The film's{filmQuality ? `: ${filmQuality.label}` : ''}</option>
+						{#each qualities as q (q.id)}<option value={q.id} disabled={!q.fits}>{q.label}</option>{/each}
+					</select>
+				</div>
+			{/if}
 			{#if shotAt > 0 && studio.view?.can_continue}
 				<label class="st-row st-check" title="The shot starts from the last picture of the shot before it, so the two join without a cut. It takes longer to make.">
 					<input type="checkbox" checked={shot.continues} onchange={(e) => setShot('Continue the shot before', (s) => (s.continues = e.currentTarget.checked))} />
@@ -560,11 +584,21 @@
 				<span class="st-lab">Shape</span>
 				<span class="st-seg shapes" role="radiogroup" aria-label="Shape of the film">
 					{#each Object.entries(shapes) as [name, s] (name)}
-						<button role="radio" aria-checked={doc.size === `${s.width}x${s.height}`} onclick={() => setShape(name as SizeName)} disabled={studio.view?.rendering} title="{s.label}, {s.width} × {s.height}" aria-label={s.label}><span class="shape" style:aspect-ratio="{s.width} / {s.height}"></span></button>
+						<button role="radio" aria-checked={shapeOf(doc.size) === name} onclick={() => setShape(name as SizeName)} disabled={studio.view?.rendering} title={s.label} aria-label={s.label}><span class="shape" style:aspect-ratio="{s.width} / {s.height}"></span></button>
 					{/each}
 				</span>
 				<span class="st-val left">{filmWidth} × {filmHeight}</span>
 			</div>
+			{#if qualities.length > 1}
+				<div class="st-row">
+					<span class="st-lab">Quality</span>
+					<span class="st-seg" role="radiogroup" aria-label="Quality of the film">
+						{#each qualities as q (q.id)}
+							<button role="radio" aria-checked={filmQuality?.id === q.id} onclick={() => setQuality(q.id)} disabled={studio.view?.rendering || !q.fits} title={q.fits ? `${roughly(q.five)} a five-second shot` : 'Needs more memory than this computer has'}>{q.label}</button>
+						{/each}
+					</span>
+				</div>
+			{/if}
 			<div class="st-row">
 				<span class="st-lab">Folder</span>
 				<span class="path one selectable" title={studio.project?.folder}>{tilde(studio.project?.folder ?? '')}</span>
@@ -626,7 +660,7 @@
 				<input class="st-in grow" bind:value={into} maxlength="24" placeholder="Another language" aria-label="Another language to translate the lines into" onkeydown={(e) => (e.stopPropagation(), e.key === 'Enter' && translate())} />
 				<button class="st-btn" onclick={translate} disabled={!into.trim() || lineCount === 0 || dubbing || app.chatPackages.length === 0} title={app.chatPackages.length === 0 ? 'Needs the chat model' : 'The chat model translates the lines'}>Translate</button>
 			</div>
-			{#if into.trim() && !reads(into)}<p class="st-note">The voice reads {spoken.join(' and ')}. {into.trim()}: subtitles only.</p>{/if}
+			{#if into.trim() && !reads(into)}<p class="st-note">{spoken.length <= 3 ? `The voice reads ${spoken.join(' and ')}. ` : 'No voice reads it. '}{into.trim()}: subtitles only.</p>{/if}
 			{#if languages.length > 1}
 				<div class="st-row">
 					<span class="st-lab">Shown in</span>

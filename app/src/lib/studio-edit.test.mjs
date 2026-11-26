@@ -381,12 +381,12 @@ test('a film goes to the workstation and back to the service', () => {
 	};
 	const doc = docOf(project);
 	// What the service knows about clips is not part of the film an edit changes.
-	assert.deepEqual(Object.keys(doc.shots[0]).sort(), ['continues', 'frames', 'from', 'id', 'join', 'join_seconds', 'lines', 'mute', 'prompt', 'seed', 'trim_end', 'trim_start', 'volume']);
+	assert.deepEqual(Object.keys(doc.shots[0]).sort(), ['continues', 'frames', 'from', 'id', 'join', 'join_seconds', 'lines', 'mute', 'prompt', 'seed', 'size', 'trim_end', 'trim_start', 'volume']);
 	assert.deepEqual([doc.shots[0].join, doc.shots[0].join_seconds, doc.shots[0].volume, doc.shots[1].join_seconds], ['cut', 0.5, 1, 1.25]);
 	assert.deepEqual([doc.master, doc.fade_in, doc.fade_out, doc.shot_track], [1, true, false, { volume: 1, pan: 0, mute: false, solo: false }]);
 	assert.deepEqual(doc.tracks[0].regions[0], { id: 'r1', file: '/m/theme.wav', start: 2, offset: 0, length: 8, gain: 1, fade_in: 0, fade_out: 0, loops: 3 });
 	const body = saveBody(doc);
-	assert.deepEqual(body.shots[1], { id: 'b2', prompt: 'a boat', frames: 121, continues: true, trim_start: 0.5, trim_end: 0, join: 'dissolve', join_seconds: 1.25, volume: 0.5, mute: true, seed: 7, lines: [], from: '' });
+	assert.deepEqual(body.shots[1], { id: 'b2', prompt: 'a boat', frames: 121, continues: true, trim_start: 0.5, trim_end: 0, join: 'dissolve', join_seconds: 1.25, volume: 0.5, mute: true, seed: 7, lines: [], from: '', size: '' });
 	// A film from before casts and lines has none, shows its subtitles and turns the shots down under speech.
 	assert.deepEqual([doc.look, doc.cast, doc.seed, doc.speech, doc.dub, doc.subtitles, doc.duck], ['', [], null, false, '', { show: true, burn: false }, 0.6]);
 	assert.deepEqual([body.look, body.cast, body.seed, body.voice, body.subtitles, body.duck], ['', [], null, null, { show: true, burn: false }, 0.6]);

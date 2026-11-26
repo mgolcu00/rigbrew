@@ -6,7 +6,7 @@
 	import { app } from '#lib/state.svelte.ts';
 	import { fileName } from '#lib/studio-look.ts';
 	import { studio } from '#lib/studio.svelte.ts';
-	import { filmWork, roughly } from '#lib/studio.ts';
+	import { filmWork, roughly, sizeAt } from '#lib/studio.ts';
 	import StudioIcon from './StudioIcon.svelte';
 	import StudioNeeds from './StudioNeeds.svelte';
 
@@ -40,6 +40,10 @@
 	const filmLengths = [15, 30, 60, 120, 300] as const;
 	const lengthLabel = (s: number) => (s < 60 ? `${s} s` : `${s / 60} min`);
 	let shape = $state<SizeName | 'auto'>('auto');
+	// The quality this machine makes well, unless another is chosen.
+	let quality = $state('');
+	const chosenQuality = $derived(quality || studio.usualQuality);
+	const qualityShown = $derived(studio.qualities.find((q) => q.id === chosenQuality));
 	let seconds = $state<number | 'auto'>('auto');
 	let shotCount = $state('');
 	let look = $state('');
@@ -54,7 +58,9 @@
 
 	const written = $derived(about.split('\n').filter((l) => l.trim()).length);
 	const planned = $derived(asWritten ? Math.min(60, Math.max(1, written)) : Number(shotCount) > 0 ? Math.min(60, Math.floor(Number(shotCount))) : seconds === 'auto' ? 0 : Math.max(1, Math.round(seconds / (five / 24))));
-	const work = $derived(planned > 0 && studio.pace ? filmWork(planned, five, studio.pace, studio.carries) : 0);
+	// The pace is of the usual quality; another one takes as much longer as its five-second shot does.
+	const slower = $derived(studio.pace && qualityShown ? qualityShown.five / Math.max(1, studio.qualities.find((q) => q.id === studio.usualQuality)?.five ?? studio.pace.plain) : 1);
+	const work = $derived(planned > 0 && studio.pace ? filmWork(planned, five, studio.pace, studio.carries) * slower : 0);
 
 	async function changeFolder() {
 		const chosen = await api.pickFolder('Choose a folder for the film');
@@ -78,7 +84,8 @@
 					text,
 					{
 						shape: chosen,
-						size: chosen ? `${shapes[chosen].width}x${shapes[chosen].height}` : undefined,
+						size: chosen ? (sizeAt(qualityShown, chosen) ?? `${shapes[chosen].width}x${shapes[chosen].height}`) : undefined,
+						quality: qualityShown?.id,
 						seconds: seconds === 'auto' ? undefined : seconds,
 						shots: planned > 0 ? planned : undefined,
 						frames: five,
@@ -197,10 +204,20 @@
 						<span class="st-seg" role="radiogroup" aria-label="Shape of the film">
 							<button type="button" role="radio" aria-checked={shape === 'auto'} onclick={() => (shape = 'auto')}>Auto</button>
 							{#each Object.entries(shapes) as [name, s] (name)}
-								<button type="button" role="radio" aria-checked={shape === name} onclick={() => (shape = name as SizeName)} title="{s.label}, {s.width} × {s.height}" aria-label={s.label}><span class="shape" style:aspect-ratio="{s.width} / {s.height}"></span></button>
+								<button type="button" role="radio" aria-checked={shape === name} onclick={() => (shape = name as SizeName)} title={s.label} aria-label={s.label}><span class="shape" style:aspect-ratio="{s.width} / {s.height}"></span></button>
 							{/each}
 						</span>
 					</div>
+					{#if studio.qualities.length > 1}
+						<div class="st-row">
+							<span class="st-lab">Quality</span>
+							<span class="st-seg" role="radiogroup" aria-label="Quality of the film">
+								{#each studio.qualities as q (q.id)}
+									<button type="button" role="radio" aria-checked={chosenQuality === q.id} onclick={() => (quality = q.id)} disabled={!q.fits} title={q.fits ? `${roughly(q.five)} a five-second shot` : 'Needs more memory than this computer has'}>{q.label}</button>
+								{/each}
+							</span>
+						</div>
+					{/if}
 					{#if !asWritten}
 						<div class="st-row">
 							<span class="st-lab">Length</span>

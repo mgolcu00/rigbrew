@@ -1,7 +1,34 @@
 // Studio arithmetic that has no screen in it: how long a shot is, what a move does to the film,
 // which part of which clip is on screen at a moment of the film.
 
-import type { StudioShot } from './api.ts';
+import type { StudioQuality, StudioShot } from './api.ts';
+
+export type Shape = 'landscape' | 'portrait' | 'square';
+
+/** The shape of a "WxH" size. */
+export function shapeOf(size: string): Shape {
+	const [w, h] = size.split('x').map(Number);
+	return w > h ? 'landscape' : w < h ? 'portrait' : 'square';
+}
+
+/** The quality a "WxH" size is one of. */
+export const qualityOf = (qualities: readonly StudioQuality[] | undefined, size: string) =>
+	(qualities ?? []).find((q) => Object.values(q.sizes).some((s) => s && `${s[0]}x${s[1]}` === size));
+
+/** The "WxH" of a quality for a shape. */
+export function sizeAt(quality: StudioQuality | undefined, shape: Shape): string | undefined {
+	const s = quality?.sizes[shape];
+	return s ? `${s[0]}x${s[1]}` : undefined;
+}
+
+/**
+ * Decibels that bring a shot whose sound measured `lufs` toward the loudness of the others, as
+ * the export does it: toward -24 LUFS, at most 12 dB either way, nothing for silence.
+ */
+export function shotLevel(lufs: number | null | undefined): number {
+	if (lufs == null || !Number.isFinite(lufs) || lufs <= -70) return 0;
+	return Math.min(12, Math.max(-12, -24 - lufs));
+}
 
 /** A shot with a clip: made, made and then changed, or being made again while the clip before is still there. */
 export const hasClip = (shot: StudioShot) =>
@@ -86,7 +113,7 @@ export interface FilmPart {
 	/** Seconds it comes up from black at its start, and goes down to black at its end. */
 	fadeIn: number;
 	fadeOut: number;
-	/** 0 to 1.5; 0 when muted. */
+	/** The shot's volume (0 to 1.5; 0 when muted) times what brings its sound toward the others' loudness. */
 	volume: number;
 }
 
@@ -118,7 +145,8 @@ export function filmPlan(shots: readonly StudioShot[], all = false): { parts: Fi
 		const dip = Math.floor(asked / 2);
 		const fadeIn = join === 'black' ? Math.min(dip, Math.floor(frames / 2)) / FPS : 0;
 		if (before && join === 'black') before.fadeOut = Math.min(dip, Math.floor(beforeFrames / 2)) / FPS;
-		const volume = shot.mute ? 0 : Math.min(1.5, Math.max(0, shot.volume ?? 1));
+		const lufs = shot.takes?.find((t) => t.n === shot.take)?.lufs;
+		const volume = shot.mute ? 0 : Math.min(1.5, Math.max(0, shot.volume ?? 1)) * 10 ** (shotLevel(lufs) / 20);
 		parts.push({
 			shot: shot.id,
 			index,
