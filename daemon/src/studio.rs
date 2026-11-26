@@ -978,7 +978,7 @@ fn maybe<'de, T: Deserialize<'de>, D: serde::Deserializer<'de>>(d: D) -> Result<
     Option::<T>::deserialize(d).map(Some)
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 struct Save {
     #[serde(default)]
     look: Option<String>,
@@ -1167,13 +1167,45 @@ async fn save(State(app): State<Shared>, Path(id): Path<String>, Json(body): Jso
     let Some(mut p) = load(&app, &id) else {
         return fail(StatusCode::NOT_FOUND, "no such film, or its folder is gone");
     };
+    if let Err(e) = apply_save(&app, &mut p, body) {
+        return fail(StatusCode::BAD_REQUEST, e);
+    }
+    if let Err(e) = store(&mut p) {
+        return fail(StatusCode::INTERNAL_SERVER_ERROR, format!("the film could not be saved: {e}"));
+    }
+    Json(view(&app, p)).into_response()
+}
+
+/// The shot as it stands, as the workstation sends it back: its lines are kept as they are.
+fn shot_in(s: &Shot) -> ShotIn {
+    ShotIn {
+        id: Some(s.id.clone()),
+        prompt: s.prompt.clone(),
+        frames: Some(s.frames),
+        trim_start: s.trim_start,
+        trim_end: s.trim_end,
+        continues: s.continues,
+        join: s.join.clone(),
+        join_seconds: Some(s.join_seconds),
+        volume: Some(s.volume),
+        mute: s.mute,
+        seed: s.seed,
+        lines: None,
+        from: Some(s.from.clone()),
+    }
+}
+
+/// One change to a film, as the workstation sends it: what `body` has replaces what the film
+/// has, checked the same way whoever sends it (the person's edits, the assistant's). Nothing is
+/// stored here; on an error the film is left half changed and must not be stored.
+fn apply_save(app: &App, p: &mut Project, body: Save) -> Result<(), String> {
     if let Some(name) = body.name.map(|n| n.trim().chars().take(80).collect::<String>()).filter(|n| !n.is_empty()) {
         p.name = name;
     }
     let was = (p.size.clone(), p.look.clone(), p.cast.clone());
     if let Some(size) = body.size {
         if !valid_size(&size) {
-            return fail(StatusCode::BAD_REQUEST, "size must be WIDTHxHEIGHT, each 256 to 1280 and a multiple of 32");
+            return Err("size must be WIDTHxHEIGHT, each 256 to 1280 and a multiple of 32".into());
         }
         p.size = size;
     }
@@ -1181,10 +1213,7 @@ async fn save(State(app): State<Shared>, Path(id): Path<String>, Json(body): Jso
         p.look = look.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(300).collect();
     }
     if let Some(members) = body.cast {
-        match cast::merge_cast(&p.cast, members, new_id) {
-            Ok(list) => p.cast = list,
-            Err(e) => return fail(StatusCode::BAD_REQUEST, e),
-        }
+        p.cast = cast::merge_cast(&p.cast, members, new_id)?;
     }
     if let Some(seed) = body.seed {
         p.seed = seed.filter(|seed| (0..=u32::MAX as i64).contains(seed));
@@ -1203,35 +1232,12 @@ async fn save(State(app): State<Shared>, Path(id): Path<String>, Json(body): Jso
         p.duck = duck.clamp(0.0, 1.0);
     }
     // Without a list of shots the film keeps the ones it has, in a shape that may be new.
-    let shots = body.shots.unwrap_or_else(|| {
-        let as_it_is = |s: &Shot| ShotIn {
-            id: Some(s.id.clone()),
-            prompt: s.prompt.clone(),
-            frames: Some(s.frames),
-            trim_start: s.trim_start,
-            trim_end: s.trim_end,
-            continues: s.continues,
-            join: s.join.clone(),
-            join_seconds: Some(s.join_seconds),
-            volume: Some(s.volume),
-            mute: s.mute,
-            seed: s.seed,
-            lines: None,
-            from: Some(s.from.clone()),
-        };
-        p.shots.iter().map(as_it_is).collect()
-    });
+    let shots = body.shots.unwrap_or_else(|| p.shots.iter().map(shot_in).collect());
     let films = (Film { size: &was.0, look: &was.1, cast: &was.2 }, Film { size: &p.size, look: &p.look, cast: &p.cast });
-    match merge(&p.shots, &p.removed, shots, (&films.0, &films.1)) {
-        Ok((list, removed)) => (p.shots, p.removed) = (list, removed),
-        Err(e) => return fail(StatusCode::BAD_REQUEST, e),
-    }
+    (p.shots, p.removed) = merge(&p.shots, &p.removed, shots, (&films.0, &films.1))?;
     if let Some(tracks) = body.tracks {
         let (before, regions_before) = (p.tracks.len(), p.tracks.iter().map(|t| t.regions.len()).sum::<usize>());
-        match sound::merge_tracks(FsPath::new(&p.folder), &p.tracks, tracks, new_id, &p.sounds) {
-            Ok(list) => p.tracks = list,
-            Err(e) => return fail(StatusCode::BAD_REQUEST, e),
-        }
+        p.tracks = sound::merge_tracks(FsPath::new(&p.folder), &p.tracks, tracks, new_id, &p.sounds)?;
         let regions = p.tracks.iter().map(|t| t.regions.len()).sum::<usize>();
         if p.tracks.len() > before {
             app.record("studio_track_added", json!({"tracks": p.tracks.len()}));
@@ -1246,11 +1252,11 @@ async fn save(State(app): State<Shared>, Path(id): Path<String>, Json(body): Jso
     if let Some(chosen) = body.dub {
         // One language is heard at a time: choosing it unmutes its voice track and mutes the others.
         let chosen = words::language(&chosen);
-        let chosen = if chosen.eq_ignore_ascii_case(&dub::own_language(&p)) { String::new() } else { chosen };
+        let chosen = if chosen.eq_ignore_ascii_case(&dub::own_language(p)) { String::new() } else { chosen };
         // Only when the choice changes: after that the mutes are the person's own again.
         if !chosen.eq_ignore_ascii_case(&p.dub) {
             p.dub = chosen;
-            dub::hear_one(&mut p);
+            dub::hear_one(p);
         }
     }
     if let Some(master) = body.master.filter(|v| v.is_finite()) {
@@ -1262,7 +1268,7 @@ async fn save(State(app): State<Shared>, Path(id): Path<String>, Json(body): Jso
     if let Some(sound) = body.sound {
         let sound = sound.trim();
         if !sound.is_empty() && (!FsPath::new(sound).is_absolute() || sound.len() > 1024) {
-            return fail(StatusCode::BAD_REQUEST, "give the sound file by its full path");
+            return Err("give the sound file by its full path".into());
         }
         p.sound = sound.to_string();
     }
@@ -1275,10 +1281,7 @@ async fn save(State(app): State<Shared>, Path(id): Path<String>, Json(body): Jso
     if let Some(options) = body.export {
         p.export = options.tidy();
     }
-    if let Err(e) = store(&mut p) {
-        return fail(StatusCode::INTERNAL_SERVER_ERROR, format!("the film could not be saved: {e}"));
-    }
-    Json(view(&app, p)).into_response()
+    Ok(())
 }
 
 async fn forget(State(app): State<Shared>, Path(id): Path<String>) -> Response {
