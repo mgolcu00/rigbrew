@@ -1,6 +1,6 @@
-//! Reading text aloud with an installed voice package (the Whistle family).
+//! Reading text aloud with an installed voice package.
 //!
-//!   POST   /v1/audio/speech               OpenAI-compatible: {"model", "input", "voice"?, "speed"?}; answers
+//!   POST   /v1/audio/speech               OpenAI-compatible: {"model", "input", "voice"?, "speed"?, "language"?}; answers
 //!                                         with the WAV, and saves it as /v1/audio/files/<id>.wav
 //!   GET    /v1/audio/files/{id}.wav       a saved reading; DELETE removes it
 //!
@@ -30,6 +30,18 @@ pub struct SpeechBody {
     voice: Option<serde_json::Value>,
     #[serde(default)]
     speed: Option<f32>,
+    /// The language the input is in, by its English name or two letters, for a voice that reads several.
+    #[serde(default)]
+    language: Option<String>,
+}
+
+/// The two letters of a language as a voice is told them: "tr" for "Turkish" or "tr"; empty when unknown.
+fn letters(language: Option<&str>) -> String {
+    let Some(language) = language.map(str::trim).filter(|l| !l.is_empty()) else { return String::new() };
+    if language.len() == 2 && language.bytes().all(|b| b.is_ascii_alphabetic()) {
+        return language.to_ascii_lowercase();
+    }
+    voice::language_letters(language).unwrap_or_default().to_string()
 }
 
 fn audio_file(app: &App, name: &str) -> Option<std::path::PathBuf> {
@@ -58,13 +70,18 @@ pub async fn speech(State(app): State<Shared>, Json(body): Json<SpeechBody>) -> 
             _ => return fail(StatusCode::BAD_REQUEST, "voice must be a speaker number"),
         },
     };
+    // A voice with fewer speakers than the number asked for reads with one of its own.
+    let speaker = match package.defaults["speakers"].as_u64().filter(|n| *n > 0) {
+        Some(n) => speaker % n as u32,
+        None => speaker,
+    };
     let binary = match engine_program(&app, EngineKind::Sherpa).await {
         Ok(p) => p,
         Err(e) => return fail(StatusCode::SERVICE_UNAVAILABLE, e),
     };
     let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).clamp(2, 6);
     let model = VoiceModel { binary, dir: rigbrew_core::bundle::dir(&app.packages_dir(), bundle), threads };
-    let speech = Speech { text: text.clone(), speaker, speed: body.speed.unwrap_or(1.0) };
+    let speech = Speech { text: text.clone(), speaker, speed: body.speed.unwrap_or(1.0), lang: letters(body.language.as_deref()) };
 
     let dir = app.root.join("audio");
     if let Err(e) = std::fs::create_dir_all(&dir) {
@@ -201,5 +218,18 @@ pub async fn transcribe(State(app): State<Shared>, mut form: axum::extract::Mult
             app.record("transcribe_failed", json!({"package": package.id, "variant": variant.id, "error": e.to_string()}));
             fail(StatusCode::BAD_GATEWAY, e.to_string())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_language_is_told_to_the_voice_by_two_letters() {
+        assert_eq!(letters(Some("Turkish")), "tr");
+        assert_eq!(letters(Some(" TR ")), "tr");
+        assert_eq!(letters(Some("english")), "en");
+        assert_eq!((letters(Some("Klingon")), letters(Some("")), letters(None)), (String::new(), String::new(), String::new()));
     }
 }
