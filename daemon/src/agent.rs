@@ -897,7 +897,7 @@ async fn call_tool(app: &Shared, id: &str, folder: &Folder, call: &str, name: &s
             }
             undo::before_change(app, id, folder, None).await;
             let ran = files::run(folder, command, COMMAND_TIMEOUT, apps::net_of(app, &task)).await;
-            (ran.text, if ran.ok { "done" } else { "failed" })
+            (checks::digest(&ran, folder.root()), if ran.ok { "done" } else { "failed" })
         }
         "web_search" => {
             let Some(query) = arg_str(args, "query") else { return missing("query") };

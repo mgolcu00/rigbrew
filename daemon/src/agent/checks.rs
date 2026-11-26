@@ -338,6 +338,11 @@ pub fn failures(output: &str, root: &Path) -> Vec<String> {
     static PYTHON: OnceLock<Regex> = OnceLock::new();
     static NODE_AT: OnceLock<Regex> = OnceLock::new();
     static TOOK: OnceLock<Regex> = OnceLock::new();
+    static PY_TEST: OnceLock<Regex> = OnceLock::new();
+    static PY_SAID: OnceLock<Regex> = OnceLock::new();
+    // pytest heads each failure with its name between underscores, and marks what went wrong with "E".
+    let py_test = re(&PY_TEST, r"^_{3,} (\S.*?) _{3,}$");
+    let py_said = re(&PY_SAID, r"^E {2,}(\S.*)$");
     // Node's own runner says where a failed test is on the line before its name.
     let node_at = re(&NODE_AT, r"^test at (\S+?):(\d+):\d+$");
     let took = re(&TOOK, r" \([\d.]+ ?m?s\)$");
@@ -368,10 +373,27 @@ pub fn failures(output: &str, root: &Path) -> Vec<String> {
             list.push(line);
         }
     };
-    // What the lines before said: an error without a place yet, a file named on a line of its own.
+    // What the lines before said: an error without a place yet, a file named on a line of its own,
+    // the pytest test being reported and the first thing it said went wrong.
     let (mut error, mut file) = (String::new(), String::new());
+    let (mut py_name, mut py_what, mut py_seen) = (String::new(), String::new(), false);
     for (i, line) in lines.iter().enumerate() {
         let next = lines.get(i + 1).map_or("", |l| l.trim());
+        if let Some(c) = py_test.captures(line) {
+            (py_name, py_seen) = (c[1].to_string(), true);
+            py_what.clear();
+            continue;
+        }
+        if let Some(c) = py_said.captures(line) {
+            if py_what.is_empty() {
+                py_what = c[1].trim().to_string();
+            }
+            continue;
+        }
+        // With the failures read one by one, pytest's summary at the end says them again.
+        if py_seen && line.starts_with("FAILED ") {
+            continue;
+        }
         if let Some(c) = panic.captures(line) {
             push(&mut out, clip(&format!("{}:{} {}: {next}", near(root, &c[2]), &c[3], &c[1])));
             continue;
@@ -416,6 +438,11 @@ pub fn failures(output: &str, root: &Path) -> Vec<String> {
         }
         if let Some(c) = place.captures(line) {
             let (path, at, said) = (near(root, &c[1]), &c[2], c[3].trim());
+            if !py_name.is_empty() && !py_what.is_empty() {
+                push(&mut out, clip(&format!("{path}:{at} {py_name}: {py_what}")));
+                py_name.clear();
+                continue;
+            }
             // A place on a line of its own: what went wrong is on the next line.
             let said = if said.is_empty() && bad(next) { next } else { said };
             if said.is_empty() || path.starts_with("node_modules/") {
@@ -464,6 +491,31 @@ fn missing_program(output: &str) -> Option<String> {
     let command =
         re(&COMMAND, r"(?m)(?:^|: )([\w.@/-]+): (?:command )?not found|'([\w.@/-]+)' is not recognized as an internal or external command");
     command.captures(output).map(|c| format!("{} is not installed on this computer", c.get(1).or(c.get(2)).map_or("", |m| m.as_str())))
+}
+
+/// What the model reads of a command that failed: when its output is too long to read whole,
+/// the failures found in it (as `check_project` gives them) and its end, instead of its start
+/// and its end. A long test log is mostly the same thing again; the lines that say which test
+/// failed and why are what a model needs, and they are easily cut away.
+pub fn digest(ran: &files::Ran, root: &Path) -> String {
+    if ran.ok || ran.output.chars().count() <= files::RESULT_CHARS {
+        return ran.text.clone();
+    }
+    let found = failures(&ran.output, root);
+    if found.is_empty() {
+        return ran.text.clone();
+    }
+    let head = ran.text.lines().next().unwrap_or("");
+    let counted = counts(&ran.output).map(|(p, f)| format!(" ({p} passed, {f} failed)")).unwrap_or_default();
+    let end: String = {
+        let all: Vec<char> = ran.output.chars().collect();
+        all[all.len().saturating_sub(files::RESULT_CHARS / 3)..].iter().collect()
+    };
+    format!(
+        "{head}{counted}\nWhat failed, with file and line:\n{}\n[the output is long: this is what failed in it, and its end]\n{}",
+        found.iter().map(|f| format!("- {f}")).collect::<Vec<_>>().join("\n"),
+        end.trim()
+    )
 }
 
 /// Reads what a command left behind into the outcome of its check.
@@ -690,6 +742,34 @@ mod tests {
     }
 
     #[test]
+    fn a_long_failing_log_is_read_for_its_failures() {
+        let root = Path::new("/work/shop");
+        let block = |i: usize| {
+            format!(
+                "_____ test_{i} _____\n{}\nE       AssertionError: assert {i} == 0\ntests/test_a.py:{i}: AssertionError\n",
+                "    x = 1\n".repeat(40)
+            )
+        };
+        let output: String = (1..30).map(block).collect::<String>() + "=== 29 failed, 3 passed in 0.20s ===\n";
+        let ran = files::Ran {
+            text: format!("exit code 1 after 0.4 s\n{}", files::cap_ends(&output, files::RESULT_CHARS)),
+            ok: false,
+            output: output.clone(),
+        };
+        let text = digest(&ran, root);
+        assert!(text.starts_with("exit code 1 after 0.4 s (3 passed, 29 failed)\nWhat failed, with file and line:\n- tests/test_a.py:1 test_1: AssertionError: assert 1 == 0\n"), "{text}");
+        assert!(text.ends_with("=== 29 failed, 3 passed in 0.20s ==="), "{text}");
+        assert!(text.chars().count() < files::RESULT_CHARS + 1000);
+        // A short log, a log that says nothing that can be read, and a command that worked stay as they were.
+        let short = files::Ran { text: "exit code 1 after 0.1 s\nboom".into(), ok: false, output: "boom".into() };
+        assert_eq!(digest(&short, root), short.text);
+        let noise = files::Ran { text: "exit code 1 after 1 s\n...".into(), ok: false, output: "x\n".repeat(5000) };
+        assert_eq!(digest(&noise, root), noise.text);
+        let fine = files::Ran { ok: true, ..ran };
+        assert_eq!(digest(&fine, root), fine.text);
+    }
+
+    #[test]
     fn failures_are_read_with_their_file_and_line() {
         let root = Path::new("/work/shop");
         let read = |output: &str| failures(output, root);
@@ -754,6 +834,15 @@ mod tests {
         let many: String = (1..40).map(|i| format!("src/a.ts:{i}:1 - error TS1: bad\n")).collect();
         assert_eq!(read(&many).len(), MAX_FAILURES);
         assert!(read("Compiling x v0.1.0\nFinished in 3.2s\nrunning 4 tests\ntest a ... ok\n").is_empty());
+        // pytest: each failure with its test and what it said, and the summary not again.
+        let pytest = "..F\n=== FAILURES ===\n___________ TestSize.test_kb ___________\n\n    def test_kb(self):\n>       assert parse_size(\"1KB\") == 1000\nE       AssertionError: assert 1024 == 1000\nE        +  where 1024 = parse_size('1KB')\n\ntests/test_size.py:9: AssertionError\n____ test_bad ____\nE   ValueError: unknown unit 'XB'\nunitconv/__init__.py:30: ValueError\n=== short test summary info ===\nFAILED tests/test_size.py::TestSize::test_kb - AssertionError: asser...\n";
+        assert_eq!(
+            read(pytest),
+            [
+                "tests/test_size.py:9 TestSize.test_kb: AssertionError: assert 1024 == 1000",
+                "unitconv/__init__.py:30 test_bad: ValueError: unknown unit 'XB'"
+            ]
+        );
         // Only warnings: they are shown when there is nothing else to show.
         assert_eq!(read("src/a.rs:1:1: warning: unused import\n"), ["src/a.rs:1 warning: unused import"]);
     }
