@@ -186,7 +186,9 @@ pub(super) async fn call(app: &Shared, id: &str, folder: &Folder, call: &str, na
     let signature = format!("{name} {args}");
     match name {
         "start_app" => {
-            let Some(command) = arg("command").map(str::to_string).or_else(|| apps::detect(folder.root())) else {
+            // A port, or the place for one, is no command: a small model sends that at times.
+            let given = arg("command").filter(|c| !c.chars().all(|ch| ch.is_ascii_digit() || ":{}port".contains(ch)));
+            let Some(command) = given.map(str::to_string).or_else(|| apps::detect(folder.root())) else {
                 return (
                     "Rigbrew could not tell how this project starts. Call start_app with \"command\": the command that starts it, with {port} where the port goes (for example \"python3 -m http.server {port}\").".into(),
                     "failed",

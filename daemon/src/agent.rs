@@ -885,6 +885,9 @@ async fn call_tool(app: &Shared, id: &str, folder: &Folder, call: &str, name: &s
         }
         "run_command" => {
             let Some(command) = arg_str(args, "command").map(str::trim).filter(|c| !c.is_empty()) else { return missing("command") };
+            if see::offered("start_app", task.mode, folder.root()) && apps::serves(command) {
+                return (apps::SERVES.into(), "failed");
+            }
             if task.mode != Mode::Bypass && !task.always.iter().any(|c| c == command) {
                 let pending = Pending { call: call.into(), tool: name.into(), path: None, command: Some(command.to_string()), diff: None };
                 let decision = ask(app, id, pending, &signature).await;

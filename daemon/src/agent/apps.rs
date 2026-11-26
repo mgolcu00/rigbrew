@@ -208,6 +208,27 @@ pub fn detect(root: &Path) -> Option<String> {
     None
 }
 
+/// Whether a command line starts a server that runs until it is stopped: `run_command` waits
+/// for a command to end, so such a command is the work of `start_app`.
+pub fn serves(command: &str) -> bool {
+    static SERVES: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let serves = SERVES.get_or_init(|| {
+        regex::Regex::new(
+            r"(?x)(^|[;&|(]\s*)(
+                python3?\s+-m\s+http\.server | (npx\s+)?(http-server|live-server|serve)(\s|$) | php\s+-S\s |
+                (python3?\s+)?manage\.py\s+runserver | flask\s+run | (bin/)?rails\s+s(erver)?(\s|$) |
+                (npm|pnpm|yarn|bun)\s+(run\s+)?(dev|start|serve|preview)(\s|$) | vite(\s+(dev|serve|preview))?(\s+-|\s*$)
+            )",
+        )
+        .expect("static pattern")
+    });
+    // Sent to the background, it is not waited for.
+    !command.trim_end().ends_with('&') && serves.is_match(command)
+}
+
+/// What `run_command` answers instead of starting a server.
+pub const SERVES: &str = "Not run: this starts a server, and run_command waits for a command to end. Call start_app instead: leave out \"command\" to let Rigbrew find how this project starts, or give the command with {port} where the port goes.";
+
 /// The command line with the port put in.
 pub fn with_port(command: &str, port: u16) -> String {
     command.replace("{port}", &port.to_string()).replace("$PORT", &port.to_string()).replace("${PORT}", &port.to_string())
@@ -407,6 +428,39 @@ mod tests {
             std::fs::write(root.join(path), text).unwrap();
         }
         root
+    }
+
+    #[test]
+    fn a_command_that_starts_a_server_is_told_apart() {
+        for server in [
+            "python3 -m http.server 5173",
+            "python -m http.server",
+            "npx http-server -p 8080",
+            "npm run dev",
+            "pnpm dev --port 3000",
+            "yarn start",
+            "cd web && npm start",
+            "vite",
+            "vite --port 4000",
+            "python manage.py runserver",
+            "flask run",
+            "php -S localhost:8000",
+            "npx serve .",
+        ] {
+            assert!(serves(server), "{server}");
+        }
+        for not in [
+            "npm test",
+            "vite build",
+            "npm run build",
+            "pnpm install",
+            "python3 -m pytest",
+            "cargo run",
+            "python3 -m http.server 8000 &",
+            "ls serve",
+        ] {
+            assert!(!serves(not), "{not}");
+        }
     }
 
     #[test]
