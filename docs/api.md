@@ -59,11 +59,13 @@ Browsers are refused unless the request comes from the app's own origin.
 | `POST /v1/studio/projects/{id}/shots/{shot}/rewrite` | `{hint?, prompt?}`: the chat model writes the description of one shot again, in the words of the shots around it (`prompt` is the description as it stands when it is not saved yet, `hint` what should be different). Answers `{prompt}`; nothing is saved. |
 | `POST /v1/studio/projects/{id}/shots/{shot}/take`, `DELETE .../shots/{shot}/takes/{n}` | Takes: making a shot again keeps the clip before as a take (the last four; `takes: [{n, seed, seconds, frames, made_frames}]` and `take`, the one in use, on the shot). `POST {take: n}` puts a take in use; DELETE removes one and its clip. A shot's `seed`, when set through PUT, is used for its next clip: the same seed and description give the same clip again. |
 | `GET /v1/studio/projects/{id}/clips/{shot}.webm`, `.../clips/{shot}.jpg` | A made shot (the take in use; `{shot}.{n}.webm` and `{shot}.{n}.jpg` for one take), and one small picture of it (from its middle) for the timeline. A shot carries `made_frames`: the frames its clip really has. A made shot that continues another is marked `changed` when a save puts it behind a different shot. |
-| `POST /v1/agent/tasks` | Code: start a task on a folder. `{"folder", "prompt", "model", "mode", "web", "connectors"}`; see [Code tasks](#code-tasks). Answers `{"task"}`. |
+| `POST /v1/agent/tasks` | Code: start a task on a folder. `{"folder", "prompt", "model", "mode", "web", "connectors", "images"}`; see [Code tasks](#code-tasks) and [What the person sends](#what-the-person-sends). Answers `{"task"}`. |
 | `GET /v1/agent/tasks`, `GET /v1/agent/tasks/{id}` | Tasks, newest first (`?folder=` for one folder); one task with its state, its steps so far and what waits for an answer. |
 | `PUT /v1/agent/tasks/{id}` | `{"title"}`: the person names the task (80 characters at most). Answers `{"task"}`; see [Titles](#titles). |
 | `POST /v1/agent/tasks/{id}/approve` | `{"call", "allow": true or false, "always": false}`: answer the step that waits. |
-| `POST /v1/agent/tasks/{id}/message` | `{"text", "mode", "web", "connectors"}`: continue a task that is not working with a follow-up. |
+| `POST /v1/agent/tasks/{id}/message` | `{"text", "images", "continue", "mode", "web", "connectors"}`: continue a task that is not working with a follow-up, or, while it works, leave the message for its next turn (`queued`). `"continue": true` with no text goes on where a stopped task was. |
+| `DELETE /v1/agent/tasks/{id}/queue/{q}` | Take back a message that waits for the next turn. `409` once it went in. Answers `{"task"}`. |
+| `GET /v1/agent/files?folder=&q=` | The files and folders of a folder whose path matches `q` (its letters in order), best first, at most 20, to name one with `@`. Folders end with `/`. Answers `{"files"}`. |
 | `POST /v1/agent/tasks/{id}/undo` | Take back what the newest request changed in the folder; see [Undo](#undo). Answers `{"task", "restored", "removed"}`. `409` while the task works or when nothing is left to take back. |
 | `DELETE /v1/agent/tasks/{id}` | Stop a task where it is (a running command is killed). `?remove=true` also forgets it. |
 | `DELETE /v1/agent/tasks/{id}/app` | Stop the app the task started with `start_app`; see [Run, look, check](#run-look-check). Answers `{"task"}`. |
@@ -71,7 +73,7 @@ Browsers are refused unless the request comes from the app's own origin.
 | `POST /v1/agent/tasks/{id}/device` | Take a new picture of the phone's screen (the booted simulator, or the Android device `adb` sees) and keep it as the task's `device`. `409` when there is none. Answers `{"task"}`. |
 | `GET /v1/agent/tasks/{id}/shots/{name}.png` | A picture the task took: the `image` of a step, the `shot` of its `page` or `device`. |
 | `GET /v1/agent/looks/next`, `POST /v1/agent/looks/{id}` | For the app, not for people: it waits here (up to 20 seconds) for a page the service wants opened, `{"look": {"id", "url", "width", "height", "actions"}}` or `{"look": null}`, and hands back `{url, title, text, errors, failed, picture?, note}`. |
-| `GET /v1/agent/skills` | The skills a task can use (`?folder=` adds the folder's own): name, description, where it comes from. |
+| `GET /v1/agent/skills` | The skills a task can use (`?folder=` adds the folder's own): name, description, where it comes from; with a folder also `instructions`, the project's instruction files the model reads (see [Project instructions](#project-instructions)). |
 | `GET /v1/skills`, `POST /v1/skills` | Every skill with `source` (`built-in`, `yours`, `folder`), `enabled` and `where` (`any`, `code`, `chat`); `?folder=` adds a project's own. `POST {name, description, body, copy_of?}` makes one of the person's own; see [Skills](#skills). |
 | `GET/PUT/DELETE /v1/skills/{name}` | One skill with its whole instructions, its licence line and its other files. `PUT {"enabled": false}` switches it off; `PUT {name, description, body}` changes it (a built-in one becomes the person's own version under the same name). `DELETE` removes the person's own. |
 | `POST /v1/skills/{name}/use`, `GET /v1/skills/{name}/file?path=` | What the chat's `use_skill` and `read_skill_file` answer: `{"ok", "text"}`. |
@@ -135,8 +137,12 @@ curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
 A task has a `state` (`running`, `waiting`, `asking`, `done`, `failed`, `stopped`, `interrupted`), `steps` and,
 while it waits for a yes or no to one step, `pending`. A step is one of `{"kind": "user", "text"}`,
 `{"kind": "model", "text"}`, `{"kind": "note", "text"}`, `{"kind": "question", "text"}` (see
-[Pace](#pace)) or `{"kind": "tool", "call", "name", "arguments", "status", "result", "diff", "image"}` with the
-status `running`, `waiting`, `done`, `failed`, `denied` or `stopped`; `image` names the picture a step took. `pending` is `{"call", "tool", "path",
+[Pace](#pace)), `{"kind": "pictures", "images"}` (the pictures of the person's message before it),
+`{"kind": "thought", "text", "ms"}` (what the model thought before it answered, and for how long; see
+[Thinking](#thinking)) or `{"kind": "tool", "call", "name", "arguments", "status", "result", "diff", "image"}` with the
+status `running`, `waiting`, `done`, `failed`, `denied` or `stopped`; `image` names the picture a step took. A task
+also has `queued` (messages that wait for the next turn, `{id, text, images}`) and `context`: how full the model's
+context was at its last turn, `{used, size}` in tokens, by the engine's own count. `pending` is `{"call", "tool", "path",
 "command", "diff"}`; answer it with `POST .../approve` and the same `call`.
 
 A task in a list is `{"id", "folder", "title", "title_by", "model", "mode", "state", "created_ms", "updated_ms",
@@ -257,6 +263,57 @@ service; the text becomes a `model` step when the turn ends, and `writing` is em
 `?brief=true` a few times a second: that answer has only `id`, `state`, `updated_ms`, the number of `steps` and
 `writing`, and `updated_ms` says when to ask for the whole task again.
 
+### What the person sends
+
+- **Commands.** A message that starts with one of these is sent to the model as the request it stands for; the step
+  keeps what was typed (`daemon/src/agent/project.rs`). Words after the command are added to it.
+
+  | Command | The request |
+  |---|---|
+  | `/init` | Explore the folder and write `AGENTS.md` (or improve the instruction file that is there), and change nothing else. |
+  | `/review` | Review the uncommitted changes: `git status` and `git diff HEAD` (at most 9,000 characters) go with the request, and new files are named. Outside a repository, or with nothing changed, the answer is `400` and nothing is sent. |
+  | `/test` | Run the project's checks and fix what fails, until they pass. |
+  | `/explain [what]` | Explain the codebase, or what is named, without changing anything. |
+  | `/<skill>` | The skill's instructions are read for the model (a `use_skill` step) before the work starts; the words after it are the request. |
+
+  `/clear` (a new task in the same folder), `/model` and `/mode` are the app's own and never reach the service. A
+  `/` followed by anything else is sent as it is.
+- **`@path`.** A word that starts with `@` and names a file or folder in the task's folder brings its text (at most
+  4,000 characters a file, 12,000 together, six files) or, for a folder, its listing, after the message. The step
+  shows only what was typed. `GET /v1/agent/files` is what the app's menu asks.
+- **Pictures.** `images` holds up to four PNG files, base64 (a `data:` address is fine), of at most 8 MB each. They
+  are kept with the task's other pictures and shown as a `pictures` step. A model with a vision part is sent the
+  newest four as pictures with the message (`image_url` parts); one without is told that pictures came and that it
+  cannot see them.
+- **While it works.** A message sent to a task that is working (or waiting for a yes) is not refused: it waits in
+  `queued` (at most eight) and goes into the conversation at the next turn, after the result of the step in progress
+  and before the model is asked again. When the request ends first, the messages that waited start the next one. A
+  stopped task keeps them; they go in with the next message or `continue`.
+- **Continue.** `{"continue": true}` on a stopped, cut-off or failed task goes on from where it was: the model is told
+  that the person asks it to go on.
+
+### Project instructions
+
+`AGENTS.md`, `RIGBREW.md` or `CLAUDE.md` in the task's folder, and in each folder above it up to the top of its git
+repository, are put into the system message on every turn, the outer ones first so the nearest has the last word.
+The same text under two names counts once; the whole is cut at 3,000 characters, and the nearest file keeps its room
+first. The person's words come first when they disagree. `/init` writes `AGENTS.md`.
+
+### Context and thinking
+
+A chat model of 8 GB or more runs with a context of 32,768 tokens, a smaller one with 8,192. The conversation a task
+sends grows with it: about 12,000 characters at 8,192 tokens and four times that at 32,768, and one answer may take
+3,072 or 9,216 tokens. What does not fit becomes notes ([A task runs until it is done](#a-task-runs-until-it-is-done)).
+
+#### Thinking
+
+A model with the long context is asked to think before it answers (`enable_thinking`, and a medium
+`reasoning_effort` for templates that take one); one with the short context is not, and is asked for a low effort:
+measured on the Code tasks, a small model spends on thinking the room it needs for the files it reads. Some models
+think either way. What the engine hands back as `reasoning_content` becomes a `thought` step before what the model
+did next, with the time from its first word of thinking to its first word of answer; it is not sent back to the
+model.
+
 ### How the app shows a task
 
 The Code screen reads like a terminal agent (`app/src/lib/code-view.ts`): one compact line per thing done. A change
@@ -270,7 +327,11 @@ the skill tools) is a single line, "Searching…" while it goes and "Read 4 file
 without the words that were searched for; it opens to the steps. A change, a command, a question or an answer ends
 the run. `update_plan` is no line: the plan is a checklist above the work. While the task is `running`, one line
 above the box to type in shows a word from `app/src/lib/code-words.ts` that follows what is happening, the time
-since `request_ms`, and that Esc (pressed twice) stops the work.
+since `request_ms`, how full the context is ("34% of context"), and that Esc interrupts. One press stops the work
+where it is; Continue takes it up again. What the model thought is a line "Thought for 12 s" that opens to the text,
+except before a run of look-ups. The box to type in opens a menu for `/` at its start (the commands and the skills)
+and for `@` (the files of the folder); a picture can be pasted or dropped into it. While the task works, what is sent
+waits above the box as "Queued" and can be taken back.
 
 ### Pace
 
@@ -306,7 +367,7 @@ There is no limit on the steps of a task. What keeps a long one going (`daemon/s
 `daemon/src/agent.rs`):
 
 - **Notes instead of a full history.** The conversation is sent whole while it fits the model's context (about
-  12,000 characters of it). When it does not, the oldest messages leave it and what they held is kept as a short
+  12,000 characters of it at 8,192 tokens; see [Context and thinking](#context-and-thinking)). When it does not, the oldest messages leave it and what they held is kept as a short
   running note, written by the service from the calls and their results with no extra request to the model: the
   files read and what they define, the changes made, the commands run and how they ended, what the person asked
   along the way. The same file or command is one note that says how often. About three quarters of the budget
