@@ -178,6 +178,11 @@ methods one level in), or the top-level ones of each source file in a folder. It
 expressions per language, not a parser, for Rust, Python, JavaScript, TypeScript, Go, Swift, Kotlin, Java, C, C++
 and Svelte.
 
+A command that failed and wrote more than `run_command` shows (4,000 characters) is read the way `check_project`
+reads a check: the model gets the first line, the failures found in the output with their file and line (for pytest
+each failing test with the first thing it said went wrong), and the end of the output, instead of its start and its
+end.
+
 After a change to a file went in, the result the model reads ends with how to check it: `check_project` when the
 project has checks that can run here, otherwise the command that checks this project
 (`cargo test`, the `test`, `check` or `build` script of `package.json` with the package manager of the lock file,
@@ -232,7 +237,7 @@ default: the type check or build, the linter, the unit tests), `ui` (tests that 
 | `Cargo.toml` | `cargo check --all-targets --message-format short`, `cargo test` | |
 | `go.mod` | `go vet ./...`, `go test ./...` | |
 | `package.json` | the `typecheck`, `type-check`, `check` or `tsc` script, else `tsc --noEmit` with a `tsconfig.json`; the `lint` script; the `test` script, else `node --test` | the `test:e2e`, `e2e`, `test:ui`, `test:playwright` or `test:cypress` script, else Playwright or Cypress when their config file is there |
-| Python | `ruff check` and `mypy .` when they are configured; `pytest` or `unittest` | |
+| Python | `ruff check` and `mypy .` when they are configured; `pytest` or `unittest`, with the project's own `.venv` or `venv` when it has one | |
 | `Package.swift` | `swift build`, `swift test` | |
 | `pubspec.yaml` | `flutter analyze` and `flutter test` (or `dart`) | `flutter test integration_test` |
 | an Xcode project | | named, and not run: the scheme and the device are the model's to give, with `run_command` |
