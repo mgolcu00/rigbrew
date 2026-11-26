@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { FADER_MARKS, dbLabel, panLabel } from '#lib/studio-edit.ts';
 	import { MASTER, SHOTS, studio } from '#lib/studio.svelte.ts';
+	import { tag } from '#lib/studio-tags.ts';
 	import StudioFader from './StudioFader.svelte';
 	import StudioKnob from './StudioKnob.svelte';
 	import StudioMeter from './StudioMeter.svelte';
@@ -49,8 +50,8 @@
 					<span class="read">{panLabel(s.pan)}</span>
 				</div>
 				<div class="ms">
-					<button class="st-ms m" class:lit={s.mute} aria-pressed={s.mute} onclick={(e) => (e.stopPropagation(), studio.toggle(s.id, 'mute'))} title="Mute" aria-label="Mute {name}">M</button>
-					<button class="st-ms s" class:lit={s.solo} aria-pressed={s.solo} onclick={(e) => (e.stopPropagation(), studio.toggle(s.id, 'solo'))} title="Solo" aria-label="Solo {name}">S</button>
+					<button class="st-ms m" class:lit={s.mute} aria-pressed={s.mute} onclick={(e) => (e.stopPropagation(), studio.toggle(s.id, 'mute'))} use:tag={{ id: 'mute', what: s.mute ? 'Muted: not heard. Click to hear it again.' : 'Silences this track.' }} aria-label="Mute {name}">M</button>
+					<button class="st-ms s" class:lit={s.solo} aria-pressed={s.solo} onclick={(e) => (e.stopPropagation(), studio.toggle(s.id, 'solo'))} use:tag={{ id: 'solo', what: s.solo ? 'Soloed: only soloed tracks are heard.' : 'Only soloed tracks are heard.' }} aria-label="Solo {name}">S</button>
 				</div>
 				<div class="run" style:height="{travel}px">
 					{@render scale()}
@@ -66,7 +67,7 @@
 					<StudioMeter id={s.id} vertical length={travel} thick={9} />
 				</div>
 				<span class="db">{dbLabel(s.volume)}</span>
-				<span class="name" style:--color={track?.color ?? '#1f4f5c'} title={name}>{name}</span>
+				<span class="name" style:--color={track?.color ?? '#1f4f5c'} use:tag={{ name, what: 'Click the strip to select its track.' }}>{name}</span>
 			</div>
 		{/each}
 		<div class="gap"></div>

@@ -2,6 +2,7 @@
 	import * as api from '#lib/api.ts';
 	import { bytes as bytesOf } from '#lib/format.ts';
 	import { firstWords } from '#lib/studio-look.ts';
+	import { tag } from '#lib/studio-tags.ts';
 	import { studio } from '#lib/studio.svelte.ts';
 	import { shortTime } from '#lib/studio-time.ts';
 	import StudioIcon from './StudioIcon.svelte';
@@ -62,16 +63,16 @@
 
 <div class="library" role="region" aria-label="Library">
 	<div class="st-tabs" role="tablist" aria-label="Library">
-		{#each [['films', 'Films'], ['takes', 'Takes'], ['sounds', 'Sounds']] as [id, label] (id)}
-			<button role="tab" aria-selected={tab === id} onclick={() => studio.set('libraryTab', id as 'films' | 'takes' | 'sounds')}>{label}</button>
+		{#each [['films', 'Films', 'Every film here; click one to open it.'], ['takes', 'Takes', 'Every try of every shot, to use another one.'], ['sounds', 'Sounds', 'Sound files of this film, to drag onto a track.']] as [id, label, what] (id)}
+			<button role="tab" aria-selected={tab === id} onclick={() => studio.set('libraryTab', id as 'films' | 'takes' | 'sounds')} use:tag={{ name: label, what }}>{label}</button>
 		{/each}
 	</div>
 	<div class="list st-scroll" role="tabpanel">
 		{#if tab === 'films'}
 			<div class="tools">
-				<button class="st-btn" onclick={onnew} title="Back to the start: a film from a few words, in detail, or from a video"><StudioIcon name="spark" size={12} /> New film</button>
-				<button class="st-btn" onclick={newEmpty} title="Start a film without shots, or open a film folder"><StudioIcon name="plus" size={12} /> Empty</button>
-				<button class="st-btn" onclick={bring} disabled={bringing || (!api.isTauri && !video.trim())} title="Bring a video file into this film: it is cut into shots where its scenes change"><StudioIcon name="bring" size={12} /> {bringing ? 'Bringing in…' : 'Video'}</button>
+				<button class="st-btn" onclick={onnew} use:tag={'new-film'}><StudioIcon name="spark" size={12} /> New film</button>
+				<button class="st-btn" onclick={newEmpty} use:tag={'empty-film'}><StudioIcon name="plus" size={12} /> Empty</button>
+				<button class="st-btn" onclick={bring} disabled={bringing || (!api.isTauri && !video.trim())} use:tag={'bring-video'}><StudioIcon name="bring" size={12} /> {bringing ? 'Bringing in…' : 'Video'}</button>
 			</div>
 			{#if !api.isTauri}
 				<div class="tools"><input class="st-in grow" bind:value={video} placeholder="/full/path/to/a/video.mp4" aria-label="Full path of a video file to bring in" onkeydown={(e) => (e.stopPropagation(), e.key === 'Enter' && bring())} /></div>
@@ -79,7 +80,7 @@
 			<ul>
 				{#each studio.films as f (f.id)}
 					<li class="item film" class:on={f.id === studio.id}>
-						<button class="main" onclick={() => studio.open(f.id)} disabled={f.missing} title={tilde(f.folder)}>
+						<button class="main" onclick={() => studio.open(f.id)} disabled={f.missing} use:tag={{ name: f.name || 'Film', what: f.missing ? `Its folder is gone: ${tilde(f.folder)}` : `Opens it. ${tilde(f.folder)}` }}>
 							<StudioIcon name="film" size={13} />
 							<span class="name">{f.name || 'Film'}</span>
 							<span class="meta">{f.missing ? 'folder gone' : `${f.made ?? 0}/${f.shots ?? 0}`}</span>
@@ -87,7 +88,7 @@
 						<button
 							class="x"
 							onclick={() => (studio.question = { text: `Take "${f.name || 'Film'}" out of the list? Its folder and files stay where they are.`, yes: 'Remove from list', no: 'Keep', act: () => studio.forget(f.id) })}
-							title="Remove from the list. The folder stays."
+							use:tag={'remove-film'}
 							aria-label="Remove {f.name || 'Film'} from the list"><StudioIcon name="close" size={10} /></button
 						>
 					</li>
@@ -116,7 +117,7 @@
 								}}
 								onclick={() => studio.selectShot(s.id)}
 								ondblclick={() => studio.useTake(s.id, t.n)}
-								title="Take {k + 1} of shot {i + 1}{t.n === s.take ? ', in use' : '. Drag it onto the shot, or double-click, to use it.'}"
+								use:tag={{ id: 'take', name: `Take ${k + 1} of shot ${i + 1}`, what: t.n === s.take ? 'In use in the film.' : 'Drag it onto its shot, or double-click, to use it.' }}
 								aria-label="Take {k + 1} of shot {i + 1}{t.n === s.take ? ', in use' : ''}"
 							>
 								<span>{k + 1}</span>
@@ -154,15 +155,15 @@
 							if (e.dataTransfer) e.dataTransfer.effectAllowed = 'copy';
 						}}
 					>
-						<button class="play" onclick={() => preview(snd.file)} disabled={snd.missing} aria-label="{playing === snd.file ? 'Stop' : 'Play'} {snd.name}" title={playing === snd.file ? 'Stop' : 'Listen'}>
+						<button class="play" onclick={() => preview(snd.file)} disabled={snd.missing} aria-label="{playing === snd.file ? 'Stop' : 'Play'} {snd.name}" use:tag={{ id: 'listen', name: playing === snd.file ? 'Stop' : 'Listen' }}>
 							<StudioIcon name={playing === snd.file ? 'stop' : 'play'} size={10} />
 						</button>
-						<button class="main" onclick={() => preview(snd.file)} ondblclick={() => place(snd.file)} disabled={snd.missing} title="{tilde(snd.file)}. Drag it onto a sound track, or double-click to set it at the playhead.">
+						<button class="main" onclick={() => preview(snd.file)} ondblclick={() => place(snd.file)} disabled={snd.missing} use:tag={{ name: snd.name, what: snd.missing ? `Not found: ${tilde(snd.file)}` : 'Drag it onto a sound track, or double-click to set it at the playhead.' }}>
 							<span class="name">{snd.name}</span>
 							<span class="meta">{snd.missing ? 'not found' : seconds ? shortTime(seconds) : snd.bytes < 1048576 ? `${Math.max(1, Math.round(snd.bytes / 1024))} KB` : bytesOf(snd.bytes)}</span>
 						</button>
 						{#if snd.from === 'added'}
-							<button class="x" onclick={() => studio.removeSound(snd.file)} title="Take it out of the list. The file stays." aria-label="Remove {snd.name} from the list"><StudioIcon name="close" size={10} /></button>
+							<button class="x" onclick={() => studio.removeSound(snd.file)} use:tag={{ name: 'Remove from list', what: 'The file stays where it is.' }} aria-label="Remove {snd.name} from the list"><StudioIcon name="close" size={10} /></button>
 						{/if}
 					</li>
 				{/each}

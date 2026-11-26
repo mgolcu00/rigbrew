@@ -5,6 +5,7 @@
 	import { dbLabel, names, panLabel, regionEnd, regionSpan, type DocRegion, type DocShot, type DocTrack } from '#lib/studio-edit.ts';
 	import { STATE_WORD, fileName } from '#lib/studio-look.ts';
 	import { SHOTS, TRACK_COLORS, studio } from '#lib/studio.svelte.ts';
+	import { tag } from '#lib/studio-tags.ts';
 	import { shortTime, timecode } from '#lib/studio-time.ts';
 	import { hasClip, roughly, shotSeconds } from '#lib/studio.ts';
 	import { isMac } from '#lib/words.ts';
@@ -167,7 +168,7 @@
 			<span class="state {shot.state}">{STATE_WORD[shot.state]}</span>
 			<span class="grow"></span>
 			{#if shot.prompt.trim() && video}
-				<button class="st-btn" onclick={() => studio.make([shot.id])} disabled={shot.state === 'making' || shot.state === 'queued'} title={made ? 'Makes this shot again. The clip it has is kept as a take.' : 'Make this shot'}>{made ? 'Try again' : 'Make'}</button>
+				<button class="st-btn" onclick={() => studio.make([shot.id])} disabled={shot.state === 'making' || shot.state === 'queued'} use:tag={{ id: 'make-shot', name: made ? 'Try again' : 'Make this shot', what: made ? 'Makes it again; the clip it has is kept as a take.' : 'Makes this shot only.' }}>{made ? 'Try again' : 'Make'}</button>
 			{/if}
 		</header>
 		{#if shot.error}<p class="st-problem selectable" role="alert">{shot.error}</p>{/if}
@@ -184,7 +185,7 @@
 			></textarea>
 			<div class="st-row">
 				<input class="st-in grow" bind:value={hint} placeholder="What should be different (optional)" aria-label="What the chat model should change" onkeydown={(e) => (e.stopPropagation(), e.key === 'Enter' && studio.rewrite(shot.id, hint))} />
-				<button class="st-btn" onclick={() => studio.rewrite(shot.id, hint)} disabled={studio.busy !== '' || app.chatPackages.length === 0} title={app.chatPackages.length === 0 ? 'Needs the chat model' : 'The chat model writes this description again, in the words of the shots around it. Undo brings the old one back.'}>
+				<button class="st-btn" onclick={() => studio.rewrite(shot.id, hint)} disabled={studio.busy !== '' || app.chatPackages.length === 0} use:tag={{ id: 'rewrite', what: app.chatPackages.length === 0 ? 'Needs the chat model: add it under Models.' : 'Writes this description again, in the words of the shots around it.' }}>
 					<StudioIcon name="spark" size={12} />
 					{studio.busy === 'rewriting' ? 'Writing…' : 'Rewrite'}
 				</button>
@@ -217,13 +218,13 @@
 					{:else}
 						<input class="st-in grow" value={l.text} maxlength="300" placeholder="What is said" aria-label="What is said" oninput={(e) => studio.setLine(shot.id, l.id, 'Line', (x) => (x.text = e.currentTarget.value), 'line')} onkeydown={(e) => e.stopPropagation()} />
 					{/if}
-					<button class="st-btn quiet icon" onclick={() => studio.removeLine(shot.id, l.id)} aria-label="Delete the line" title="Delete the line"><StudioIcon name="close" size={10} /></button>
+					<button class="st-btn quiet icon" onclick={() => studio.removeLine(shot.id, l.id)} aria-label="Delete the line" use:tag={{ name: 'Delete the line', what: 'Undo brings it back.' }}><StudioIcon name="close" size={10} /></button>
 				</div>
 			{/each}
 			<div class="st-row">
 				<button class="st-btn" onclick={() => studio.addLine(shot.id)} disabled={docLines.length >= 8}><StudioIcon name="plus" size={11} /> Line</button>
 				{#if made && docLines.length === 0 && studio.view?.can_listen}
-					<button class="st-btn" onclick={() => studio.listen([shot.id])} disabled={listening} title="The listening model writes down what is said in this clip">{listening ? 'Listening…' : 'From the clip'}</button>
+					<button class="st-btn" onclick={() => studio.listen([shot.id])} disabled={listening} use:tag={{ name: 'Lines from the clip', what: 'Writes down what is said in this clip.' }}>{listening ? 'Listening…' : 'From the clip'}</button>
 				{/if}
 				{#if other}<span class="st-note">{other}</span>{/if}
 			</div>
@@ -303,7 +304,7 @@
 			<section class="st-sec">
 				<h3 class="st-h">Sound of the shot</h3>
 				<div class="st-row">
-					<button class="st-ms m" class:lit={shot.mute} aria-pressed={shot.mute} onclick={() => setShot('Mute shot', (s) => (s.mute = !s.mute))} title="Mute this shot's own sound">M</button>
+					<button class="st-ms m" class:lit={shot.mute} aria-pressed={shot.mute} onclick={() => setShot('Mute shot', (s) => (s.mute = !s.mute))} use:tag={{ id: 'mute', name: 'Mute this shot', what: 'Silences the sound of this shot only.', key: '' }}>M</button>
 					<StudioFader
 						value={shot.volume ?? 1}
 						top={1.5}
@@ -338,7 +339,7 @@
 				<div class="st-row">
 					<button class="st-btn" onclick={() => studio.make([shot.id])} disabled={!video || shot.state === 'making' || shot.state === 'queued' || !shot.prompt.trim()}>Try again</button>
 					{#if shot.take}
-						<button class="st-btn quiet" onclick={() => studio.deleteTake(shot.id, shot.take!)} disabled={shot.state === 'making' || shot.state === 'queued'} title="Delete the take in use and its clip"><StudioIcon name="trash" size={12} /> Delete take</button>
+						<button class="st-btn quiet" onclick={() => studio.deleteTake(shot.id, shot.take!)} disabled={shot.state === 'making' || shot.state === 'queued'} use:tag={{ name: 'Delete take', what: 'Deletes the take in use and its clip; this cannot be undone.' }}><StudioIcon name="trash" size={12} /> Delete take</button>
 					{/if}
 				</div>
 			</section>
@@ -439,7 +440,7 @@
 		</section>
 		<section class="st-sec">
 			<div class="st-row">
-				<button class="st-btn" onclick={() => studio.splitAtPlayhead()} title="Cut it in two at the playhead"><StudioIcon name="split" size={12} /> Split</button>
+				<button class="st-btn" onclick={() => studio.splitAtPlayhead()} use:tag={'split'}><StudioIcon name="split" size={12} /> Split</button>
 				<button class="st-btn" onclick={() => studio.duplicateSelection()}>Duplicate</button>
 				<button class="st-btn quiet" onclick={() => studio.deleteSelection()}><StudioIcon name="trash" size={12} /> Delete</button>
 			</div>
@@ -497,8 +498,8 @@
 				/>
 				<span class="st-val left">{panLabel(track.pan)}</span>
 				<span class="grow"></span>
-				<button class="st-ms m" class:lit={track.mute} aria-pressed={track.mute} onclick={() => studio.toggle(track.id, 'mute')} title="Mute (M)">M</button>
-				<button class="st-ms s" class:lit={track.solo} aria-pressed={track.solo} onclick={() => studio.toggle(track.id, 'solo')} title="Solo (S)">S</button>
+				<button class="st-ms m" class:lit={track.mute} aria-pressed={track.mute} onclick={() => studio.toggle(track.id, 'mute')} use:tag={'mute'}>M</button>
+				<button class="st-ms s" class:lit={track.solo} aria-pressed={track.solo} onclick={() => studio.toggle(track.id, 'solo')} use:tag={'solo'}>S</button>
 			</div>
 			{#if !studio.heard[track.id]}<p class="st-note">{track.mute ? 'Muted: it is not in the exported film.' : 'Another track is soloed: this one is not heard, and not in the exported film.'}</p>{/if}
 		</section>
@@ -541,8 +542,8 @@
 				/>
 				<span class="st-val left">{panLabel(s.pan)}</span>
 				<span class="grow"></span>
-				<button class="st-ms m" class:lit={s.mute} aria-pressed={s.mute} onclick={() => studio.toggle(SHOTS, 'mute')} title="Mute (M)">M</button>
-				<button class="st-ms s" class:lit={s.solo} aria-pressed={s.solo} onclick={() => studio.toggle(SHOTS, 'solo')} title="Solo (S)">S</button>
+				<button class="st-ms m" class:lit={s.mute} aria-pressed={s.mute} onclick={() => studio.toggle(SHOTS, 'mute')} use:tag={'mute'}>M</button>
+				<button class="st-ms s" class:lit={s.solo} aria-pressed={s.solo} onclick={() => studio.toggle(SHOTS, 'solo')} use:tag={'solo'}>S</button>
 			</div>
 			<p class="st-note">Each shot has its own volume too: drag the line on its sound, or select the shot.</p>
 		</section>
@@ -568,7 +569,7 @@
 			<div class="st-row">
 				<span class="st-lab">Folder</span>
 				<span class="path one selectable" title={studio.project?.folder}>{tilde(studio.project?.folder ?? '')}</span>
-				<button class="st-btn quiet icon" onclick={() => studio.reveal()} title={isMac ? 'Show in Finder' : 'Show in folder'} aria-label={isMac ? 'Show in Finder' : 'Show in folder'}><StudioIcon name="folder" size={12} /></button>
+				<button class="st-btn quiet icon" onclick={() => studio.reveal()} use:tag={{ name: isMac ? 'Show in Finder' : 'Show in folder', what: 'Opens the film’s folder.' }} aria-label={isMac ? 'Show in Finder' : 'Show in folder'}><StudioIcon name="folder" size={12} /></button>
 			</div>
 			<dl class="facts">
 				<dt>Length</dt>
@@ -600,7 +601,7 @@
 					onkeydown={(e) => e.stopPropagation()}
 				/>
 				<span class="st-lab right">Cast</span>
-				<button class="st-btn" onclick={() => (studio.set('bottom', true), studio.set('tab', 'cast'))} title="Cast (K)"><StudioIcon name="cast" size={12} /> {doc.cast.length}</button>
+				<button class="st-btn" onclick={() => (studio.set('bottom', true), studio.set('tab', 'cast'))} use:tag={'cast'}><StudioIcon name="cast" size={12} /> {doc.cast.length}</button>
 			</div>
 		</section>
 		<section class="st-sec">
@@ -619,12 +620,12 @@
 				The shot writer writes lines
 			</label>
 			<div class="st-row">
-				<button class="st-btn" onclick={() => studio.dub()} disabled={lineCount === 0 || dubbing || !app.voicePackage} title={!app.voicePackage ? 'Needs a voice. Add it under Models.' : 'The voice reads every line onto a voice track, at its shot'}>
+				<button class="st-btn" onclick={() => studio.dub()} disabled={lineCount === 0 || dubbing || !app.voicePackage} use:tag={{ id: 'dub', what: !app.voicePackage ? 'Needs a voice: add it under Models.' : lineCount === 0 ? 'Write lines in the shots first.' : 'The voice reads every line onto a voice track, at its shot.' }}>
 					<StudioIcon name="speech" size={12} />
 					{dubbing ? 'Dubbing…' : 'Dub'}
 				</button>
 				<input class="st-in grow" bind:value={into} maxlength="24" placeholder="Another language" aria-label="Another language to translate the lines into" onkeydown={(e) => (e.stopPropagation(), e.key === 'Enter' && translate())} />
-				<button class="st-btn" onclick={translate} disabled={!into.trim() || lineCount === 0 || dubbing || app.chatPackages.length === 0} title={app.chatPackages.length === 0 ? 'Needs the chat model' : 'The chat model translates the lines'}>Translate</button>
+				<button class="st-btn" onclick={translate} disabled={!into.trim() || lineCount === 0 || dubbing || app.chatPackages.length === 0} use:tag={{ name: 'Translate', what: app.chatPackages.length === 0 ? 'Needs the chat model: add it under Models.' : 'Translates the lines into the language typed here, then dubs them.' }}>Translate</button>
 			</div>
 			{#if into.trim() && !reads(into)}<p class="st-note">The voice reads {spoken.join(' and ')}. {into.trim()}: subtitles only.</p>{/if}
 			{#if languages.length > 1}

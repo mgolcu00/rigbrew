@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { dbLabel, dbOf, faderToGain, gainOf, gainToFader } from '#lib/studio-edit.ts';
+	import { tag } from '#lib/studio-tags.ts';
 
 	// A fader: a cap on a groove, even in decibels between its marks. Drag it (Shift for fine
 	// steps), turn the wheel over it, use the arrow keys, double-click for 0 dB.
@@ -106,7 +107,7 @@
 	aria-valuemax={Math.round(dbOf(top))}
 	aria-valuenow={Math.max(-60, Math.round(dbOf(value) * 10) / 10)}
 	aria-valuetext="{dbLabel(value)} dB"
-	title="{label}: {dbLabel(value)} dB"
+	use:tag={{ name: `${label}: ${dbLabel(value)} dB`, what: 'Drag to change, Shift for fine steps; double-click for 0 dB.' }}
 	onpointerdown={down}
 	onpointermove={move}
 	onpointerup={up}

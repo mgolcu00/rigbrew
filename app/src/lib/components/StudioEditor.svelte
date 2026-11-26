@@ -2,6 +2,7 @@
 	import { onDestroy, onMount } from 'svelte';
 	import { dbLabel, regionEnd, regionSpan, trimRegionEnd, trimRegionStart, trimShot, type DocRegion } from '#lib/studio-edit.ts';
 	import { LOOK, darker, fileName, lighter } from '#lib/studio-look.ts';
+	import { tag } from '#lib/studio-tags.ts';
 	import { studio } from '#lib/studio.svelte.ts';
 	import { rulerLabel, rulerSteps, shortTime, snapFrame, zoomSpanAround, zoomedSpan } from '#lib/studio-time.ts';
 	import { hasClip, shotSeconds } from '#lib/studio.ts';
@@ -505,15 +506,15 @@
 		<span class="grow"></span>
 		{#if tip}<span class="tip">{tip}</span>{/if}
 		{#if shot || found}
-			<span class="ezoom" role="group" aria-label="Zoom of the Editor" title="Zoom of the Editor: pinch, or {mod} and the wheel">
-				<button onclick={() => zoomBy(1 / 1.6)} disabled={ez <= 1} aria-label="Zoom out">−</button>
-				<button class="fit" onclick={() => ((ez = 1), (panFrom = 0))} disabled={ez <= 1} aria-label="Show all of it">{ez > 1 ? `${ez < 10 ? ez.toFixed(1) : Math.round(ez)}×` : 'All'}</button>
-				<button onclick={() => zoomBy(1.6)} disabled={ez >= 64} aria-label="Zoom in">+</button>
+			<span class="ezoom" role="group" aria-label="Zoom of the Editor">
+				<button onclick={() => zoomBy(1 / 1.6)} disabled={ez <= 1} aria-label="Zoom out" use:tag={{ name: 'Zoom out', what: 'Shows more of it. Pinch, or Ctrl and the wheel, too.' }}>−</button>
+				<button class="fit" onclick={() => ((ez = 1), (panFrom = 0))} disabled={ez <= 1} aria-label="Show all of it" use:tag={{ name: 'Show all of it', what: 'The whole shot or region across the Editor.' }}>{ez > 1 ? `${ez < 10 ? ez.toFixed(1) : Math.round(ez)}×` : 'All'}</button>
+				<button onclick={() => zoomBy(1.6)} disabled={ez >= 64} aria-label="Zoom in" use:tag={{ name: 'Zoom in', what: `Shows less of it, larger. Pinch, or ${mod} and the wheel, too.` }}>+</button>
 			</span>
 		{/if}
 	</div>
 	<div class="stage" bind:this={wrap} onwheel={wheel}>
-		<canvas bind:this={canvas} style:width="{width}px" style:height="{height}px" onpointerdown={down} onpointermove={move} onpointerup={up} onpointercancel={up} aria-label="The selected shot or region, enlarged"></canvas>
+		<canvas bind:this={canvas} style:width="{width}px" style:height="{height}px" onpointerdown={down} onpointermove={move} onpointerup={up} onpointercancel={up} aria-label="The selected shot or region, enlarged" use:tag={shot ? 'trim' : found ? { id: 'fade', name: 'Trim and fade', what: 'Drag an end to trim; drag a top corner to fade.' } : { name: 'Editor', what: 'Select one shot or one sound region to see it here.' }}></canvas>
 		<div class="eplay" bind:this={line} style:top="{TOP}px" style:height="{Math.max(0, height - TOP)}px" aria-hidden="true"></div>
 	</div>
 </div>

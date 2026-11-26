@@ -2,6 +2,7 @@
 	import { onDestroy } from 'svelte';
 	import { cueAt, duckLevel } from '#lib/studio-edit.ts';
 	import { STATE_WORD } from '#lib/studio-look.ts';
+	import { tag } from '#lib/studio-tags.ts';
 	import { studio } from '#lib/studio.svelte.ts';
 	import { timecode } from '#lib/studio-time.ts';
 	import { partLight, type FilmPart } from '#lib/studio.ts';
@@ -308,15 +309,15 @@
 		{#if caption}<p class="caption" style:font-size="{letters}px" aria-live="off">{caption}</p>{/if}
 	</div>
 	<div class="bar">
-		<button class="vb" onclick={() => studio.togglePlay()} aria-label={studio.playing ? 'Pause' : 'Play'} title="{studio.playing ? 'Pause' : 'Play'} (Space)"><StudioIcon name={studio.playing ? 'pause' : 'play'} size={11} /></button>
+		<button class="vb" onclick={() => studio.togglePlay()} aria-label={studio.playing ? 'Pause' : 'Play'} use:tag={{ id: 'play', name: studio.playing ? 'Pause' : 'Play' }}><StudioIcon name={studio.playing ? 'pause' : 'play'} size={11} /></button>
 		<span class="clock" bind:this={clock}>00:00:00:00</span>
 		<span class="what">{shown >= 0 ? `Shot ${studio.plan.parts[shown]?.index + 1} of ${studio.doc?.shots.length ?? 0}` : ''}</span>
 		{#if studio.viewerLarge && !studio.exportCurrent && studio.exportPlan.parts.length > 0}
-			<button class="st-btn primary vx" onclick={() => studio.exportFilm()} disabled={studio.view?.export?.state === 'working'} title="Join the made shots and the sound into one MP4 file, to play and share">
+			<button class="st-btn primary vx" onclick={() => studio.exportFilm()} disabled={studio.view?.export?.state === 'working'} use:tag={'export'}>
 				{studio.view?.export?.state === 'working' ? 'Exporting…' : 'Export'}
 			</button>
 		{/if}
-		<button class="vb" onclick={() => (studio.viewerLarge = !studio.viewerLarge)} aria-label={studio.viewerLarge ? 'Dock the viewer' : 'Make the viewer large'} title="{studio.viewerLarge ? 'Dock the viewer' : 'Large viewer'} (V)">
+		<button class="vb" onclick={() => (studio.viewerLarge = !studio.viewerLarge)} aria-label={studio.viewerLarge ? 'Dock the viewer' : 'Make the viewer large'} use:tag={{ id: 'viewer', name: studio.viewerLarge ? 'Dock the viewer' : 'Large viewer', what: studio.viewerLarge ? 'Puts the picture back above the Inspector.' : 'Shows the picture large over the window.' }}>
 			<StudioIcon name={studio.viewerLarge ? 'shrink' : 'expand'} size={12} />
 		</button>
 	</div>

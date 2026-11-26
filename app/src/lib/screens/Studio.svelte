@@ -8,9 +8,12 @@
 	import { fileName } from '#lib/studio-look.ts';
 	import { FILM, studio } from '#lib/studio.svelte.ts';
 	import { shortTime } from '#lib/studio-time.ts';
-	import { isMac, mod } from '#lib/words.ts';
+	import { isMac } from '#lib/words.ts';
 	import StudioAssistant from '#lib/components/StudioAssistant.svelte';
 	import StudioCast from '#lib/components/StudioCast.svelte';
+	import StudioCoach from '#lib/components/StudioCoach.svelte';
+	import StudioKeys from '#lib/components/StudioKeys.svelte';
+	import StudioTags from '#lib/components/StudioTags.svelte';
 	import StudioControlBar from '#lib/components/StudioControlBar.svelte';
 	import StudioEditor from '#lib/components/StudioEditor.svelte';
 	import StudioIcon from '#lib/components/StudioIcon.svelte';
@@ -89,48 +92,6 @@
 		el.addEventListener('pointerup', onUp);
 		el.addEventListener('pointercancel', onUp);
 	}
-
-	const KEYS: [string, string][][] = [
-		[
-			['Space', 'Play or pause'],
-			['P', 'Play the film'],
-			['Return', 'Go to the start'],
-			[', and .', 'One frame back or on'],
-			['Shift , and .', 'One second back or on'],
-			['Home and End', 'Start or end of the film'],
-			['Left and Right', 'The shot before or after'],
-			['C', 'Cycle on or off'],
-			[`${mod}Return`, 'Make the shots that are not made'],
-			[`${mod}B`, 'Export the film']
-		],
-		[
-			[`${mod}Z`, 'Undo'],
-			[`Shift ${mod}Z`, 'Redo'],
-			['Delete', 'Delete what is selected'],
-			[`${mod}A`, 'Select everything on the track'],
-			[`${mod}D`, 'Duplicate'],
-			[`${mod}C and ${mod}V`, 'Copy and paste sound regions'],
-			[`${mod}T`, 'Split at the playhead'],
-			['M and S', 'Mute or solo the selected track'],
-			['Alt, while dragging', 'Place freely, without snapping'],
-			['Alt-drag a region', 'Copy it']
-		],
-		[
-			[`${mod}Left and ${mod}Right`, 'Zoom out or in'],
-			[`${mod}Up and ${mod}Down`, 'Tracks taller or lower'],
-			['Z', 'Fit the film to the window'],
-			['Pinch, or Ctrl and the wheel', 'Zoom around the pointer'],
-			['Shift and the wheel', 'Scroll along the film'],
-			['Y', 'Library'],
-			['I', 'Inspector'],
-			['A', 'Assistant'],
-			['X', 'Mixer'],
-			['E', 'Editor'],
-			['K', 'Cast'],
-			['V', 'Viewer large or docked'],
-			['?', 'This list']
-		]
-	];
 
 	function keys(e: KeyboardEvent) {
 		if (!studio.doc || e.defaultPrevented || app.palette || app.sheet || guide.helpOpen || studio.player) return;
@@ -318,29 +279,11 @@
 			{/if}
 			{#if video?.credit}<span class="note credit" title={video.credit}>{video.credit}</span>{/if}
 		</footer>
-		{#if studio.keysOpen}
-			<!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-			<div class="veil" onclick={() => (studio.keysOpen = false)}>
-				<div class="keys" role="dialog" aria-label="Keys" tabindex="-1" onclick={(e) => e.stopPropagation()}>
-					<header>
-						<h2>Keys</h2>
-						<button class="closer" onclick={() => (studio.keysOpen = false)} aria-label="Close"><StudioIcon name="close" size={11} /></button>
-					</header>
-					<div class="cols">
-						{#each KEYS as col, i (i)}
-							<dl>
-								{#each col as [k, what] (k)}
-									<dt>{k}</dt>
-									<dd>{what}</dd>
-								{/each}
-							</dl>
-						{/each}
-					</div>
-				</div>
-			</div>
-		{/if}
+		{#if studio.keysOpen}<StudioKeys onclose={() => (studio.keysOpen = false)} />{/if}
 		{#if studio.player}<StudioPlayer />{/if}
+		<StudioCoach />
 	{/if}
+	<StudioTags {root} />
 </section>
 
 <style>
@@ -701,6 +644,14 @@
 		box-shadow: inset 0 2px 0 var(--st-accent);
 	}
 
+	/* A control that cannot be used lets the pointer through, so its help tag can still say why
+	   (see studio-tags.ts): not every webview sends a disabled control pointer events. */
+	.daw :global(button:disabled),
+	.daw :global(input:disabled),
+	.daw :global(select:disabled) {
+		pointer-events: none;
+	}
+
 	.daw :global(button:focus-visible),
 	.daw :global([role='slider']:focus-visible) {
 		outline: 1.5px solid var(--st-accent);
@@ -881,75 +832,5 @@
 
 	.flink:hover {
 		text-decoration: underline;
-	}
-
-	.veil {
-		position: absolute;
-		inset: 0;
-		z-index: 40;
-		display: grid;
-		place-items: center;
-		background: rgba(0, 0, 0, 0.5);
-	}
-
-	.keys {
-		width: min(860px, calc(100% - 40px));
-		border-radius: 5px;
-		background: var(--st-raised);
-		box-shadow:
-			0 0 0 1px #000,
-			0 0 0 2px rgba(255, 255, 255, 0.06),
-			0 24px 70px rgba(0, 0, 0, 0.7);
-	}
-
-	.keys header {
-		display: flex;
-		align-items: center;
-		height: 30px;
-		padding: 0 4px 0 12px;
-		border-bottom: 1px solid var(--st-edge);
-	}
-
-	.keys h2 {
-		flex: 1;
-		font: 600 12px/1 var(--rb-text);
-	}
-
-	.keys .closer {
-		height: 22px;
-	}
-
-	.cols {
-		display: grid;
-		grid-template-columns: repeat(3, minmax(0, 1fr));
-		gap: 0 22px;
-		padding: 10px 14px 14px;
-	}
-
-	.cols dl {
-		display: grid;
-		grid-template-columns: auto minmax(0, 1fr);
-		align-content: start;
-		gap: 5px 10px;
-		margin: 0;
-	}
-
-	.cols dt {
-		justify-self: start;
-		align-self: start;
-		padding: 2px 6px;
-		border-radius: 3px;
-		background: var(--st-edge);
-		box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
-		font: 500 10.5px/1.2 var(--rb-data);
-		color: var(--st-ink);
-		white-space: nowrap;
-	}
-
-	.cols dd {
-		margin: 0;
-		padding-top: 2px;
-		font-size: 11px;
-		color: var(--st-muted);
 	}
 </style>

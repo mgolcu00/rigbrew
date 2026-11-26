@@ -3,6 +3,7 @@
 	import { dbLabel, dropPlace, joinFromDrag, newId, regionEnd, regionSpan, trimRegionEnd, trimRegionStart, trimShot, type DocRegion, type DocTrack } from '#lib/studio-edit.ts';
 	import { LOOK, STATE_COLOR, alpha, darker, fileName, firstWords, lighter } from '#lib/studio-look.ts';
 	import { FILM, SHOTS, TRACK_COLORS, studio } from '#lib/studio.svelte.ts';
+	import { tag } from '#lib/studio-tags.ts';
 	import { edgeScroll, fitZoom, followScroll, rulerLabel, rulerSteps, shortTime, snapFrame, snapTime, timeToX, timecode, xToTime, zoomAround, type Zoom } from '#lib/studio-time.ts';
 	import type { FilmPart } from '#lib/studio.ts';
 	import StudioFader from './StudioFader.svelte';
@@ -1362,12 +1363,12 @@
 
 <div class="tracks" bind:this={root} style:--head="{studio.layout.headWidth}px">
 	<div class="corner">
-		<button class="tb" onclick={() => studio.addTrack()} title="Add a sound track"><StudioIcon name="plus" size={12} /> Track</button>
-		<button class="tb" class:on={studio.layout.snap} aria-pressed={studio.layout.snap} onclick={() => studio.set('snap', !studio.layout.snap)} title="Snap: edges land on frames, on other edges and on the playhead. Hold Alt to place freely (Ctrl while copying).">
+		<button class="tb" onclick={() => studio.addTrack()} use:tag={'add-track'}><StudioIcon name="plus" size={12} /> Track</button>
+		<button class="tb" class:on={studio.layout.snap} aria-pressed={studio.layout.snap} onclick={() => studio.set('snap', !studio.layout.snap)} use:tag={{ id: 'snap', what: studio.layout.snap ? 'On: edges land on frames, other edges and the playhead. Alt places freely.' : 'Off: edges go where they are dropped.' }}>
 			<StudioIcon name="snap" size={12} /> Snap
 		</button>
 		<span class="grow"></span>
-		<input class="vz" type="range" min="0.6" max="2" step="0.05" value={vz} oninput={(e) => studio.set('vzoom', Number(e.currentTarget.value))} aria-label="Height of the tracks" title="Height of the tracks" />
+		<input class="vz" type="range" min="0.6" max="2" step="0.05" value={vz} oninput={(e) => studio.set('vzoom', Number(e.currentTarget.value))} aria-label="Height of the tracks" use:tag={'heights'} />
 	</div>
 	<div class="ruler">
 		<canvas bind:this={ruler} style:width="{width}px" style:height="{RULER}px" onpointerdown={rulerDown} onpointermove={rulerMove} onpointerup={rulerUp} onpointercancel={rulerUp} aria-label="Time ruler. Click or drag to move the playhead; drag in its upper edge to set the cycle range."></canvas>
@@ -1385,13 +1386,13 @@
 							<span class="tname">Film</span>
 							<span class="tmeta">{studio.doc?.shots.length ?? 0} {studio.doc?.shots.length === 1 ? 'shot' : 'shots'}, {studio.shots.filter((s) => s.state === 'done').length} made</span>
 						</div>
-						<button class="mini" onclick={() => studio.addShot()} title="Add a shot at the end" aria-label="Add a shot"><StudioIcon name="plus" size={12} /></button>
+						<button class="mini" onclick={() => studio.addShot()} use:tag={'add-shot'} aria-label="Add a shot"><StudioIcon name="plus" size={12} /></button>
 					{:else}
 						{@const s = strip(row.id)}
 						{#if row.kind === 'shots'}
 							<span class="chip shots"><StudioIcon name="wave" size={12} /></span>
 						{:else}
-							<button class="chip" style:background={row.track?.color} onclick={() => recolor(row.id)} title="Colour of the track. Click for the next one." aria-label="Colour of {row.track?.name}"></button>
+							<button class="chip" style:background={row.track?.color} onclick={() => recolor(row.id)} use:tag={'track-color'} aria-label="Colour of {row.track?.name}"></button>
 						{/if}
 						<div class="col">
 							<div class="line">
@@ -1402,10 +1403,10 @@
 									<span class="tname">Shot sound</span>
 								{:else}
 									<!-- svelte-ignore a11y_no_static_element_interactions -->
-									<span class="tname" ondblclick={() => ((renaming = row.id), (renameText = row.track?.name ?? ''))} title="Double-click to rename">{row.track?.name}</span>
+									<span class="tname" ondblclick={() => ((renaming = row.id), (renameText = row.track?.name ?? ''))} use:tag={{ id: 'track-name', name: row.track?.name ?? 'Track' }}>{row.track?.name}</span>
 								{/if}
-								<button class="ms m" class:lit={s.mute} aria-pressed={s.mute} onclick={() => studio.toggle(row.id, 'mute')} title="Mute (M)" aria-label="Mute {row.track?.name ?? 'shot sound'}">M</button>
-								<button class="ms s" class:lit={s.solo} aria-pressed={s.solo} onclick={() => studio.toggle(row.id, 'solo')} title="Solo (S)" aria-label="Solo {row.track?.name ?? 'shot sound'}">S</button>
+								<button class="ms m" class:lit={s.mute} aria-pressed={s.mute} onclick={() => studio.toggle(row.id, 'mute')} use:tag={{ id: 'mute', what: s.mute ? 'Muted: not heard. Click to hear it again.' : 'Silences this track.' }} aria-label="Mute {row.track?.name ?? 'shot sound'}">M</button>
+								<button class="ms s" class:lit={s.solo} aria-pressed={s.solo} onclick={() => studio.toggle(row.id, 'solo')} use:tag={{ id: 'solo', what: s.solo ? 'Soloed: only soloed tracks are heard.' : 'Only soloed tracks are heard.' }} aria-label="Solo {row.track?.name ?? 'shot sound'}">S</button>
 							</div>
 							<div class="line">
 								<StudioFader
@@ -1430,13 +1431,13 @@
 						</div>
 						{#if row.kind === 'track'}
 							<div class="acts">
-								<button class="mini" onclick={() => studio.duplicateTrack(row.id)} title="Duplicate this track" aria-label="Duplicate {row.track?.name}"><StudioIcon name="dup" size={11} /></button>
-								<button class="mini" onclick={() => studio.deleteTrack(row.id)} title="Delete this track" aria-label="Delete {row.track?.name}"><StudioIcon name="trash" size={11} /></button>
+								<button class="mini" onclick={() => studio.duplicateTrack(row.id)} use:tag={{ name: 'Duplicate track', what: 'A copy of this track and its regions, under it.', key: '' }} aria-label="Duplicate {row.track?.name}"><StudioIcon name="dup" size={11} /></button>
+								<button class="mini" onclick={() => studio.deleteTrack(row.id)} use:tag={{ name: 'Delete track', what: 'Takes the track and its regions out. Undo brings it back.' }} aria-label="Delete {row.track?.name}"><StudioIcon name="trash" size={11} /></button>
 							</div>
 						{/if}
 					{/if}
 					<!-- svelte-ignore a11y_no_static_element_interactions -->
-					<div class="rowedge" onpointerdown={(e) => rowHeight(e, row)} ondblclick={() => usualHeight(row.id)} title="Drag to make this track taller or lower. Double-click for the usual height."></div>
+					<div class="rowedge" onpointerdown={(e) => rowHeight(e, row)} ondblclick={() => usualHeight(row.id)} use:tag={{ name: 'Height of this track', what: 'Drag to make it taller or lower; double-click for the usual height.' }}></div>
 				</div>
 			{/each}
 			{#if lift}<div class="lift" style:top="{lift.y - 1}px"></div>{/if}

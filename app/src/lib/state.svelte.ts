@@ -327,11 +327,15 @@ class AppState {
 	 * `text=small|default|large|larger`, `tour=0..3` (`tour=off`), `help=<article>` (`help=off`),
 	 * `tip=<id>`, `suggest=standard|pro` (`suggest=off`), `fail=<package>` (a failed download),
 	 * `pane=open|closed`, `chat=new|<id>`, `checklist=reset`. Studio: `film=<id>` opens a film, then
-	 * `play` presses Play film or `export` exports it.
+	 * `play` presses Play film or `export` exports it; `coach=reset` shows the first-time marks again.
 	 */
 	#view(view: Record<string, string>) {
 		const wanted = view.screen as Screen | undefined;
 		if (wanted && ['chat', 'code', 'models', 'device', 'profile', 'studio'].includes(wanted)) this.screen = wanted;
+		if (view.coach === 'reset') {
+			remembered.remove('studio.coach');
+			import('./studio.svelte').then(({ studio }) => (studio.coach = 0));
+		}
 		if (view.film) {
 			import('./studio.svelte').then(async ({ studio }) => {
 				await studio.open(view.film);

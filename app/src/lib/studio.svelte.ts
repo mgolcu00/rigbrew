@@ -164,6 +164,8 @@ class Studio {
 	fits = $state(0);
 	viewerLarge = $state(false);
 	keysOpen = $state(false);
+	/** The first-time marks over the control bar: which one shows, or -1 once they were put away. */
+	coach = $state(remembered.get('studio.coach') === 'done' ? -1 : 0);
 	/** The film player (the exported file, whole): opened by the person, or by itself after an export. */
 	player = $state<'' | 'asked' | 'exported'>('');
 	/** When the exported file of each film was written, as last seen here: a newer one opens the player once. */
@@ -1707,6 +1709,22 @@ class Studio {
 			return;
 		}
 		this.cycle.on = !this.cycle.on;
+	}
+
+	/** Changes when an empty film's Write the shots is pressed: the Inspector puts the cursor in its idea. */
+	ideaAsked = $state(0);
+
+	askIdea() {
+		this.selectNothing();
+		this.set('side', 'inspector');
+		this.set('inspector', true);
+		this.ideaAsked++;
+	}
+
+	/** The first-time marks are put away, and stay away. */
+	endCoach() {
+		this.coach = -1;
+		remembered.set('studio.coach', 'done');
 	}
 
 	// --- zoom and panels --------------------------------------------------------------------------

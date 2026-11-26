@@ -7,6 +7,7 @@
 	import { renderMarkdown } from '#lib/markdown.ts';
 	import { app } from '#lib/state.svelte.ts';
 	import { ASSISTANT_STEP } from '#lib/studio-edit.ts';
+	import { tag } from '#lib/studio-tags.ts';
 	import { studio } from '#lib/studio.svelte.ts';
 	import { mod } from '#lib/words.ts';
 	import ErrorLine from './ErrorLine.svelte';
@@ -165,7 +166,7 @@
 	<div class="head">
 		<span class="title" title={task?.title ?? ''}>{task?.title ?? 'Assistant'}</span>
 		{#if task && !assistant.working}
-			<button class="st-btn quiet icon" onclick={() => assistant.fresh()} title="New conversation about this film" aria-label="New conversation"><StudioIcon name="plus" size={12} /></button>
+			<button class="st-btn quiet icon" onclick={() => assistant.fresh()} use:tag={{ name: 'New conversation', what: 'Starts over about this film; the film stays as it is.' }} aria-label="New conversation"><StudioIcon name="plus" size={12} /></button>
 		{/if}
 	</div>
 
@@ -220,16 +221,16 @@
 				<div class="ask" role="group" aria-label="Waiting for your answer">
 					<p class="q selectable">{task.pending.command ?? task.pending.tool}?</p>
 					<div class="answers">
-						<button class="st-btn primary" onclick={() => assistant.answer(true)} disabled={assistant.busy} title="Go ahead ({mod}Return)">Go ahead</button>
-						<button class="st-btn" onclick={() => assistant.answer(false)} disabled={assistant.busy}>No</button>
+						<button class="st-btn primary" onclick={() => assistant.answer(true)} disabled={assistant.busy} use:tag={{ name: 'Go ahead', what: 'Lets the assistant do this.', key: `${mod}Return` }}>Go ahead</button>
+						<button class="st-btn" onclick={() => assistant.answer(false)} disabled={assistant.busy} use:tag={{ name: 'No', what: 'The assistant does not do this and goes on without it.' }}>No</button>
 						<span class="grow"></span>
-						<button class="st-btn quiet" onclick={() => assistant.answer(true, true)} disabled={assistant.busy} title="Does this without asking for the rest of this conversation">Always</button>
+						<button class="st-btn quiet" onclick={() => assistant.answer(true, true)} disabled={assistant.busy} use:tag={{ name: 'Always', what: 'Does this without asking for the rest of this conversation.' }}>Always</button>
 					</div>
 				</div>
 			{/if}
 
 			{#if undoable}
-				<div class="undo"><button class="st-btn quiet" onclick={() => studio.undo()} title="Takes back everything the assistant did in this request ({mod}Z)"><StudioIcon name="undo" size={12} />Undo what the assistant did</button></div>
+				<div class="undo"><button class="st-btn quiet" onclick={() => studio.undo()} use:tag={{ id: 'undo-request', key: `${mod}Z` }}><StudioIcon name="undo" size={12} />Undo what the assistant did</button></div>
 			{/if}
 
 			{#if task.state === 'failed' && task.error}<ErrorLine error={task.error} compact where="studio" />
@@ -283,9 +284,9 @@
 				{/if}
 				<span class="grow"></span>
 				{#if assistant.working}
-					<button class="st-btn" onclick={() => assistant.stop()} title="Stops the work where it is (Esc twice)">Stop</button>
+					<button class="st-btn" onclick={() => assistant.stop()} use:tag={'stop-assistant'}>Stop</button>
 				{:else}
-					<button class="st-btn primary" onclick={send} disabled={!draft.trim() || !model || assistant.busy}>Send</button>
+					<button class="st-btn primary" onclick={send} disabled={!draft.trim() || !model || assistant.busy} use:tag={{ id: 'ask', name: 'Send', what: draft.trim() ? 'Sends your request; the assistant edits the film step by step.' : 'Type what to change first.' }}>Send</button>
 				{/if}
 			</div>
 		</div>

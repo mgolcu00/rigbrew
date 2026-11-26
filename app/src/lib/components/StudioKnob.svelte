@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { panLabel } from '#lib/studio-edit.ts';
+	import { tag } from '#lib/studio-tags.ts';
 
 	// A pan knob: drag up or to the right for right, down or left for left (Shift for fine
 	// steps), arrow keys, the wheel, double-click for the middle.
@@ -92,7 +93,7 @@
 	aria-valuemax={100}
 	aria-valuenow={Math.round(value * 100)}
 	aria-valuetext={panLabel(value)}
-	title="{label}: {panLabel(value)}"
+	use:tag={{ name: `${label}: ${panLabel(value)}`, what: 'Drag up or down to turn; double-click for the middle.' }}
 	onpointerdown={down}
 	onpointermove={move}
 	onpointerup={up}

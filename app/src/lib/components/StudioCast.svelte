@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { app } from '#lib/state.svelte.ts';
 	import { STATE_COLOR, STATE_WORD } from '#lib/studio-look.ts';
+	import { tag } from '#lib/studio-tags.ts';
 	import { studio } from '#lib/studio.svelte.ts';
 	import StudioIcon from './StudioIcon.svelte';
 
@@ -47,13 +48,13 @@
 					<button class="who" class:on={member?.id === m.id} aria-pressed={member?.id === m.id} onclick={() => (studio.member = m.id)}>
 						<span class="face" style:background-image={studio.portrait(m.id) ? `url(${studio.portrait(m.id)})` : undefined}>{#if !studio.portrait(m.id)}<StudioIcon name="cast" size={11} />{/if}</span>
 						<span class="name">{m.name || 'No name'}</span>
-						<span class="meta" title="Shots that name {m.name}">{n}</span>
+						<span class="meta" use:tag={{ name: `${n} ${n === 1 ? 'shot names' : 'shots name'} ${m.name || 'them'}`, what: 'A shot names a character in its description.' }}>{n}</span>
 					</button>
 				</li>
 			{/each}
 		</ul>
 		<div class="tools">
-			<button class="st-btn" onclick={() => studio.addMember()} disabled={cast.length >= 12}><StudioIcon name="plus" size={11} /> Character</button>
+			<button class="st-btn" onclick={() => studio.addMember()} disabled={cast.length >= 12} use:tag={{ id: 'add-character', what: cast.length >= 12 ? 'A film has at most twelve characters.' : 'A name and a look every shot naming them is made with.' }}><StudioIcon name="plus" size={11} /> Character</button>
 		</div>
 	</div>
 	{#if member}
@@ -66,7 +67,7 @@
 					class="st-btn"
 					onclick={() => studio.makePortrait(member.id)}
 					disabled={!app.imagePackage || studio.busy !== '' || studio.view?.rendering || !member.look.trim()}
-					title={!app.imagePackage ? 'Needs the picture model. Add it under Models.' : studio.view?.rendering ? 'Shots are being made. A portrait waits for them.' : 'The picture model makes a portrait from the look'}
+					use:tag={{ id: 'portrait', what: !app.imagePackage ? 'Needs the picture model: add it under Models.' : studio.view?.rendering ? 'Shots are being made; a portrait waits for them.' : !member.look.trim() ? 'Write the look first: the portrait is made from it.' : 'A picture made from the look, to start shots from.' }}
 				>
 					{studio.busy === 'portrait' ? 'Making…' : has ? 'Redo portrait' : 'Make portrait'}
 				</button>
@@ -110,7 +111,7 @@
 				<div class="st-row">
 					<span class="st-lab"></span>
 					<input class="st-in grow" bind:value={words} placeholder="A few words: curious kid, yellow raincoat" aria-label="A few words about the character" onkeydown={(e) => (e.stopPropagation(), e.key === 'Enter' && write())} />
-					<button class="st-btn" onclick={write} disabled={studio.busy !== '' || app.chatPackages.length === 0 || (!words.trim() && !member.look.trim() && !member.name.trim())} title={app.chatPackages.length === 0 ? 'Needs the chat model' : 'The chat model writes the look from these words. Undo brings the old one back.'}>
+					<button class="st-btn" onclick={write} disabled={studio.busy !== '' || app.chatPackages.length === 0 || (!words.trim() && !member.look.trim() && !member.name.trim())} use:tag={{ id: 'write-look', what: app.chatPackages.length === 0 ? 'Needs the chat model: add it under Models.' : 'Writes the look from these words. Undo brings the old one back.' }}>
 						<StudioIcon name="spark" size={12} />
 						{studio.busy === 'looking' ? 'Writing…' : 'Write the look'}
 					</button>
@@ -123,7 +124,7 @@
 						<span class="chips">
 							{#each shots as s (s.id)}
 								{@const at = studio.shots.findIndex((x) => x.id === s.id)}
-								<button class="chip" class:on={studio.shotsSel.includes(s.id)} style:--c={STATE_COLOR[s.state]} onclick={() => (studio.selectShot(s.id), studio.seek(studio.plan.parts.find((p) => p.shot === s.id)?.start ?? 0))} title="Shot {at + 1}: {STATE_WORD[s.state]}">{at + 1}</button>
+								<button class="chip" class:on={studio.shotsSel.includes(s.id)} style:--c={STATE_COLOR[s.state]} onclick={() => (studio.selectShot(s.id), studio.seek(studio.plan.parts.find((p) => p.shot === s.id)?.start ?? 0))} use:tag={{ name: `Shot ${at + 1}: ${STATE_WORD[s.state]}`, what: 'Selects it and moves the playhead there.' }}>{at + 1}</button>
 							{/each}
 						</span>
 					{/if}
@@ -132,7 +133,7 @@
 					<span class="st-lab"></span>
 					<span class="st-note">The look goes into every shot that names {member.name || 'them'}, word for word.{starting > 0 ? ` ${starting} ${starting === 1 ? 'shot starts' : 'shots start'} from the portrait.` : ''}</span>
 					<span class="grow"></span>
-					<button class="st-btn quiet" onclick={remove}><StudioIcon name="trash" size={12} /> Remove</button>
+					<button class="st-btn quiet" onclick={remove} use:tag={{ name: 'Remove character', what: 'Takes them out of the cast; the shots keep their descriptions.' }}><StudioIcon name="trash" size={12} /> Remove</button>
 				</div>
 			</div>
 		</div>
