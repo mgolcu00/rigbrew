@@ -38,6 +38,7 @@ mod checks;
 mod devices;
 mod extra;
 mod files;
+mod film;
 mod kit;
 pub mod look;
 pub mod mcp;
@@ -217,7 +218,7 @@ impl Task {
         json!({
             "id": self.id, "folder": self.folder, "title": self.title, "title_by": self.title_by, "model": self.model, "mode": self.mode,
             "state": self.state, "created_ms": self.created_ms, "updated_ms": self.updated_ms, "request_ms": self.request_ms,
-            "steps": self.steps.len(),
+            "steps": self.steps.len(), "film": self.extra.film,
         })
     }
 
@@ -723,7 +724,7 @@ const KNOWN_TOOLS: &[&str] = &[
 
 /// Whether a name is one of the service's own tools (connector tools are not).
 fn known(name: &str) -> bool {
-    KNOWN_TOOLS.contains(&name) || extra::TOOLS.contains(&name) || see::TOOLS.contains(&name)
+    KNOWN_TOOLS.contains(&name) || extra::TOOLS.contains(&name) || see::TOOLS.contains(&name) || film::TOOLS.contains(&name)
 }
 
 const DENIED: &str = "The person did not allow this. Do not try it again. Go on without it, or say what you could not do.";
@@ -905,7 +906,7 @@ async fn work(app: &Shared, id: &str) -> Ended {
     let agents = &app.agent;
     let failed = |why: String| Ended { state: "failed", error: Some(why) };
     let Some(task) = agents.get(id) else { return failed("The task is gone.".into()) };
-    let kit = match kit::Kit::open(&task) {
+    let kit = match kit::Kit::open(app, &task) {
         Ok(k) => k,
         Err(e) => return failed(e),
     };
@@ -1138,7 +1139,10 @@ async fn work(app: &Shared, id: &str) -> Ended {
 fn start(app: &Shared, id: &str, follow_up: bool) {
     let agents = &app.agent;
     if let Some(task) = agents.get(id) {
-        app.record("agent_task_started", json!({"package": task.model, "mode": task.mode, "web": task.web, "follow_up": follow_up}));
+        app.record(
+            "agent_task_started",
+            json!({"package": task.model, "mode": task.mode, "web": task.web, "follow_up": follow_up, "film": !task.extra.film.is_empty()}),
+        );
     }
     // Held while the work is registered, so work that ends at once still finds its entry.
     let mut running = agents.running.lock().unwrap();
@@ -1235,7 +1239,15 @@ fn not_found() -> Response {
 
 #[derive(Deserialize)]
 pub struct NewTask {
+    /// The folder of a task of Code.
+    #[serde(default)]
     folder: String,
+    /// The film of a task of Studio's assistant, by its id: then no folder is given.
+    #[serde(default)]
+    film: Option<String>,
+    /// For a film: the shots selected in the tracks, by id, which the request is about.
+    #[serde(default)]
+    selection: Vec<String>,
     prompt: String,
     #[serde(default)]
     model: Option<String>,
@@ -1260,13 +1272,22 @@ pub async fn task_create(State(app): State<Shared>, Json(body): Json<NewTask>) -
             format!("That is too long for the model. Keep it under {MAX_PROMPT_CHARS} characters."),
         );
     }
-    let folder = match Folder::open(&body.folder) {
-        Ok(f) => f,
-        Err(e) => return fail(StatusCode::BAD_REQUEST, e),
+    let film = body.film.as_deref().map(str::trim).filter(|f| !f.is_empty()).map(str::to_string);
+    let folder = match &film {
+        // A film works with the film tools alone: no file of its folder is read or written.
+        Some(film) => match crate::studio::assist::folder_of(&app, film).map(|f| Folder::open(&f)) {
+            Some(Ok(f)) => f,
+            Some(Err(e)) => return fail(StatusCode::BAD_REQUEST, e),
+            None => return fail(StatusCode::NOT_FOUND, "no such film, or its folder is gone"),
+        },
+        None => match Folder::open(&body.folder) {
+            Ok(f) => f,
+            Err(e) => return fail(StatusCode::BAD_REQUEST, e),
+        },
     };
     // Rigbrew's own files (the token of this service among them) are never part of a task.
     let own = std::fs::canonicalize(&app.root).unwrap_or_else(|_| app.root.clone());
-    if own.starts_with(folder.root()) || folder.root().starts_with(&own) {
+    if film.is_none() && (own.starts_with(folder.root()) || folder.root().starts_with(&own)) {
         return fail(StatusCode::BAD_REQUEST, "That folder holds Rigbrew's own files. Choose the folder of one project.");
     }
     let all = app.all_packages();
@@ -1276,12 +1297,20 @@ pub async fn task_create(State(app): State<Shared>, Json(body): Json<NewTask>) -
         None => chat_models().next(),
     };
     let Some(package) = package else {
-        return fail(StatusCode::CONFLICT, "Code needs a chat model. Install one under Models first.");
+        let who = if film.is_some() { "The assistant" } else { "Code" };
+        return fail(StatusCode::CONFLICT, format!("{who} needs a chat model. Install one under Models first."));
     };
     if app.agent.running.lock().unwrap().len() >= MAX_RUNNING {
         return fail(StatusCode::TOO_MANY_REQUESTS, format!("{MAX_RUNNING} tasks are already running. Stop one, or wait for it."));
     }
     let now = now_ms();
+    // What the model is given: for a film, with the shots selected in the tracks.
+    let (said, note) = match &film {
+        Some(film) => film::request(&app, film, prompt, &body.selection),
+        None => (prompt.to_string(), None),
+    };
+    let mut steps = vec![Step::User { text: prompt.to_string() }];
+    steps.extend(note.map(|text| Step::Note { text }));
     let task = Task {
         id: uuid::Uuid::new_v4().simple().to_string(),
         folder: folder.root().to_string_lossy().into_owned(),
@@ -1294,14 +1323,14 @@ pub async fn task_create(State(app): State<Shared>, Json(body): Json<NewTask>) -
         created_ms: now,
         updated_ms: now,
         request_ms: now,
-        steps: vec![Step::User { text: prompt.to_string() }],
+        steps,
         pending: None,
         error: None,
         always: Vec::new(),
         denied: Vec::new(),
         turns: 0,
-        messages: vec![json!({"role": "user", "content": prompt})],
-        extra: Default::default(),
+        messages: vec![json!({"role": "user", "content": said})],
+        extra: extra::Extra { film: film.unwrap_or_default(), ..Default::default() },
         mcp: mcp::TaskState::new(body.connectors),
         pace: Default::default(),
         memory: Default::default(),
@@ -1315,6 +1344,9 @@ pub async fn task_create(State(app): State<Shared>, Json(body): Json<NewTask>) -
 #[derive(Deserialize, Default)]
 pub struct FolderQuery {
     folder: Option<String>,
+    /// The conversations of Studio's assistant on one film. Without it, only the tasks of Code.
+    #[serde(default)]
+    film: Option<String>,
 }
 
 pub async fn tasks(State(app): State<Shared>, Query(q): Query<FolderQuery>) -> Json<Value> {
@@ -1323,8 +1355,10 @@ pub async fn tasks(State(app): State<Shared>, Query(q): Query<FolderQuery>) -> J
         .folder
         .filter(|f| !f.trim().is_empty())
         .map(|f| std::fs::canonicalize(f.trim()).map(|p| p.to_string_lossy().into_owned()).unwrap_or(f));
+    let film = q.film.unwrap_or_default();
     let tasks = app.agent.tasks.lock().unwrap();
-    let mut list: Vec<&Task> = tasks.values().filter(|t| wanted.as_ref().is_none_or(|w| *w == t.folder)).collect();
+    let mut list: Vec<&Task> =
+        tasks.values().filter(|t| t.extra.film == film.trim() && wanted.as_ref().is_none_or(|w| *w == t.folder)).collect();
     list.sort_by_key(|t| std::cmp::Reverse(t.created_ms));
     Json(json!({"tasks": list.iter().map(|t| t.summary()).collect::<Vec<_>>()}))
 }
@@ -1371,6 +1405,9 @@ pub struct FollowUp {
     web: Option<bool>,
     #[serde(default)]
     connectors: Option<bool>,
+    /// For a film: the shots selected in the tracks, by id.
+    #[serde(default)]
+    selection: Vec<String>,
 }
 
 pub async fn task_message(State(app): State<Shared>, Path(id): Path<String>, Json(body): Json<FollowUp>) -> Response {
@@ -1387,13 +1424,19 @@ pub async fn task_message(State(app): State<Shared>, Path(id): Path<String>, Jso
     if app.agent.running.lock().unwrap().len() >= MAX_RUNNING {
         return fail(StatusCode::TOO_MANY_REQUESTS, format!("{MAX_RUNNING} tasks are already running. Stop one, or wait for it."));
     }
+    // For a film: what the model is given, with the shots selected in the tracks.
+    let (said, note) = match app.agent.get(&id).map(|t| t.extra.film).filter(|f| !f.is_empty()) {
+        Some(film) => film::request(&app, &film, &text, &body.selection),
+        None => (text.clone(), None),
+    };
     // Checked and changed in one step, so two messages cannot both start the work.
     let accepted = app.agent.change(&id, |t| {
         if t.active() {
             return false;
         }
         t.steps.push(Step::User { text: text.clone() });
-        t.messages.push(json!({"role": "user", "content": text}));
+        t.steps.extend(note.map(|text| Step::Note { text }));
+        t.messages.push(json!({"role": "user", "content": said}));
         t.state = "running".into();
         t.request_ms = now_ms();
         t.error = None;

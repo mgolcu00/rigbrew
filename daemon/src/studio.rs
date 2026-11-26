@@ -80,6 +80,7 @@ use serde_json::{json, Value};
 use crate::cloud::now_ms;
 use crate::{fail, video, App, Shared};
 
+pub mod assist;
 mod board;
 mod brief;
 mod bring;

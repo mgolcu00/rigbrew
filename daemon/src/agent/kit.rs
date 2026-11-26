@@ -2,23 +2,32 @@
 //! task: it asks the kit for the system message and the tools of each turn, runs each call
 //! through it, and asks it for a last look before a request ends.
 //!
-//! Code works on the files of a folder (its tools are in `agent.rs`, `see`, `skills`, `mcp`).
+//! Code works on the files of a folder (its tools are in `agent.rs`, `see`, `skills`, `mcp`);
+//! Studio's assistant works on a film (see `film`).
 
 use serde_json::Value;
 
 use super::files::Folder;
-use super::{call_tool, extra, mcp, see, skills, system_prompt, tool_defs, verify, Task};
+use super::{call_tool, extra, film, mcp, see, skills, system_prompt, tool_defs, verify, Task};
 use crate::Shared;
 
 pub(super) enum Kit {
     /// The code in one folder: files, commands, the web, skills and connectors.
     Code(Folder),
+    /// A film of Studio, by its id, and the folder it is in.
+    Film(Folder, String),
 }
 
 impl Kit {
     /// The kit of a task, or why it cannot work.
-    pub(super) fn open(task: &Task) -> Result<Kit, String> {
-        Folder::open(&task.folder).map(Kit::Code)
+    pub(super) fn open(app: &Shared, task: &Task) -> Result<Kit, String> {
+        if task.extra.film.is_empty() {
+            return Folder::open(&task.folder).map(Kit::Code);
+        }
+        // The film's folder as the film list has it now: it may have been moved and added again.
+        let folder = crate::studio::assist::folder_of(app, &task.extra.film)
+            .ok_or_else(|| "The film is gone: its folder was moved or removed.".to_string())?;
+        Folder::open(&folder).map(|f| Kit::Film(f, task.extra.film.clone()))
     }
 
     /// The system message and the tools of one turn.
@@ -41,6 +50,7 @@ impl Kit {
                 tools.extend(mcp::tool_defs(app, &task.mcp));
                 (system, tools)
             }
+            Kit::Film(_, id) => film::turn(app, task, id),
         }
     }
 
@@ -48,6 +58,7 @@ impl Kit {
     pub(super) async fn call(&self, app: &Shared, id: &str, call: &str, name: &str, args: &Value) -> (String, &'static str) {
         match self {
             Kit::Code(folder) => call_tool(app, id, folder, call, name, args).await,
+            Kit::Film(folder, film) => film::call(app, id, folder, film, call, name, args).await,
         }
     }
 
@@ -55,6 +66,7 @@ impl Kit {
     pub(super) fn before_finish(&self, task: &Task) -> Option<String> {
         match self {
             Kit::Code(folder) => see::before_finish(task, folder.root()),
+            Kit::Film(..) => film::before_finish(task),
         }
     }
 
@@ -62,6 +74,7 @@ impl Kit {
     pub(super) fn answered(&self, task: &mut Task, said: &str) {
         match self {
             Kit::Code(_) => verify::note_unchecked(task, said),
+            Kit::Film(..) => {}
         }
     }
 }
