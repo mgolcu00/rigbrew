@@ -354,8 +354,9 @@ A model with the long context is asked to think before it answers (`enable_think
 measured on the Code tasks, the small model's thinking came out of the 3,072 tokens one answer may take, and the files it
 wrote were cut off until the task failed. Some models
 think either way. What the engine hands back as `reasoning_content` becomes a `thought` step before what the model
-did next, with the time from its first word of thinking to its first word of answer; it is not sent back to the
-model.
+did next, with the time from its first word of thinking to its first word of answer. The end of the newest thought
+(at most 6,000 characters) goes back to the model with the call it led to, so on its next turn it goes on from what it
+decided instead of working it all out again; older thoughts are not sent.
 
 ### How the app shows a task
 

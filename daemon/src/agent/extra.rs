@@ -57,8 +57,9 @@ pub fn thinks(context: u32) -> bool {
 }
 
 /// How hard a model whose template takes `reasoning_effort` thinks: some think on every turn
-/// whatever they are told, and at their own default a turn of a Code task takes thousands of
-/// tokens of thinking. Medium kept the answers and took a fraction of the time; low for the rest.
+/// whatever they are told. Measured on the Rust task of the Code tasks with a 16 GB model: at its
+/// own default it thought for 86% of the 15 minutes it took; at medium, with the end of its newest
+/// thought kept (see `kept_thought`), it fixed the same bugs in 3 minutes. Low for the rest.
 pub fn effort(context: u32) -> &'static str {
     if thinks(context) {
         "medium"
