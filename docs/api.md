@@ -208,7 +208,9 @@ one app. It is stopped when the task is stopped, fails or is removed, from the p
 `start_app` runs again, and when the service stops; a request that finished keeps it, so the person can look. At
 most four run at once, and the oldest of a task that is not working makes room. `GET /v1/agent/tasks/{id}` shows
 it as `app: {url, port, command, alive, started_ms, lines}`, or `null`. Not offered in `read_only`; in `ask` and
-`auto_edits` the command waits for the person like `run_command`. On macOS it runs in the command sandbox, which
+`auto_edits` the command waits for the person like `run_command`. A `run_command` that would start a server
+(`python3 -m http.server`, `npm run dev`, `vite`, `flask run` and the like) is not run while `start_app` is offered:
+the model is told to call `start_app`. A `command` that is only a port is taken as none. On macOS it runs in the command sandbox, which
 lets it listen on this computer's own address and nothing more; the task's other commands may then talk to that
 one port.
 
