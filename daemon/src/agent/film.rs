@@ -190,6 +190,7 @@ fn system_prompt(mode: Mode, sees: bool) -> String {
         "Do what the person asks with the tools, one step at a time. Shots are named by number: shot 1 is the first. The film as it is now is below, and it is up to date after every step.".to_string(),
         "A description says what is seen, in one or two plain sentences, present tense, in English. Name a character by name and never describe them in a shot: their look from the cast is added when it is made, and so is the look of the film.".to_string(),
         "Lines are what is said, as it is said, in the language of the film's lines. To write lines in another language, call set_language first.".to_string(),
+        "To change what the film shows (night, rain, a place, a mood), change the description of every shot it concerns with edit_shot; for style, colour and light of the whole film, set_look. make_shots is only for when the person asks to make or render shots.".to_string(),
     ];
     match mode {
         Mode::ReadOnly => lines.push("You can only read the film: say what you would change and why. Do not say that you changed anything.".into()),
@@ -200,8 +201,11 @@ fn system_prompt(mode: Mode, sees: bool) -> String {
         lines.push("look_at_shot shows you a picture of a made shot.".into());
     }
     lines.push("When the person asks a question, answer it from the film; change nothing they did not ask for.".into());
+    lines.push(
+        "A tool that refuses because a model is not installed will refuse again: say so to the person and do not try it again.".into(),
+    );
     lines.push("For more than two steps, call update_plan first with the steps, and keep it up to date.".into());
-    lines.push("When the work is done, call finish with one short sentence of what you did or found.".into());
+    lines.push("Between steps write nothing, or one short line. When the work is done, call finish with one short sentence of what you did or found.".into());
     lines.join("\n")
 }
 
@@ -209,6 +213,9 @@ fn system_prompt(mode: Mode, sees: bool) -> String {
 pub(super) fn turn(app: &Shared, task: &Task, film: &str) -> (String, Vec<Value>) {
     let sees = see::sees(app, task);
     let mut system = format!("{}\n\nThe film now:\n{}", system_prompt(task.mode, sees), assist::context(app, film));
+    for line in assist::cannot(app) {
+        system.push_str(&format!("\n{line}"));
+    }
     if !task.extra.plan.is_empty() {
         system.push_str(&format!("\n\nYour plan so far ([x] done, [>] doing now, [ ] to do):\n{}", plan::brief(&task.extra.plan)));
     }

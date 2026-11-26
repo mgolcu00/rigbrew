@@ -421,6 +421,18 @@ pub fn read_shot(app: &App, id: &str, args: &Value) -> Result<String, String> {
     Ok(out.join("\n"))
 }
 
+/// What cannot be done on this computer now, as lines for the model: no video model, no voice.
+pub fn cannot(app: &App) -> Vec<String> {
+    let mut out = Vec::new();
+    if installed_one(app, Modality::Video).is_err() {
+        out.push("No video model is installed: make_shots refuses until the person adds one under Models.".to_string());
+    }
+    if installed_one(app, Modality::Voice).is_err() {
+        out.push("No voice is installed: dub cannot read lines aloud.".to_string());
+    }
+    out
+}
+
 /// The shots that are selected in the tracks, by number, for the request that goes with them.
 pub fn selection(app: &App, id: &str, shots: &[String]) -> Option<String> {
     let p = load(app, id)?;
@@ -470,9 +482,11 @@ pub fn edit_shot(app: &App, id: &str, args: &Value) -> Result<Done, String> {
         }
         if let Some(wanted) = number(args, "seconds") {
             let frames = frames_for(app, wanted)?;
-            if frames != old.frames {
-                what.push(format!("{} → {}", seconds(old.frames), seconds(frames)));
-                diff.push(format!("- {}\n+ {}", seconds(old.frames), seconds(frames)));
+            // The length it has, given again (a clip of 120 frames is "5 seconds" too), is no change.
+            let now = old.length();
+            if (wanted as f32 - now).abs() >= 0.1 && frames != old.frames {
+                what.push(format!("{now:.1} s → {}", seconds(frames)));
+                diff.push(format!("- {now:.1} s\n+ {}", seconds(frames)));
                 shot.frames = Some(frames);
             }
         }
@@ -1129,6 +1143,7 @@ mod tests {
             .contains("No one named Ayşe"));
         assert!(edit_shot(&app, &id, &json!({"shot": 2})).unwrap_err().starts_with("Nothing changed"));
         assert_eq!(edit_shot(&app, &id, &json!({"shot": 2, "seconds": 40})).unwrap_err(), "A shot is 0.2 to 10 seconds long.");
+        assert!(edit_shot(&app, &id, &json!({"shot": 2, "seconds": 5})).unwrap_err().starts_with("Nothing changed"), "the length it has");
         assert!(edit_shot(&app, &id, &json!({"shot": 1, "continues": true})).unwrap_err().contains("nothing to continue"));
         assert!(edit_shot(&app, &id, &json!({"shot": 1, "description": "  "})).unwrap_err().contains("cannot be empty"));
         std::fs::remove_dir_all(dir).ok();
