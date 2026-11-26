@@ -1042,7 +1042,11 @@ pub fn export_plan(app: &App, id: &str) -> Result<String, String> {
     let file = export_path(&p, &p.export);
     let name = file.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
     let left = p.shots.len() - made;
-    let out = if left > 0 { format!(" ({left} not made are left out)") } else { String::new() };
+    let out = match left {
+        0 => String::new(),
+        1 => " (1 shot is not made and is left out)".to_string(),
+        n => format!(" ({n} shots are not made and are left out)"),
+    };
     Ok(format!("Export {made} {} to {name}{out}", if made == 1 { "shot" } else { "shots" }))
 }
 
@@ -1075,19 +1079,76 @@ pub async fn look_at_shot(app: &Shared, id: &str, args: &Value) -> Result<(Vec<u
     }
     let length = s.length();
     let when = number(args, "at").map(|t| t as f32).unwrap_or(length / 2.0).clamp(0.0, (length - 0.05).max(0.0));
+    // The picture at the film's shape, at most 512 wide; the packaged FFmpeg writes no PNG, so it
+    // hands over the pixels and they are put in a PNG here.
+    let (fw, fh) = p.size.split_once('x').and_then(|(w, h)| Some((w.parse::<u32>().ok()?, h.parse::<u32>().ok()?))).unwrap_or((640, 384));
+    let width = fw.min(512);
+    let height = ((fh as f32 * width as f32 / fw as f32 / 2.0).round() as u32 * 2).max(2);
     let ffmpeg = crate::engine_tool(app, crate::EngineKind::Ffmpeg, "ffmpeg").await?;
     let out = tokio::process::Command::new(ffmpeg)
         .args(["-hide_banner", "-loglevel", "error", "-ss", &format!("{when:.3}"), "-i"])
         .arg(&clip)
-        .args(["-frames:v", "1", "-vf", "scale=w='min(640,iw)':h=-2", "-f", "image2pipe", "-c:v", "png", "-"])
+        .args(["-frames:v", "1", "-vf", &format!("scale={width}:{height}"), "-pix_fmt", "rgb24", "-f", "rawvideo", "-"])
         .stdin(std::process::Stdio::null())
         .output()
         .await
         .map_err(|e| format!("The picture could not be taken: {e}"))?;
-    if !out.status.success() || out.stdout.is_empty() {
+    let wanted = (width * height * 3) as usize;
+    if !out.status.success() || out.stdout.len() < wanted {
         return Err(format!("The picture could not be taken from shot {}.", at + 1));
     }
-    Ok((out.stdout, format!("shot {} at {when:.1} s", at + 1)))
+    Ok((png(width, height, &out.stdout[..wanted]), format!("shot {} at {when:.1} s", at + 1)))
+}
+
+/// A PNG of RGB pixels, stored without compression: what the model is shown and the app keeps.
+fn png(width: u32, height: u32, rgb: &[u8]) -> Vec<u8> {
+    fn crc32(parts: &[&[u8]]) -> u32 {
+        let mut c = 0xffff_ffffu32;
+        for &b in parts.iter().flat_map(|p| p.iter()) {
+            c ^= b as u32;
+            for _ in 0..8 {
+                c = if c & 1 != 0 { 0xedb8_8320 ^ (c >> 1) } else { c >> 1 };
+            }
+        }
+        !c
+    }
+    fn chunk(out: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
+        out.extend((data.len() as u32).to_be_bytes());
+        out.extend(kind);
+        out.extend(data);
+        out.extend(crc32(&[kind, data]).to_be_bytes());
+    }
+    // Every row starts with filter 0; then zlib with stored blocks and its Adler-32.
+    let row = width as usize * 3;
+    let mut raw = Vec::with_capacity((row + 1) * height as usize);
+    for line in rgb.chunks(row).take(height as usize) {
+        raw.push(0);
+        raw.extend_from_slice(line);
+    }
+    let mut z = vec![0x78, 0x01];
+    let blocks: Vec<&[u8]> = raw.chunks(65_535).collect();
+    for (i, block) in blocks.iter().enumerate() {
+        z.push(u8::from(i + 1 == blocks.len()));
+        let n = block.len() as u16;
+        z.extend(n.to_le_bytes());
+        z.extend((!n).to_le_bytes());
+        z.extend_from_slice(block);
+    }
+    let (mut a, mut b) = (1u32, 0u32);
+    for &x in &raw {
+        a = (a + x as u32) % 65_521;
+        b = (b + a) % 65_521;
+    }
+    z.extend(((b << 16) | a).to_be_bytes());
+    let mut out = b"\x89PNG\r\n\x1a\n".to_vec();
+    let mut head = Vec::with_capacity(13);
+    head.extend(width.to_be_bytes());
+    head.extend(height.to_be_bytes());
+    head.extend([8, 2, 0, 0, 0]);
+    chunk(&mut out, b"IHDR", &head);
+    chunk(&mut out, b"IDAT", &z);
+    chunk(&mut out, b"IEND", &[]);
+    out
 }
 
 #[cfg(test)]
@@ -1291,6 +1352,18 @@ mod tests {
         assert!(question.starts_with("Make shot 2: "), "{question}");
         assert!(make_plan(&app, &id, &json!({"shots": [8]})).unwrap_err().contains("no shot 8"));
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_picture_is_a_png_any_reader_takes() {
+        // Two by one: a red and a blue pixel.
+        let made = png(2, 1, &[255, 0, 0, 0, 0, 255]);
+        assert!(made.starts_with(b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR\0\0\0\x02\0\0\0\x01\x08\x02"));
+        // The end every PNG has.
+        assert!(made.ends_with(&[0, 0, 0, 0, b'I', b'E', b'N', b'D', 0xae, 0x42, 0x60, 0x82]));
+        // The pixels are in one stored block, filter 0 first, then Adler-32.
+        let idat = &made[33 + 8..made.len() - 12 - 4];
+        assert_eq!(idat, [0x78, 0x01, 1, 7, 0, 0xf8, 0xff, 0, 255, 0, 0, 0, 0, 255, 0x07, 0x00, 0x01, 0xff]);
     }
 
     #[test]
