@@ -289,6 +289,26 @@ fn shots_with(p: &Project, at: usize, shot: super::ShotIn) -> Vec<super::ShotIn>
 
 // --- reading the film ---------------------------------------------------------------------------
 
+/// How long a shot is to be: its clip's length while that is in use, else the length asked for
+/// (a made shot whose length was changed is that long once it is made again).
+fn asked(s: &Shot) -> f32 {
+    if s.state == "done" {
+        s.length()
+    } else {
+        s.frames as f32 / 24.0
+    }
+}
+
+/// The length of a shot in words, with its clip's when that is still another.
+fn length_of(s: &Shot) -> String {
+    let (to_be, now) = (asked(s), s.length());
+    if (to_be - now).abs() >= 0.05 {
+        format!("{to_be:.1} s (its clip from before is {now:.1} s)")
+    } else {
+        format!("{to_be:.1} s")
+    }
+}
+
 fn state_of(s: &Shot, waiting: &[String], making: Option<&str>) -> &'static str {
     if making == Some(s.id.as_str()) {
         return "being made";
@@ -333,7 +353,7 @@ fn describe(p: &Project, full: bool) -> String {
     }
     let shown = if full { p.shots.len() } else { BRIEF_SHOTS };
     for (i, s) in p.shots.iter().enumerate().take(shown) {
-        let mut row = format!("{}. {:.1} s, {}", i + 1, s.length(), state_of(s, &waiting, making.as_deref()));
+        let mut row = format!("{}. {}, {}", i + 1, length_of(s), state_of(s, &waiting, making.as_deref()));
         if s.continues && i > 0 {
             row.push_str(&format!(", continues shot {i}"));
         }
@@ -389,7 +409,7 @@ pub fn read_shot(app: &App, id: &str, args: &Value) -> Result<String, String> {
             q.now.as_ref().filter(|(f, _, _)| *f == p.id).map(|(_, s, _)| s.clone()),
         )
     });
-    let mut out = vec![format!("Shot {} of {}: {:.1} s, {}.", at + 1, p.shots.len(), s.length(), state_of(s, &waiting, making.as_deref()))];
+    let mut out = vec![format!("Shot {} of {}: {}, {}.", at + 1, p.shots.len(), length_of(s), state_of(s, &waiting, making.as_deref()))];
     out.push(format!("Description: {}", if s.prompt.is_empty() { "(none)" } else { &s.prompt }));
     let in_it: Vec<&str> = cast::named(&p.cast, &s.prompt).iter().map(|m| m.name.as_str()).collect();
     if !in_it.is_empty() {
@@ -431,6 +451,11 @@ pub fn cannot(app: &App) -> Vec<String> {
         out.push("No voice is installed: dub cannot read lines aloud.".to_string());
     }
     out
+}
+
+/// How many shots the film has as a request is made: what the person says refers to that.
+pub fn count(app: &App, id: &str) -> usize {
+    load(app, id).map_or(0, |p| p.shots.len())
 }
 
 /// The shots that are selected in the tracks, by number, for the request that goes with them.
@@ -483,7 +508,7 @@ pub fn edit_shot(app: &App, id: &str, args: &Value) -> Result<Done, String> {
         if let Some(wanted) = number(args, "seconds") {
             let frames = frames_for(app, wanted)?;
             // The length it has, given again (a clip of 120 frames is "5 seconds" too), is no change.
-            let now = old.length();
+            let now = asked(old);
             if (wanted as f32 - now).abs() >= 0.1 && frames != old.frames {
                 what.push(format!("{now:.1} s → {}", seconds(frames)));
                 diff.push(format!("- {now:.1} s\n+ {}", seconds(frames)));
@@ -568,7 +593,12 @@ pub fn add_shot(app: &App, id: &str, args: &Value) -> Result<Done, String> {
         let new = super::ShotIn { prompt: described.clone(), frames: Some(frames), continues, lines, ..super::ShotIn::default() };
         let mut shots: Vec<super::ShotIn> = p.shots.iter().map(shot_in).collect();
         shots.insert(at, new);
-        let done = Done { said: format!("Added shot {}", at + 1), diff: format!("+ {described}"), more: String::new() };
+        let more = if at + 1 < shots.len() {
+            format!("The shots after it moved down by one: the film has {} shots now.", shots.len())
+        } else {
+            format!("The film has {} shots now.", shots.len())
+        };
+        let done = Done { said: format!("Added shot {}", at + 1), diff: format!("+ {described}"), more };
         Ok((Save { shots: Some(shots), ..Save::default() }, done))
     })
 }
@@ -578,7 +608,13 @@ pub fn remove_shot(app: &App, id: &str, args: &Value) -> Result<Done, String> {
     change(app, id, |p| {
         let at = shot_at(p, &args["shot"])?;
         let shots: Vec<super::ShotIn> = p.shots.iter().enumerate().filter(|(i, _)| *i != at).map(|(_, s)| shot_in(s)).collect();
-        let done = Done { said: format!("Removed shot {}", at + 1), diff: format!("- {}", p.shots[at].prompt), more: String::new() };
+        let left = shots.len();
+        let more = match (left, at + 1 == p.shots.len()) {
+            (0, _) => "The film has no shots now.".to_string(),
+            (_, true) => format!("It was the last one. The film has {left} shots now, 1 to {left}: this part of the request is done."),
+            _ => format!("The shots after it moved up by one: the film has {left} shots now, 1 to {left}."),
+        };
+        let done = Done { said: format!("Removed shot {}", at + 1), diff: format!("- {}", p.shots[at].prompt), more };
         Ok((Save { shots: Some(shots), ..Save::default() }, done))
     })
 }
@@ -1146,6 +1182,17 @@ mod tests {
         assert!(edit_shot(&app, &id, &json!({"shot": 2, "seconds": 5})).unwrap_err().starts_with("Nothing changed"), "the length it has");
         assert!(edit_shot(&app, &id, &json!({"shot": 1, "continues": true})).unwrap_err().contains("nothing to continue"));
         assert!(edit_shot(&app, &id, &json!({"shot": 1, "description": "  "})).unwrap_err().contains("cannot be empty"));
+        // A made shot made longer: it is said at the length asked for, with its clip's, so the model sees the change took.
+        let mut p = load(&app, &id).unwrap();
+        (p.shots[1].state, p.shots[1].frames, p.shots[1].made_frames) = ("done".into(), 120, Some(120));
+        store(&mut p).unwrap();
+        assert_eq!(edit_shot(&app, &id, &json!({"shot": 2, "seconds": 10})).unwrap().said, "Shot 2: 5.0 s → 10.0 s");
+        assert!(read_shot(&app, &id, &json!({"shot": 2}))
+            .unwrap()
+            .starts_with("Shot 2 of 3: 10.0 s (its clip from before is 5.0 s), changed"));
+        assert!(read_film(&app, &id).unwrap().contains("2. 10.0 s (its clip from before is 5.0 s), changed since it was made."));
+        assert!(edit_shot(&app, &id, &json!({"shot": 2, "seconds": 10})).unwrap_err().starts_with("Nothing changed"));
+        assert_eq!(edit_shot(&app, &id, &json!({"shot": 2, "seconds": 8})).unwrap().said, "Shot 2: 10.0 s → 8.0 s");
         std::fs::remove_dir_all(dir).ok();
     }
 
@@ -1164,7 +1211,9 @@ mod tests {
         assert!(move_shot(&app, &id, &json!({"shot": 2, "to": 9})).unwrap_err().contains("\"to\""));
         let done = remove_shot(&app, &id, &json!({"shot": 5})).unwrap();
         assert_eq!((done.said.as_str(), done.diff.as_str()), ("Removed shot 5", "- A paper boat floats away."));
-        assert_eq!(load(&app, &id).unwrap().shots.len(), 4);
+        assert!(done.more.starts_with("It was the last one. The film has 4 shots now"), "{done:?}");
+        assert!(remove_shot(&app, &id, &json!({"shot": 1})).unwrap().more.contains("moved up by one"));
+        assert_eq!(load(&app, &id).unwrap().shots.len(), 3);
         assert!(remove_shot(&app, &id, &json!({"shot": 0})).is_err());
         std::fs::remove_dir_all(dir).ok();
     }

@@ -191,6 +191,7 @@ fn system_prompt(mode: Mode, sees: bool) -> String {
         "A description says what is seen, in one or two plain sentences, present tense, in English. Name a character by name and never describe them in a shot: their look from the cast is added when it is made, and so is the look of the film.".to_string(),
         "Lines are what is said, as it is said, in the language of the film's lines. To write lines in another language, call set_language first.".to_string(),
         "To change what the film shows (night, rain, a place, a mood), change the description of every shot it concerns with edit_shot; for style, colour and light of the whole film, set_look. make_shots is only for when the person asks to make or render shots.".to_string(),
+        "Shot numbers change when a shot is added, removed or moved. What the person asked refers to the film as it was when they asked: do each thing once, and never undo a step of your own.".to_string(),
     ];
     match mode {
         Mode::ReadOnly => lines.push("You can only read the film: say what you would change and why. Do not say that you changed anything.".into()),
@@ -226,9 +227,11 @@ pub(super) fn turn(app: &Shared, task: &Task, film: &str) -> (String, Vec<Value>
 /// The message the model is given for a request, with the shots selected in the tracks; and the
 /// note the person sees for them.
 pub(super) fn request(app: &Shared, film: &str, text: &str, selected: &[String]) -> (String, Option<String>) {
+    let shots = assist::count(app, film);
+    let when = format!("[As this is asked, the film has {shots} {}.]", if shots == 1 { "shot" } else { "shots" });
     match assist::selection(app, film, selected) {
-        Some(note) => (format!("{text}\n\n[{note} in the tracks.]"), Some(note)),
-        None => (text.to_string(), None),
+        Some(note) => (format!("{text}\n\n{when} [{note} in the tracks.]"), Some(note)),
+        None => (format!("{text}\n\n{when}"), None),
     }
 }
 
