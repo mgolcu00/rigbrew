@@ -79,10 +79,16 @@ pub async fn lookup(State(app): State<Shared>, Json(body): Json<LookupBody>) -> 
         .iter()
         .map(|f| {
             let id = models::package_id(&found.owner, &found.repo, &f.file);
-            let installed = app.package(&id).is_some_and(|p| !app.installed(&p).is_empty());
+            // Installed when every file it would have now is there: one added before Rigbrew
+            // fetched vision parts can be added again to get its own.
+            let fresh = models::package(&found, f).package;
+            let installed = app.package(&id).is_some_and(|p| !app.installed(&p).is_empty())
+                && fresh.variants[0].files.iter().all(|file| rigbrew_core::bundle::present(&app.files_dir(&fresh), file));
+            let projector = models::projector_for(&found.projectors, &f.file);
+            let size = f.size + projector.map_or(0, |p| p.size);
             json!({
-                "file": f.file, "size": f.size, "needs_mb": models::needs_mb(f.size), "fits": fits(f.size),
-                "checked": f.sha256.is_some(), "id": id, "installed": installed,
+                "file": f.file, "size": f.size, "needs_mb": models::needs_mb(size), "fits": fits(size),
+                "checked": f.sha256.is_some(), "id": id, "installed": installed, "projector": projector.map(|p| &p.file),
             })
         })
         .collect();
@@ -134,7 +140,8 @@ pub async fn add(State(app): State<Shared>, Json(body): Json<AddBody>) -> Respon
             ),
         );
     }
-    let (needs, budget) = (models::needs_mb(file.size), budget_mb(&app));
+    let projector = models::projector_for(&found.projectors, &file.file).map_or(0, |p| p.size);
+    let (needs, budget) = (models::needs_mb(file.size + projector), budget_mb(&app));
     if needs > budget {
         app.record("community_add_refused", json!({"ok": false, "reason": "too_big", "needs_mb": needs, "budget_mb": budget}));
         return fail(StatusCode::CONFLICT, format!("That file needs about {needs} MB of memory and this computer can give {budget} MB."));
@@ -154,7 +161,7 @@ pub async fn add(State(app): State<Shared>, Json(body): Json<AddBody>) -> Respon
     }
     app.record(
         "community_added",
-        json!({"host": host_label(found.host), "size_mb": file.size / (1024 * 1024), "needs_mb": needs, "checked": file.sha256.is_some()}),
+        json!({"host": host_label(found.host), "size_mb": file.size / (1024 * 1024), "needs_mb": needs, "checked": file.sha256.is_some(), "vision": projector > 0}),
     );
     let variant = package.variants[0].clone();
     let job = start_pull(&app, package.clone(), variant);

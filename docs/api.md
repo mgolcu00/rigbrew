@@ -25,7 +25,7 @@ Browsers are refused unless the request comes from the app's own origin.
 | `GET /v1/packages` | Every package with its versions, the version recommended for this machine and why, and what is installed. |
 | `POST /v1/packages/{id}/pull` | Start a download, optionally `{"variant": "q5"}`. Returns a job id. The engine the model needs comes with it. |
 | `DELETE /v1/packages/{id}` | Remove installed files (`?variant=q5` for one version). Files another installed version still uses are kept. |
-| `POST /v1/community/lookup` | `{"url"}`: what a link to an open chat model holds. Answers `{host, site, owner, repo, url, license, gated, budget_mb, files: [{file, size, needs_mb, fits, checked, id, installed}], pick, skipped, links}`. See [Community models](#community-models). |
+| `POST /v1/community/lookup` | `{"url"}`: what a link to an open chat model holds. Answers `{host, site, owner, repo, url, license, gated, budget_mb, files: [{file, size, needs_mb, fits, checked, id, installed, projector}], pick, skipped, links}`. See [Community models](#community-models). |
 | `POST /v1/community` | `{"repo", "file"}`: add one of those files as a chat package and start its download. Answers `{"job", "id", "name"}`; follow the job like any other download. |
 | `DELETE /v1/community/{id}` | Remove a community model: its files and its place in the list. A running download of it stops first. |
 | `GET /v1/community/catalog` | The community models Rigbrew suggests, from a signed file: `{updated, stale, models: [{id, name, kind, by, url, license, about, status, added, note, more}]}`. `?refresh=1` asks for the file again now. See [The community catalog](#the-community-catalog). |
@@ -494,11 +494,21 @@ them like any other package. Their ids start with `community-`.
 
 Only `https://huggingface.co` and `https://github.com` are accepted, with no port or sign-in in the link. Owner,
 repo, revision and file names may hold letters, digits, `.`, `_`, `-` and `+`, never start with a dot, and file
-names must end in `.gguf`. Files larger than 200 GB, parts of split models (`-00001-of-00003.gguf`) and vision
-add-ons (`mmproj`) are left out and counted in `skipped`. Refused links answer 400, repos that are private or do not
-exist 404, and a site that cannot be reached 502, each with a sentence in `error.message`.
+names must end in `.gguf`. Files larger than 200 GB, parts of split models (`-00001-of-00003.gguf`), importance
+matrices (`imatrix`) and vision parts (`mmproj`) are not offered as models and are counted in `skipped`. Refused links
+answer 400, repos that are private or do not exist 404, and a site that cannot be reached 502, each with a sentence in
+`error.message`.
 
-A file needs its size and about 15% more in memory (`needs_mb`). `fits` compares that with `budget_mb`, the
+**Vision parts.** When the repo has `mmproj` files, the one that goes with a model file comes with it (`projector`):
+the one in the same folder whose name shares the most with the model's, in 8-bit (`Q8`) before 16-bit (`F16`, `BF16`)
+before 32-bit before anything with fewer bits, the smaller of two equal ones. It becomes the package's second file
+(role `mmproj`), is downloaded and checked with the model, and the engine is started with it (`--mmproj`), so the
+model takes pictures: those a Code task takes with `look_at_page` and `simulator`, and those the person sends. A
+model added before Rigbrew fetched vision parts is `installed: false` in a new lookup when its repo has one; adding it
+again keeps the model file (it is checked, not downloaded) and fetches the vision part. `GET /v1/packages` says per
+version whether it has one (`vision`).
+
+A file needs its size and about 15% more in memory, its vision part included (`needs_mb`). `fits` compares that with `budget_mb`, the
 accelerator's memory budget from `GET /v1/system` (the processor's on a machine without one). `pick` is the file the
 link named when it fits, otherwise the largest file that fits. `POST /v1/community` asks the site again, so sizes and
 checksums never come from the request; it answers 409 for a file that does not fit and for a repo that asks for a

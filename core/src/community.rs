@@ -245,7 +245,10 @@ pub struct Found {
     pub gated: bool,
     /// Single-file chat models, smallest first.
     pub files: Vec<FoundFile>,
-    /// GGUF files that were left out: parts of a split model and vision add-ons.
+    /// Vision parts (`mmproj` files): with one, the model also takes pictures.
+    pub projectors: Vec<FoundFile>,
+    /// GGUF files that were left out: parts of a split model, vision parts and other files that
+    /// are not a chat model.
     pub skipped: usize,
     /// The file the link named, when it is one of `files`.
     pub wanted: Option<String>,
@@ -283,25 +286,76 @@ fn is_part(name: &str) -> bool {
     digits(total) && head.rsplit_once('-').is_some_and(|(_, n)| digits(n))
 }
 
-/// Sorts `(name, size, sha256)` candidates into the files offered and a count of those left out.
-fn offer(candidates: Vec<(String, u64, Option<String>)>) -> (Vec<FoundFile>, usize) {
-    let mut files = Vec::new();
+/// What a repo offers: the chat model files, the vision parts, and how many GGUF files were left out.
+type Offered = (Vec<FoundFile>, Vec<FoundFile>, usize);
+
+/// Sorts `(name, size, sha256)` candidates into the files offered, the vision parts, and a count
+/// of those left out.
+fn offer(candidates: Vec<(String, u64, Option<String>)>) -> Offered {
+    let (mut files, mut projectors) = (Vec::new(), Vec::new());
     let mut skipped = 0;
     for (file, size, sha256) in candidates {
         if check_file(&file).is_err() {
             continue;
         }
         let base = file.rsplit('/').next().unwrap_or(&file).to_ascii_lowercase();
-        if is_part(&file) || base.contains("mmproj") || size == 0 || size > MAX_FILE_BYTES {
+        let sha256 = sha256.map(|s| s.to_ascii_lowercase()).filter(|s| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit()));
+        if base.contains("mmproj") && !is_part(&file) && size > 0 && size <= MAX_FILE_BYTES {
+            skipped += 1;
+            projectors.push(FoundFile { file, size, sha256 });
+            continue;
+        }
+        // An importance matrix is a file for making quantized models, not a model.
+        if is_part(&file) || base.contains("imatrix") || size == 0 || size > MAX_FILE_BYTES {
             skipped += 1;
             continue;
         }
-        let sha256 = sha256.map(|s| s.to_ascii_lowercase()).filter(|s| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit()));
         files.push(FoundFile { file, size, sha256 });
     }
     files.sort_by(|a, b| a.size.cmp(&b.size).then_with(|| a.file.cmp(&b.file)));
     files.truncate(MAX_FILES);
-    (files, skipped)
+    projectors.truncate(MAX_FILES);
+    (files, projectors, skipped)
+}
+
+/// How well a vision part's number format keeps a picture, best first: 8 and 16 bits see as well
+/// as 32 at a fraction of the size, fewer bits blur what the model sees.
+fn projector_rank(name: &str) -> u8 {
+    let n = name.to_ascii_lowercase();
+    if n.contains("q8") {
+        0
+    } else if n.contains("f16") {
+        1
+    } else if n.contains("f32") {
+        2
+    } else {
+        3
+    }
+}
+
+/// The letters and digits of a file name that say which model it is: without the folder, the
+/// ending, `mmproj` and the number format.
+fn family(name: &str) -> String {
+    let base = name.rsplit('/').next().unwrap_or(name).to_ascii_lowercase();
+    let base = base.trim_end_matches(".gguf").replace("mmproj", "");
+    base.split(['-', '_', '.'])
+        .filter(|part| {
+            let quant = part.starts_with('q') && part[1..].chars().next().is_some_and(|c| c.is_ascii_digit());
+            !(quant || matches!(*part, "f16" | "bf16" | "f32" | "k" | "m" | "s" | "l" | "xl" | "0" | "1"))
+        })
+        .collect()
+}
+
+/// The vision part that goes with a model file of the repo, when it has one: the one in the same
+/// folder whose name shares the most with the model's, in the best format (see `projector_rank`),
+/// the smaller of two equal ones.
+pub fn projector_for<'a>(projectors: &'a [FoundFile], model: &str) -> Option<&'a FoundFile> {
+    let folder = |p: &str| p.rsplit_once('/').map_or("", |(dir, _)| dir).to_string();
+    let wanted = family(model);
+    let shared = |p: &FoundFile| family(&p.file).chars().zip(wanted.chars()).take_while(|(a, b)| a == b).count();
+    projectors.iter().max_by_key(|p| {
+        (folder(&p.file) == folder(model), shared(p), std::cmp::Reverse(projector_rank(&p.file)), std::cmp::Reverse(p.size))
+    })
 }
 
 /// A licence name out of a Hugging Face model's card, or its tags.
@@ -338,7 +392,7 @@ pub fn read_hf_model(target: &Target, model: &Value) -> Result<Found, Refused> {
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    let (files, skipped) = offer(candidates);
+    let (files, projectors, skipped) = offer(candidates);
     let wanted = target.file.clone().filter(|w| files.iter().any(|f| f.file == *w));
     Ok(Found {
         host: Host::HuggingFace,
@@ -349,6 +403,7 @@ pub fn read_hf_model(target: &Target, model: &Value) -> Result<Found, Refused> {
         license: hf_license(model),
         gated: !matches!(model["gated"], Value::Null | Value::Bool(false)),
         files,
+        projectors,
         skipped,
         wanted,
         links: Vec::new(),
@@ -356,7 +411,7 @@ pub fn read_hf_model(target: &Target, model: &Value) -> Result<Found, Refused> {
 }
 
 /// Reads a GitHub release (`/repos/<owner>/<repo>/releases/...`): its tag and GGUF assets.
-pub fn read_github_release(release: &Value) -> Option<(String, Vec<FoundFile>, usize)> {
+pub fn read_github_release(release: &Value) -> Option<(String, Offered)> {
     let tag = release["tag_name"].as_str().filter(|t| clean_name(t, 128))?.to_string();
     let candidates = release["assets"]
         .as_array()?
@@ -367,8 +422,7 @@ pub fn read_github_release(release: &Value) -> Option<(String, Vec<FoundFile>, u
             Some((name.to_string(), a["size"].as_u64().unwrap_or(0), sha))
         })
         .collect();
-    let (files, skipped) = offer(candidates);
-    Some((tag, files, skipped))
+    Some((tag, offer(candidates)))
 }
 
 /// Hugging Face models a text links to, as `owner/name`, in the order they appear.
@@ -493,7 +547,7 @@ async fn lookup_github(client: &reqwest::Client, target: &Target) -> Result<Foun
         Err(LookupError::NotFound(_)) => None,
         Err(e) => return Err(e),
     };
-    let (rev, files, skipped) = release.unwrap_or_default();
+    let (rev, (files, projectors, skipped)) = release.unwrap_or_default();
     let mut found = Found {
         host: Host::GitHub,
         owner: target.owner.clone(),
@@ -504,6 +558,7 @@ async fn lookup_github(client: &reqwest::Client, target: &Target) -> Result<Foun
         gated: false,
         wanted: target.file.clone().filter(|w| files.iter().any(|f| f.file == *w)),
         files,
+        projectors,
         skipped,
         links: Vec::new(),
     };
@@ -552,11 +607,18 @@ pub fn package_id(owner: &str, repo: &str, file: &str) -> String {
 }
 
 /// Makes the package for one file of a lookup. It is a chat model for the llama.cpp engine with
-/// a single variant.
+/// a single variant, and the repo's vision part for it when there is one (see `projector_for`):
+/// with that, the model takes pictures.
 pub fn package(found: &Found, file: &FoundFile) -> CommunityPackage {
     let stem = file.file.rsplit('/').next().unwrap_or(&file.file);
     let name = stem[..stem.len().saturating_sub(".gguf".len())].to_string();
-    let mem = needs_mb(file.size);
+    let projector = projector_for(&found.projectors, &file.file);
+    let mem = needs_mb(file.size + projector.map_or(0, |p| p.size));
+    let mut files =
+        vec![FileRef { role: "model".into(), path: file.file.clone(), size: file.size, sha256: file.sha256.clone().unwrap_or_default() }];
+    if let Some(p) = projector {
+        files.push(FileRef { role: "mmproj".into(), path: p.file.clone(), size: p.size, sha256: p.sha256.clone().unwrap_or_default() });
+    }
     CommunityPackage {
         package: Package {
             id: package_id(&found.owner, &found.repo, &file.file),
@@ -574,12 +636,7 @@ pub fn package(found: &Found, file: &FoundFile) -> CommunityPackage {
             quality_floor: 0.0,
             variants: vec![Variant {
                 id: "gguf".into(),
-                files: vec![FileRef {
-                    role: "model".into(),
-                    path: file.file.clone(),
-                    size: file.size,
-                    sha256: file.sha256.clone().unwrap_or_default(),
-                }],
+                files,
                 accel_mem_mb: mem,
                 cpu_mem_mb: Some(mem),
                 backends: vec![Backend::Metal, Backend::Cuda, Backend::Vulkan],
@@ -619,7 +676,9 @@ impl CommunityPackage {
             && p.modality == Modality::Chat
             && p.engine == Engine::Llama
             && p.variants.len() == 1
-            && !p.variants[0].files.is_empty()
+            && p.variants[0].files.first().is_some_and(|f| f.role == "model")
+            && p.variants[0].files.iter().skip(1).all(|f| f.role == "mmproj")
+            && p.variants[0].files.len() <= 2
             && p.variants[0].files.iter().all(|f| {
                 check_file(&f.path).is_ok()
                     && (f.sha256.is_empty() || (f.sha256.len() == 64 && f.sha256.bytes().all(|b| b.is_ascii_hexdigit())))
@@ -851,6 +910,7 @@ mod tests {
         assert_eq!(found.files[0].sha256, None);
         assert_eq!(found.files[1].sha256.as_deref(), Some(sha.as_str()));
         assert_eq!(found.skipped, 4);
+        assert_eq!(found.projectors.iter().map(|f| f.file.as_str()).collect::<Vec<_>>(), ["mmproj-model-f16.gguf"]);
         assert_eq!(found.license.as_deref(), Some("apache-2.0"));
         assert_eq!(found.wanted.as_deref(), Some("small-Q4_K_M.gguf"));
         assert!(!found.gated);
@@ -873,8 +933,8 @@ mod tests {
             {"name": "source.zip", "size": 10},
             {"name": "other.gguf", "size": 1000, "digest": null},
         ]});
-        let (tag, files, skipped) = read_github_release(&release).unwrap();
-        assert_eq!((tag.as_str(), skipped), ("v1.0", 0));
+        let (tag, (files, projectors, skipped)) = read_github_release(&release).unwrap();
+        assert_eq!((tag.as_str(), skipped, projectors.len()), ("v1.0", 0, 0));
         assert_eq!(
             files,
             [
@@ -883,6 +943,54 @@ mod tests {
             ]
         );
         assert!(read_github_release(&json!({"tag_name": "../x", "assets": []})).is_none());
+    }
+
+    #[test]
+    fn a_model_that_sees_comes_with_its_vision_part() {
+        let siblings = json!([
+            {"rfilename": "Inkling-2-Mini-16GB-64K.gguf", "size": 15_000, "lfs": {"sha256": "d".repeat(64), "size": 15_000}},
+            {"rfilename": "Inkling-2-Mini-16GB-128K.gguf", "size": 13_000},
+            {"rfilename": "mmproj-Inkling-2-Mini-F16.gguf", "size": 640},
+            {"rfilename": "mmproj-Inkling-2-Mini-Q8_0.gguf", "size": 345, "lfs": {"sha256": "e".repeat(64), "size": 345}},
+            {"rfilename": "imatrix/Inkling-2-Mini.imatrix.gguf", "size": 90},
+        ]);
+        let found =
+            read_hf_model(&hf("drofn", "Inkling-2-Mini-16GB-GGUF", None, None), &json!({"sha": "abc", "siblings": siblings})).unwrap();
+        assert_eq!(found.files.len(), 2, "the vision parts and the importance matrix are not chat models");
+        assert_eq!(found.skipped, 3);
+        let entry = package(&found, &found.files[1]);
+        let files = &entry.package.variants[0].files;
+        assert_eq!(
+            files.iter().map(|f| (f.role.as_str(), f.path.as_str())).collect::<Vec<_>>(),
+            [("model", "Inkling-2-Mini-16GB-64K.gguf"), ("mmproj", "mmproj-Inkling-2-Mini-Q8_0.gguf")]
+        );
+        assert_eq!(files[1].sha256, "e".repeat(64));
+        assert_eq!(entry.package.variants[0].accel_mem_mb, needs_mb(15_345));
+        assert!(entry.sound());
+        // An entry with a third file, or a second model, is not one this module writes.
+        let mut odd = entry.clone();
+        odd.package.variants[0].files.push(files[1].clone());
+        assert!(!odd.sound());
+        odd.package.variants[0].files.truncate(2);
+        odd.package.variants[0].files[1].role = "model".into();
+        assert!(!odd.sound());
+
+        // Of two models in one repo, each gets its own; in one folder over another; 8 bits over 16.
+        let p = |name: &str, size: u64| FoundFile { file: name.into(), size, sha256: None };
+        let parts = [
+            p("mmproj-gemma-3-4b-f16.gguf", 800),
+            p("mmproj-gemma-3-12b-F16.gguf", 850),
+            p("mmproj-gemma-3-12b-Q8_0.gguf", 500),
+            p("mmproj-gemma-3-12b-F32.gguf", 1700),
+        ];
+        assert_eq!(projector_for(&parts, "gemma-3-12b-it-Q4_K_M.gguf").unwrap().file, "mmproj-gemma-3-12b-Q8_0.gguf");
+        assert_eq!(projector_for(&parts, "gemma-3-4b-it-Q4_K_M.gguf").unwrap().file, "mmproj-gemma-3-4b-f16.gguf");
+        let foldered = [p("a/mmproj-f16.gguf", 10), p("b/mmproj-f16.gguf", 10)];
+        assert_eq!(projector_for(&foldered, "b/model-Q4_K_M.gguf").unwrap().file, "b/mmproj-f16.gguf");
+        assert!(projector_for(&[], "model.gguf").is_none());
+        // A model without one stays as it was.
+        let plain = read_hf_model(&hf("o", "r", None, None), &json!({"siblings": [{"rfilename": "m.gguf", "size": 5}]})).unwrap();
+        assert_eq!(package(&plain, &plain.files[0]).package.variants[0].files.len(), 1);
     }
 
     #[test]
