@@ -59,11 +59,11 @@ Browsers are refused unless the request comes from the app's own origin.
 | `POST /v1/studio/projects/{id}/shots/{shot}/rewrite` | `{hint?, prompt?}`: the chat model writes the description of one shot again, in the words of the shots around it (`prompt` is the description as it stands when it is not saved yet, `hint` what should be different). Answers `{prompt}`; nothing is saved. |
 | `POST /v1/studio/projects/{id}/shots/{shot}/take`, `DELETE .../shots/{shot}/takes/{n}` | Takes: making a shot again keeps the clip before as a take (the last four; `takes: [{n, seed, seconds, frames, made_frames}]` and `take`, the one in use, on the shot). `POST {take: n}` puts a take in use; DELETE removes one and its clip. A shot's `seed`, when set through PUT, is used for its next clip: the same seed and description give the same clip again. |
 | `GET /v1/studio/projects/{id}/clips/{shot}.webm`, `.../clips/{shot}.jpg` | A made shot (the take in use; `{shot}.{n}.webm` and `{shot}.{n}.jpg` for one take), and one small picture of it (from its middle) for the timeline. A shot carries `made_frames`: the frames its clip really has. A made shot that continues another is marked `changed` when a save puts it behind a different shot. |
-| `POST /v1/agent/tasks` | Code: start a task on a folder. `{"folder", "prompt", "model", "mode", "web", "connectors"}`; see [Code tasks](#code-tasks). Answers `{"task"}`. |
-| `GET /v1/agent/tasks`, `GET /v1/agent/tasks/{id}` | Tasks, newest first (`?folder=` for one folder); one task with its state, its steps so far and what waits for an answer. |
+| `POST /v1/agent/tasks` | Code: start a task on a folder. `{"folder", "prompt", "model", "mode", "web", "connectors"}`; see [Code tasks](#code-tasks). With `{"film", "prompt", "model", "mode", "selection"}` instead of a folder: a conversation of Studio's assistant about a film; see [Studio's assistant](#studios-assistant). Answers `{"task"}`. |
+| `GET /v1/agent/tasks`, `GET /v1/agent/tasks/{id}` | Tasks of Code, newest first (`?folder=` for one folder; `?film=` lists the assistant's conversations about one film instead); one task with its state, its steps so far and what waits for an answer. |
 | `PUT /v1/agent/tasks/{id}` | `{"title"}`: the person names the task (80 characters at most). Answers `{"task"}`; see [Titles](#titles). |
 | `POST /v1/agent/tasks/{id}/approve` | `{"call", "allow": true or false, "always": false}`: answer the step that waits. |
-| `POST /v1/agent/tasks/{id}/message` | `{"text", "mode", "web", "connectors"}`: continue a task that is not working with a follow-up. |
+| `POST /v1/agent/tasks/{id}/message` | `{"text", "mode", "web", "connectors", "selection"}`: continue a task that is not working with a follow-up (`selection` only for a film). |
 | `POST /v1/agent/tasks/{id}/undo` | Take back what the newest request changed in the folder; see [Undo](#undo). Answers `{"task", "restored", "removed"}`. `409` while the task works or when nothing is left to take back. |
 | `DELETE /v1/agent/tasks/{id}` | Stop a task where it is (a running command is killed). `?remove=true` also forgets it. |
 | `DELETE /v1/agent/tasks/{id}/app` | Stop the app the task started with `start_app`; see [Run, look, check](#run-look-check). Answers `{"task"}`. |
@@ -371,6 +371,40 @@ The task gets a `note` step that says what came back, and the model is told on i
 - **Web tools leave the machine.** `web_search` sends the query to Rigbrew's server (`GET /v1/search`), which asks a search service (Brave Search) and stores nothing; `fetch_url` gets one
   http(s) page (public addresses only, checked again at every redirect; 15 seconds, 2 MB) and returns its text.
   They are off unless the task says `"web": true`.
+
+## Studio's assistant
+
+A task with `"film": "<id>"` is a conversation about one film: the person says what they want and the model does
+it on the film, one step at a time, in the same loop as Code (pace, rolling notes, the plan, streaming, stopping).
+It reads and changes nothing but the film, through these tools:
+
+| Tool | What it does |
+|---|---|
+| `read_film`, `read_shot {shot}` | The film in words (name, size, length, look, language, cast, every shot with its number, length, state, description and lines, the sound tracks), or one shot with everything about it. |
+| `look_at_shot {shot, at?}` | A picture of a made shot (its middle, or `at` seconds into it) goes to the model with the result. Offered only when the model takes pictures. |
+| `edit_shot {shot, description?, seconds?, lines?, add_line?, cast?, continues?}` | Changes one shot. `lines` replaces what is said (`[{who, text}]`, `who` a name from the cast or `narrator`), `add_line` adds one, `cast` names who is in it (a name the description lacks is added to it), `seconds` is snapped to a length the video model makes. |
+| `add_shot {description, after?, seconds?, lines?}`, `remove_shot {shot}`, `move_shot {shot, to}` | A new shot (at the end, or after a shot; `0` for the start), one taken out (its clip stays), one moved to another place. |
+| `set_look {look}`, `set_language {language}` | The look every shot shares; the language the lines are written in. |
+| `cast_add {name, look}`, `cast_edit {name, look?, new_name?}` | Someone new in the cast; a look or a name changed (a new name is changed in the descriptions that name them). |
+| `rewrite_shot {shot, hint}` | The chat model writes the description again, as `.../rewrite` does, and it goes in like any edit. |
+| `subtitles {show?, burn?}`, `add_sound_region {file, at? or shot?, track?}` | Subtitles on or off and burned in; a sound file of the film's library laid on a sound track, as long as the file. |
+| `make_shots {shots?}`, `dub {language?}`, `export` | Shots into the render queue (it does not wait for them), a dub (it waits for it), the export (it waits for it). |
+
+Shots are named by their number (1 is the first); the film as it is now goes to the model on every turn. Every
+change goes through the same save as `PUT /v1/studio/projects/{id}`, so it is checked the same way and a made shot
+whose description changes is marked `changed`. A refusal is one plain sentence ("There is no shot 9. The shots are 1
+to 5.", "Studio needs the video model. Add it under Models."). A change step carries its result's first line as
+the line the person reads ("Shot 3: description changed") and `diff`: what it was and what it is, as lines that
+start with `- ` and `+ `.
+
+Edits go ahead in every mode but Read only, which offers no tool that changes the film. `make_shots`, `dub` and
+`export` wait for the person (`pending.command` says what and about how long, like "Make 3 shots (1, 2 and 3): about
+12 minutes") unless the mode is `bypass`; `always` stops the asking for that tool for the rest of the
+conversation. `selection` (shot ids) is said to the model with the request ("Shots 2 and 3 are selected in the
+tracks.") and kept as a `note` step. After a few turns that changed the film, the first `finish` is answered once
+with the request, word for word. The app holds its own saves while a request is worked on, reads the film after
+each change, keeps what the person edited meanwhile, and makes the whole request one step of undo ("What the
+assistant did").
 
 ## Skills
 
