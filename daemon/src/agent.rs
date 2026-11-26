@@ -973,7 +973,8 @@ async fn work(app: &Shared, id: &str) -> Ended {
         let mut messages = vec![json!({"role": "system", "content": system})];
         let sees = see::sees(app, &task);
         let read = |name: &str| look::read_shot(&agents.dir, id, name);
-        let mut sent = compose::with_pictures(fit(&recall::conversation(&task.memory, &task.messages), budget), sees, read);
+        let conversation = extra::last_thought_only(fit(&recall::conversation(&task.memory, &task.messages), budget));
+        let mut sent = compose::with_pictures(conversation, sees, read);
         // The newest picture goes with the result of the step that took it, for a few turns,
         // when the model takes pictures at all.
         if let Some(eye) = task.extra.eye.as_ref().filter(|e| !e.call.is_empty() && e.sends < look::EYE_SENDS && sees) {
@@ -1088,7 +1089,11 @@ async fn work(app: &Shared, id: &str) -> Ended {
             })
             .collect();
         agents.change(id, |t| {
-            t.messages.push(json!({"role": "assistant", "content": text, "tool_calls": calls}));
+            let mut said = json!({"role": "assistant", "content": text, "tool_calls": calls});
+            if let Some(thought) = extra::kept_thought(&answer, context) {
+                said["reasoning_content"] = json!(thought);
+            }
+            t.messages.push(said);
             if !text.is_empty() {
                 t.steps.push(Step::Model { text: text.clone() });
             }

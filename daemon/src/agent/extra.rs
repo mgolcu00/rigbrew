@@ -67,6 +67,36 @@ pub fn effort(context: u32) -> &'static str {
     }
 }
 
+/// Characters of a thought that go back to the model with the call it led to: its end, where
+/// the model decided what to do.
+const KEPT_THOUGHT_CHARS: usize = 6000;
+
+/// What a call the model made keeps of the thinking before it, for a model that thinks: the end
+/// of the thought, so on its next turn the model goes on from what it decided instead of working
+/// it all out again. Only the newest is sent (see `last_thought_only`).
+pub fn kept_thought(answer: &Value, context: u32) -> Option<String> {
+    let thought = answer["choices"][0]["message"]["reasoning_content"].as_str()?.trim();
+    if !thinks(context) || thought.is_empty() {
+        return None;
+    }
+    let all: Vec<char> = thought.chars().collect();
+    Some(all[all.len().saturating_sub(KEPT_THOUGHT_CHARS)..].iter().collect())
+}
+
+/// The conversation as it is sent: the thought kept with the newest call stays, the older ones
+/// are left out, so thinking does not take the room the files need.
+pub fn last_thought_only(mut messages: Vec<Value>) -> Vec<Value> {
+    let newest = messages.iter().rposition(|m| m["role"] == "assistant");
+    for (i, message) in messages.iter_mut().enumerate() {
+        if Some(i) != newest {
+            if let Some(m) = message.as_object_mut() {
+                m.remove("reasoning_content");
+            }
+        }
+    }
+    messages
+}
+
 /// What the engine said about the turn besides the answer: how much of the context it took, and
 /// what the model thought, as a step of its own.
 pub fn heard(task: &mut Task, answer: &Value, size: u32) {
@@ -219,6 +249,19 @@ mod tests {
         assert_eq!(view["context"], json!({"used": 3200, "size": 32_768}));
         assert_eq!(view["queued"], json!([]));
         assert!(!thinks(8192) && thinks(32_768));
+        // The end of a thought goes back with its call, for a model that thinks; only the newest.
+        let long = json!({"choices": [{"message": {"reasoning_content": format!("{}decide: edit merge.rs", "x".repeat(9000))}}]});
+        let kept = kept_thought(&long, 32_768).unwrap();
+        assert!(kept.ends_with("decide: edit merge.rs") && kept.chars().count() == KEPT_THOUGHT_CHARS);
+        assert_eq!(kept_thought(&long, 8192), None);
+        assert_eq!(kept_thought(&json!({"choices": [{"message": {"content": "hi"}}]}), 32_768), None);
+        let sent = last_thought_only(vec![
+            json!({"role": "assistant", "content": "", "reasoning_content": "old"}),
+            json!({"role": "tool", "content": "r"}),
+            json!({"role": "assistant", "content": "", "reasoning_content": "new"}),
+            json!({"role": "tool", "content": "r"}),
+        ]);
+        assert!(sent[0].get("reasoning_content").is_none() && sent[2]["reasoning_content"] == "new");
         assert_eq!((effort(8192), effort(32_768)), ("low", "medium"));
     }
 
