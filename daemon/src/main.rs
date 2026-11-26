@@ -297,7 +297,7 @@ async fn packages(State(app): State<Shared>) -> Json<Value> {
             json!({
                 "community": app.manifest.package(&p.id).is_none(),
                 "id": p.id, "name": p.name, "modality": p.modality, "source": p.source,
-                "variants": p.variants.iter().map(|v| json!({"id": v.id, "quality": v.quality, "disk_mb": v.disk_mb(), "accel_mem_mb": v.accel_mem_mb, "metrics": v.metrics})).collect::<Vec<_>>(),
+                "variants": p.variants.iter().map(|v| json!({"id": v.id, "quality": v.quality, "disk_mb": v.disk_mb(), "accel_mem_mb": v.accel_mem_mb, "metrics": v.metrics, "vision": v.files.iter().any(|f| f.role == "mmproj")})).collect::<Vec<_>>(),
                 "recommendation": recommend(&app.profile, p).verdict,
                 "installed": app.installed(p).iter().map(|v| v.id.clone()).collect::<Vec<_>>(),
                 "account_required": cloud::account_required(&app, p),
@@ -669,6 +669,22 @@ fn preferred_installed<'a>(app: &App, package: &'a Package) -> Option<&'a Varian
     installed.first().copied()
 }
 
+/// Tokens of context a chat model is started with. A model of 8 GB or more is one that can use
+/// a long conversation (a Code task reads many files), and one that size was trained for it.
+pub(crate) fn chat_context(variant: &Variant) -> u32 {
+    let weights = variant.files.iter().filter(|f| f.role == "model").map(|f| f.size).sum::<u64>();
+    if weights >= 8 * 1024 * 1024 * 1024 {
+        32_768
+    } else {
+        8192
+    }
+}
+
+/// The context `package` runs with: that of the build that is loaded for it.
+pub(crate) fn context_of(app: &App, package: &Package) -> u32 {
+    preferred_installed(app, package).map_or(8192, chat_context)
+}
+
 /// Makes sure the engine for `package` is running and returns its (port, key).
 async fn ensure_engine(app: &App, package: &Package) -> Result<(u16, String, String), Box<Response>> {
     let mut slots = app.engine.lock().await;
@@ -701,7 +717,7 @@ async fn ensure_engine(app: &App, package: &Package) -> Result<(u16, String, Str
         },
         model,
         mmproj: file("mmproj"),
-        context: 8192,
+        context: chat_context(variant),
         gpu_layers: if variant.accel_mem_mb <= app.profile.accel_budget_mb { 999 } else { 0 },
         log: app.root.join("logs").join("llama-server.log"),
     };
@@ -747,12 +763,17 @@ fn error_message(raw: &[u8]) -> String {
 }
 
 /// What the pieces of a streamed chat answer add up to: the text and the tool calls, which
-/// arrive a few characters at a time.
+/// arrive a few characters at a time, what the model thought before it answered, and the
+/// engine's count of the tokens.
 #[derive(Default)]
 struct Assembled {
     text: String,
     calls: Vec<Value>,
     finish: Value,
+    reasoning: String,
+    usage: Value,
+    /// When the thinking began and when the answer began, for how long it thought.
+    thought: (Option<std::time::Instant>, Option<std::time::Instant>),
 }
 
 impl Assembled {
@@ -763,9 +784,20 @@ impl Assembled {
         if !chunk["error"].is_null() {
             return Err(chunk["error"]["message"].as_str().unwrap_or("The model stopped with an error.").to_string());
         }
+        if chunk["usage"].is_object() {
+            self.usage = chunk["usage"].clone();
+        }
         let choice = &chunk["choices"][0];
         let piece = choice["delta"]["content"].as_str().unwrap_or("");
         self.text.push_str(piece);
+        let thinking = choice["delta"]["reasoning_content"].as_str().unwrap_or("");
+        let now = std::time::Instant::now();
+        if !thinking.is_empty() {
+            self.reasoning.push_str(thinking);
+            self.thought.0.get_or_insert(now);
+        } else if self.thought.0.is_some() && (!piece.is_empty() || choice["delta"]["tool_calls"].is_array()) {
+            self.thought.1.get_or_insert(now);
+        }
         // The name comes first, then the arguments as text, a few characters at a time.
         for part in choice["delta"]["tool_calls"].as_array().into_iter().flatten() {
             let at = part["index"].as_u64().unwrap_or(0) as usize;
@@ -788,13 +820,21 @@ impl Assembled {
         Ok(!piece.is_empty())
     }
 
-    /// The answer in the shape of one that was not streamed.
+    /// The answer in the shape of one that was not streamed, with `thought_ms`: how long the
+    /// model thought before it answered.
     fn message(self) -> Value {
         let mut message = json!({"role": "assistant", "content": self.text});
         if !self.calls.is_empty() {
             message["tool_calls"] = json!(self.calls);
         }
-        json!({"choices": [{"message": message, "finish_reason": self.finish}]})
+        if !self.reasoning.trim().is_empty() {
+            message["reasoning_content"] = json!(self.reasoning.trim());
+        }
+        let thought_ms = match self.thought {
+            (Some(from), until) => until.unwrap_or_else(std::time::Instant::now).duration_since(from).as_millis() as u64,
+            _ => 0,
+        };
+        json!({"choices": [{"message": message, "finish_reason": self.finish}], "usage": self.usage, "thought_ms": thought_ms})
     }
 }
 
@@ -1372,11 +1412,16 @@ async fn main() {
         .route("/v1/videos/jobs", get(video::jobs))
         .route("/v1/videos/jobs/{id}", get(video::job).delete(video::cancel))
         .route("/v1/videos/files/{name}", get(video::file_get).delete(video::file_delete))
-        .route("/v1/agent/tasks", get(agent::tasks).post(agent::task_create))
+        .route(
+            "/v1/agent/tasks",
+            get(agent::tasks).post(agent::task_create).layer(axum::extract::DefaultBodyLimit::max(agent::MAX_BODY_BYTES)),
+        )
         .route("/v1/title", post(title::post))
         .route("/v1/agent/tasks/{id}", get(agent::task_get).put(agent::task_rename).delete(agent::task_delete))
         .route("/v1/agent/tasks/{id}/approve", post(agent::task_approve))
-        .route("/v1/agent/tasks/{id}/message", post(agent::task_message))
+        .route("/v1/agent/tasks/{id}/message", post(agent::task_message).layer(axum::extract::DefaultBodyLimit::max(agent::MAX_BODY_BYTES)))
+        .route("/v1/agent/tasks/{id}/queue/{q}", axum::routing::delete(agent::queue_remove))
+        .route("/v1/agent/files", get(agent::files_list))
         .route("/v1/agent/tasks/{id}/undo", post(agent::task_undo))
         .route("/v1/agent/tasks/{id}/app", axum::routing::delete(agent::see::api::app_stop))
         .route("/v1/agent/tasks/{id}/device", post(agent::see::api::device_shot))
@@ -1484,6 +1529,8 @@ mod tests {
         assert_eq!(heard.iter().filter(|h| **h).count(), 2, "only the two pieces of text are passed on");
         let out = answer.message();
         let message = &out["choices"][0]["message"];
+        assert_eq!(out["usage"]["prompt_tokens"], 10);
+        assert!(message.get("reasoning_content").is_none());
         assert_eq!(message["content"], "I will look.");
         assert_eq!(message["tool_calls"][0]["id"], "call_1");
         assert_eq!(message["tool_calls"][0]["function"]["name"], "read_file");
@@ -1496,5 +1543,43 @@ mod tests {
         assert!(plain.message()["choices"][0]["message"].get("tool_calls").is_none());
         let mut broken = Assembled::default();
         assert_eq!(broken.take(r#"data: {"error":{"message":"out of memory"}}"#).unwrap_err(), "out of memory");
+        // What the model thought comes apart from the answer, and is not passed on as text.
+        let mut thinking = Assembled::default();
+        assert!(!thinking.take(r#"data: {"choices":[{"delta":{"reasoning_content":"Two and "}}]}"#).unwrap());
+        thinking.take(r#"data: {"choices":[{"delta":{"reasoning_content":"two. "}}]}"#).unwrap();
+        assert!(thinking.take(r#"data: {"choices":[{"delta":{"content":"4"}}]}"#).unwrap());
+        let out = thinking.message();
+        assert_eq!(out["choices"][0]["message"]["reasoning_content"], "Two and two.");
+        assert_eq!(out["choices"][0]["message"]["content"], "4");
+        assert!(out["thought_ms"].is_u64());
+    }
+
+    #[test]
+    fn a_big_model_gets_a_long_context() {
+        let variant = |gb: u64| Variant {
+            id: "v".into(),
+            files: vec![
+                rigbrew_core::manifest::FileRef {
+                    role: "model".into(),
+                    path: "m.gguf".into(),
+                    size: gb * 1024 * 1024 * 1024,
+                    sha256: String::new(),
+                },
+                rigbrew_core::manifest::FileRef {
+                    role: "mmproj".into(),
+                    path: "p.gguf".into(),
+                    size: 1024 * 1024 * 1024,
+                    sha256: String::new(),
+                },
+            ],
+            accel_mem_mb: 0,
+            cpu_mem_mb: None,
+            backends: vec![],
+            quality: 0.0,
+            metrics: Value::Null,
+        };
+        assert_eq!(chat_context(&variant(3)), 8192);
+        assert_eq!(chat_context(&variant(7)), 8192, "the vision part does not count");
+        assert_eq!(chat_context(&variant(15)), 32_768);
     }
 }
