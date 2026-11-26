@@ -322,11 +322,19 @@ class AppState {
 	 * Development only. Besides screen, sheet, theme and palette: `level=guided|standard|pro`,
 	 * `text=small|default|large|larger`, `tour=0..3` (`tour=off`), `help=<article>` (`help=off`),
 	 * `tip=<id>`, `suggest=standard|pro` (`suggest=off`), `fail=<package>` (a failed download),
-	 * `pane=open|closed`, `chat=new|<id>`, `checklist=reset`.
+	 * `pane=open|closed`, `chat=new|<id>`, `checklist=reset`. Studio: `film=<id>` opens a film, then
+	 * `play` presses Play film or `export` exports it.
 	 */
 	#view(view: Record<string, string>) {
 		const wanted = view.screen as Screen | undefined;
 		if (wanted && ['chat', 'code', 'models', 'device', 'profile', 'studio'].includes(wanted)) this.screen = wanted;
+		if (view.film) {
+			import('./studio.svelte').then(async ({ studio }) => {
+				await studio.open(view.film);
+				if ('export' in view) studio.exportFilm();
+				else if ('play' in view) studio.playFilm();
+			});
+		}
 		if (view.sheet === 'settings' || view.sheet === 'privacy') this.sheet = view.sheet;
 		else if ('sheet' in view) this.sheet = null;
 		if (view.theme === 'light' || view.theme === 'dark' || view.theme === 'system') {

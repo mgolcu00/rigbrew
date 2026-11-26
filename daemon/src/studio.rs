@@ -32,6 +32,9 @@
 //!                                               file under all of it; {"scale"?, "quality"?, "name"?} instead of
 //!                                               the film's own)
 //!   POST   /v1/studio/projects/{id}/reveal      show the exported file in the system's file manager
+//!   POST   /v1/studio/projects/{id}/media       an address the app's <video> plays the exported film (or a clip)
+//!                                               from, see `studio/play.rs`; the film's answer says in `film`
+//!                                               whether the export holds the film as it is now
 //!   GET    /v1/studio/projects/{id}/export      where the export is: {"state", "file", "error"}
 //!   GET    /v1/studio/projects/{id}/sound?file=  a sound file of the film, to play in the app (up to 200 MB)
 //!   GET    /v1/studio/projects/{id}/sounds      the sound files in the film's folder and the ones added to it
@@ -45,7 +48,8 @@
 //!                                               description of one shot again, in the words of the film (not saved)
 //!   POST   /v1/studio/projects/{id}/shots/{shot}/take          {"take": n}: use that take of the shot
 //!   DELETE /v1/studio/projects/{id}/shots/{shot}/takes/{n}     delete a take and its clip
-//!   GET    /v1/studio/projects/{id}/clips/{shot}.webm          the take in use; `{shot}.{n}.webm` for one take
+//!   GET    /v1/studio/projects/{id}/clips/{shot}.webm          the take in use; `{shot}.{n}.webm` for one take;
+//!                                                 on macOS its playable MP4 copy (see `playable.rs`)
 //!   GET    /v1/studio/projects/{id}/clips/{shot}.jpg           one small picture of it, for the timeline
 //!
 //! A film is `<folder>/rigbrew-film.json` plus `<folder>/clips/<shot>.<take>.webm` (and `.jpg`; a film
@@ -88,6 +92,7 @@ mod direct;
 mod dub;
 mod export;
 mod pace;
+mod play;
 mod sound;
 mod words;
 
@@ -779,6 +784,7 @@ fn view(app: &App, mut p: Project) -> Value {
     let seconds: f32 = p.shots.iter().map(Shot::length).sum();
     let continues = can_continue(app);
     let export = export_of(&p.id);
+    let film = play::film(&p);
     let mine = now.as_ref().filter(|(pid, _, _)| *pid == p.id).map(|(_, sid, _)| (sid.as_str(), elapsed.unwrap_or(0.0)));
     let (all, left) = time_left(&p, &paces_for(app, &p), &waiting, mine);
     // The shots that were taken out are the service's own business.
@@ -810,7 +816,7 @@ fn view(app: &App, mut p: Project) -> Value {
     let installed = |modality: Modality| installed_one(app, modality).is_ok();
     let jobs = json!({"import": job_of(&p.id, "import"), "dub": job_of(&p.id, "dub"), "listen": job_of(&p.id, "listen")});
     json!({"project": p, "progress": progress, "rendering": mine.is_some() || !waiting.is_empty(), "made": made, "seconds": seconds,
-           "can_continue": continues, "export": export, "estimate": {"all": all, "left": left},
+           "can_continue": continues, "export": export, "film": film, "estimate": {"all": all, "left": left},
            "cast_in": appears, "cues": cues, "language": dub::shown_language(&p), "own_language": dub::own_language(&p),
            "languages": languages, "spoken": dub::SPOKEN, "can_listen": dub::can_listen(app), "voices": dub::voices(app), "jobs": jobs,
            "has": {"video": installed(Modality::Video), "chat": installed(Modality::Chat), "voice": installed(Modality::Voice),
@@ -1284,12 +1290,17 @@ async fn save(State(app): State<Shared>, Path(id): Path<String>, Json(body): Jso
 async fn forget(State(app): State<Shared>, Path(id): Path<String>) -> Response {
     let mut list = index(&app);
     let before = list.len();
+    let folder = list.iter().find(|(i, _)| *i == id).map(|(_, folder)| PathBuf::from(folder));
     list.retain(|(i, _)| *i != id);
     if list.len() == before {
         return fail(StatusCode::NOT_FOUND, "no such film");
     }
     with_queue(|q| q.waiting.retain(|(pid, _)| *pid != id));
     write_index(&app, &list).ok();
+    // The clips stay in the folder; the copies made for the app go.
+    if let Some(folder) = folder {
+        crate::playable::remove_all(&folder.join("clips"));
+    }
     Json(json!({"forgotten": id})).into_response()
 }
 
@@ -1532,6 +1543,7 @@ async fn keep_take(app: &Shared, project: &str, shot: &str, from: &FsPath, mut t
     let old = (dir.join(format!("{shot}.webm")), dir.join(format!("{shot}.jpg")));
     let adopted = (now.takes.is_empty() && old.0.is_file()).then(|| {
         let (clip, picture) = take_files(&p, shot, 1);
+        crate::playable::rename(&old.0, &clip);
         std::fs::rename(&old.0, clip).ok();
         std::fs::rename(&old.1, picture).ok();
         Take { n: 1, seconds: now.seconds, frames: now.frames, made_frames: now.made_frames, continued: now.continues, ..Take::default() }
@@ -1543,6 +1555,8 @@ async fn keep_take(app: &Shared, project: &str, shot: &str, from: &FsPath, mut t
     }
     // What the clip really holds, and a small picture of it for the timeline.
     take.made_frames = look_at(app, &clip, &picture).await;
+    // The copy the app plays, made while the next shot is being made.
+    crate::playable::soon(app, clip);
     let mut gone = Vec::new();
     set_shot(app, project, shot, |s| {
         s.takes.extend(adopted);
@@ -1550,6 +1564,7 @@ async fn keep_take(app: &Shared, project: &str, shot: &str, from: &FsPath, mut t
     });
     for n in gone {
         let (clip, picture) = take_files(&p, shot, n);
+        crate::playable::remove(&clip);
         std::fs::remove_file(clip).ok();
         std::fs::remove_file(picture).ok();
     }
@@ -1591,6 +1606,7 @@ async fn delete_take(State(app): State<Shared>, Path((id, shot, n)): Path<(Strin
         return fail(StatusCode::NOT_FOUND, "no such take");
     }
     let (clip, picture) = take_files(&p, &shot, n);
+    crate::playable::remove(&clip);
     std::fs::remove_file(clip).ok();
     std::fs::remove_file(picture).ok();
     if used {
@@ -1708,13 +1724,9 @@ async fn clip(State(app): State<Shared>, Path((id, name)): Path<(String, String)
         Some(n) => take_files(&p, shot, n),
         None => (clip_path(&p, shot), poster_path(&p, shot)),
     };
-    let file = if picture { poster } else { clip.clone() };
-    // A clip is asked for as ".webm" whatever it is: one brought in from a video is an MP4, and says so.
-    let kind = match (picture, file.extension().and_then(|e| e.to_str())) {
-        (true, _) => "image/jpeg",
-        (false, Some("mp4")) => "video/mp4",
-        (false, _) => "video/webm",
-    };
+    // A clip is asked for as ".webm" whatever it is: one brought in from a video is an MP4, and says
+    // so; a made one is handed over as its playable copy where the webview needs one.
+    let (file, kind) = if picture { (poster, "image/jpeg") } else { crate::playable::served(&app, &clip).await };
     // A film made before pictures were kept gets them when they are first asked for.
     if picture && !file.is_file() && clip.is_file() {
         let frames = look_at(&app, &clip, &file).await;
@@ -2251,6 +2263,8 @@ async fn begin_export(app: &Shared, p: Project, body: Export) -> Result<usize, (
             s.made_frames = frames;
         }
     }
+    // The film as it is saved now is what the file holds: an edit after this makes it out of date.
+    let edited = load(app, &id).map_or(p.updated_ms, |now| now.updated_ms);
     let shots = exported(&p);
     let count = shots.len();
     let clips: Vec<PathBuf> = shots.iter().map(|s| clip_path(&p, &s.id)).collect();
@@ -2445,7 +2459,7 @@ async fn begin_export(app: &Shared, p: Project, body: Export) -> Result<usize, (
                 set_export(
                     &id,
                     json!({"state": "done", "file": out.to_string_lossy(), "bytes": bytes, "shots": count, "seconds": graph.frames as f32 / 24.0,
-                           "subtitles": subtitles}),
+                           "subtitles": subtitles, "edited_ms": edited}),
                 );
             }
             Err(e) => {
@@ -2638,6 +2652,7 @@ pub fn router() -> Router<Shared> {
         .route("/v1/studio/projects/{id}/shots/{shot}/take", post(use_take))
         .route("/v1/studio/projects/{id}/shots/{shot}/takes/{n}", axum::routing::delete(delete_take))
         .route("/v1/studio/projects/{id}/clips/{name}", get(clip))
+        .route("/v1/studio/projects/{id}/media", post(play::media))
         .route("/v1/studio/brief", post(direct::brief))
         .route("/v1/studio/projects/{id}/import", get(bring::state).post(bring::import))
         .route("/v1/studio/projects/{id}/cast/look", post(direct::look))

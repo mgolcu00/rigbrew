@@ -348,7 +348,7 @@ export const videoJob = (id: string) => json<VideoJobState>('GET', `/v1/videos/j
 export const stopVideo = async (id: string) => {
 	await optional('DELETE', `/v1/videos/jobs/${enc(id)}`);
 };
-/** A saved clip (`<id>.webm`), fetched with the token and shown through an object URL. */
+/** A saved clip (`<id>.webm`), fetched with the token and shown through an object URL. On macOS it comes as an MP4 copy. */
 export const videoFile = async (name: string) => (await send('GET', `/v1/videos/files/${enc(name)}`)).blob();
 
 /** Saves a clip where the person chooses (app) or as a download (browser preview). */
@@ -696,6 +696,8 @@ export interface StudioView {
 	can_continue?: boolean;
 	/** Where the export of this film is. */
 	export?: StudioExport;
+	/** The exported file on disk; `current` when no edit came after what it was made from. Null before the first export. */
+	film?: { file: string; bytes: number; modified_ms: number; current: boolean } | null;
 	/** About how many seconds of work are left: `all` for every shot that is not made, `left` for what is waiting or being made. */
 	estimate?: { all: number; left: number };
 	/** Which shots name which cast member, by the member's id. */
@@ -873,6 +875,16 @@ export interface StudioExport {
 export const studioReveal = (id: string) => json<{ shown: string }>('POST', `/v1/studio/projects/${enc(id)}/reveal`);
 export const studioExport = (id: string) => json<StudioExport>('POST', `/v1/studio/projects/${enc(id)}/export`, {});
 export const studioExportState = (id: string) => json<StudioExport>('GET', `/v1/studio/projects/${enc(id)}/export`);
+/**
+ * An address a <video> plays a file of the film from by itself, in parts as it needs them: the
+ * exported film, or a shot's clip. It holds a short-lived token for that file alone (a <video>
+ * cannot send the bearer token), so it is asked for every time a player opens.
+ */
+export async function studioMedia(id: string, of: { shot: string; take?: number } | Record<string, never> = {}) {
+	const grant = await json<{ url: string; type: string; bytes: number }>('POST', `/v1/studio/projects/${enc(id)}/media`, of);
+	const { base } = await (connection ??= connect());
+	return { ...grant, url: base + grant.url };
+}
 export const studioClip = async (id: string, shot: string, take?: number) =>
 	(await send('GET', `/v1/studio/projects/${enc(id)}/clips/${enc(shot)}${take ? `.${take}` : ''}.webm`)).blob();
 /** One small picture of a made shot: of the take in use, or of the take named. */

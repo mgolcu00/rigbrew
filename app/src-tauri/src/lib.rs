@@ -235,9 +235,11 @@ async fn save_video(app: tauri::AppHandle, name: String, data: String) -> Result
 
     let bytes =
         base64::engine::general_purpose::STANDARD.decode(data.as_bytes()).map_err(|e| format!("the clip data is not valid: {e}"))?;
+    // On a Mac the service hands over clips as MP4 copies; elsewhere they are WebM.
+    let (kind, ending) = if name.ends_with(".mp4") { ("MP4 video", "mp4") } else { ("WebM video", "webm") };
     tauri::async_runtime::spawn_blocking(move || {
         let Some(target) =
-            app.dialog().file().set_title("Save video").set_file_name(&name).add_filter("WebM video", &["webm"]).blocking_save_file()
+            app.dialog().file().set_title("Save video").set_file_name(&name).add_filter(kind, &[ending]).blocking_save_file()
         else {
             return Ok(None);
         };
