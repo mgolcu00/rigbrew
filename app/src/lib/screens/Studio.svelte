@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onDestroy, onMount, untrack } from 'svelte';
+	import { assistant } from '#lib/assistant.svelte.ts';
 	import { codeOf } from '#lib/errors.ts';
 	import { bytes as bytesOf } from '#lib/format.ts';
 	import { guide } from '#lib/guide.svelte.ts';
@@ -8,6 +9,7 @@
 	import { FILM, studio } from '#lib/studio.svelte.ts';
 	import { shortTime } from '#lib/studio-time.ts';
 	import { isMac, mod } from '#lib/words.ts';
+	import StudioAssistant from '#lib/components/StudioAssistant.svelte';
 	import StudioCast from '#lib/components/StudioCast.svelte';
 	import StudioControlBar from '#lib/components/StudioControlBar.svelte';
 	import StudioEditor from '#lib/components/StudioEditor.svelte';
@@ -16,6 +18,7 @@
 	import StudioLibrary from '#lib/components/StudioLibrary.svelte';
 	import StudioMixer from '#lib/components/StudioMixer.svelte';
 	import StudioNeeds from '#lib/components/StudioNeeds.svelte';
+	import StudioPlayer from '#lib/components/StudioPlayer.svelte';
 	import StudioStart from '#lib/components/StudioStart.svelte';
 	import StudioTracks from '#lib/components/StudioTracks.svelte';
 	import StudioViewer from '#lib/components/StudioViewer.svelte';
@@ -46,8 +49,21 @@
 
 	// Pictures, waveforms and sound files are fetched as the film asks for them.
 	$effect(() => studio.gather());
+	// The assistant's conversation belongs to the film that is open.
+	$effect(() => {
+		const film = studio.id;
+		untrack(() => assistant.show(film));
+	});
+	const asking = $derived(layout.inspector && layout.side === 'assistant');
+	const sideWidth = $derived(asking ? Math.max(layout.inspectorWidth, 340) : layout.inspectorWidth);
 	// The mixer hears every change at once.
 	$effect(() => studio.mix());
+	// An export that has just been written opens the film player once.
+	$effect(() => {
+		void studio.view?.film?.modified_ms;
+		void studio.view?.export?.state;
+		untrack(() => studio.noticeExport());
+	});
 	// Regions that change while the film plays are set again from where the playhead is.
 	$effect(() => {
 		void JSON.stringify(studio.doc?.tracks.map((t) => [t.id, t.regions]));
@@ -76,6 +92,7 @@
 	const KEYS: [string, string][][] = [
 		[
 			['Space', 'Play or pause'],
+			['P', 'Play the film'],
 			['Return', 'Go to the start'],
 			[', and .', 'One frame back or on'],
 			['Shift , and .', 'One second back or on'],
@@ -105,6 +122,7 @@
 			['Shift and the wheel', 'Scroll along the film'],
 			['Y', 'Library'],
 			['I', 'Inspector'],
+			['A', 'Assistant'],
 			['X', 'Mixer'],
 			['E', 'Editor'],
 			['K', 'Cast'],
@@ -114,7 +132,7 @@
 	];
 
 	function keys(e: KeyboardEvent) {
-		if (!studio.doc || e.defaultPrevented || app.palette || app.sheet || guide.helpOpen) return;
+		if (!studio.doc || e.defaultPrevented || app.palette || app.sheet || guide.helpOpen || studio.player) return;
 		const t = e.target as HTMLElement | null;
 		const typing = t instanceof HTMLTextAreaElement || t instanceof HTMLSelectElement || (t instanceof HTMLInputElement && !['range', 'checkbox', 'radio', 'button'].includes(t.type)) || Boolean(t?.isContentEditable);
 		if (studio.question) {
@@ -158,6 +176,9 @@
 		else if (key === 'Escape') {
 			if (studio.keysOpen) studio.keysOpen = false;
 			else if (studio.viewerLarge) studio.viewerLarge = false;
+			else if (asking && assistant.escape()) {
+				// Pressed twice while it works, the assistant stops.
+			}
 			else if (studio.shotsSel.length + studio.regionsSel.length > 0 || studio.trackSel) studio.selectNothing();
 			else used = false;
 		} else if (e.shiftKey) used = false;
@@ -165,12 +186,14 @@
 		else if (key === 'm' && studio.track !== FILM) studio.toggle(studio.track, 'mute');
 		else if (key === 's' && studio.track !== FILM) studio.toggle(studio.track, 'solo');
 		else if (key === 'z') studio.fits++;
-		else if (key === 'i') studio.set('inspector', !layout.inspector);
+		else if (key === 'i') studio.toggleInspector();
+		else if (key === 'a') studio.toggleAssistant();
 		else if (key === 'y') studio.set('library', !layout.library);
 		else if (key === 'x') studio.bottom('mixer');
 		else if (key === 'e') studio.bottom('editor');
 		else if (key === 'k') studio.bottom('cast');
 		else if (key === 'v') studio.viewerLarge = !studio.viewerLarge;
+		else if (key === 'p') studio.playFilm();
 		else used = false;
 		if (used) {
 			e.preventDefault();
@@ -257,13 +280,17 @@
 			</div>
 			<!-- svelte-ignore a11y_no_static_element_interactions -->
 			<div class="vdiv" class:gone={!layout.inspector} onpointerdown={(e) => resize(e, 'inspectorWidth', -1, 240, 460)}></div>
-			<aside class="right" class:gone={!layout.inspector} style:width="{layout.inspector ? layout.inspectorWidth : 0}px">
+			<aside class="right" class:gone={!layout.inspector} style:width="{layout.inspector ? sideWidth : 0}px">
 				<div class="dock" style:height="{layout.viewerHeight}px">
 					<StudioViewer />
 				</div>
 				<!-- svelte-ignore a11y_no_static_element_interactions -->
 				<div class="hdiv" onpointerdown={(e) => resize(e, 'viewerHeight', 1, 110, Math.max(120, box.h - 260))}></div>
-				<StudioInspector />
+				<div class="st-tabs" role="tablist" aria-label="Right panel">
+					<button role="tab" aria-selected={!asking} onclick={() => studio.set('side', 'inspector')} title="Inspector (I)">Inspector</button>
+					<button role="tab" aria-selected={asking} onclick={() => studio.set('side', 'assistant')} title="Assistant (A)">Assistant{#if assistant.working}<span class="live" aria-label="working"></span>{/if}</button>
+				</div>
+				{#if asking}<StudioAssistant />{:else}<StudioInspector />{/if}
 			</aside>
 		</div>
 		<footer class="foot">
@@ -311,6 +338,7 @@
 				</div>
 			</div>
 		{/if}
+		{#if studio.player}<StudioPlayer />{/if}
 	{/if}
 </section>
 
@@ -679,6 +707,16 @@
 	}
 
 	/* --- the window ------------------------------------------------------------------------- */
+	/* The assistant works while another tab is shown: a dot on its tab says so. */
+	.live {
+		display: inline-block;
+		width: 5px;
+		height: 5px;
+		margin-left: 5px;
+		border-radius: 50%;
+		background: var(--st-accent);
+		vertical-align: middle;
+	}
 
 	.body {
 		flex: 1 1 0;

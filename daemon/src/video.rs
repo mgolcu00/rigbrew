@@ -5,7 +5,7 @@
 //!   GET    /v1/videos/jobs              video jobs of this run, newest first
 //!   GET    /v1/videos/jobs/{id}         state, stage, steps done, elapsed time; the saved clip once done
 //!   DELETE /v1/videos/jobs/{id}         stop it (the engine stops at its next step)
-//!   GET    /v1/videos/files/{id}.webm   a saved clip; DELETE removes it
+//!   GET    /v1/videos/files/{id}.webm   a saved clip, as an MP4 copy on macOS (see `playable.rs`); DELETE removes both
 //!
 //! While a clip is being made the picture engine is busy with it: requests that would swap the
 //! engine for another model are refused until it finishes or is stopped.
@@ -85,6 +85,9 @@ pub struct VideoBody {
     /// A picture the clip starts from, base64 (JPEG or PNG). Needs a package that can see pictures.
     #[serde(default)]
     init_image: Option<String>,
+    /// Made for Studio, which keeps the clip in the film's folder (and its playable copy there).
+    #[serde(skip)]
+    studio: bool,
 }
 
 impl VideoBody {
@@ -98,6 +101,7 @@ impl VideoBody {
             steps: None,
             seed: None,
             init_image: None,
+            studio: true,
         }
     }
 
@@ -203,7 +207,7 @@ pub async fn generate(State(app): State<Shared>, Json(body): Json<VideoBody>) ->
         tiling: false,
         init_image,
     };
-    tokio::spawn(run(app.clone(), id.clone(), package, req));
+    tokio::spawn(run(app.clone(), id.clone(), package, req, !body.studio));
     (StatusCode::ACCEPTED, Json(json!({"job": id}))).into_response()
 }
 
@@ -213,7 +217,8 @@ fn update(app: &App, id: &str, f: impl FnOnce(&mut VideoJob)) {
     }
 }
 
-async fn run(app: Shared, id: String, package: rigbrew_core::manifest::Package, req: VideoRequest) {
+/// `playable`: the clip is shown from here (a chat's clip), so its playable copy is made next to it.
+async fn run(app: Shared, id: String, package: rigbrew_core::manifest::Package, req: VideoRequest, playable: bool) {
     let started = std::time::Instant::now();
     let finish = |state: &str, error: Option<String>| {
         let state = state.to_string();
@@ -272,6 +277,10 @@ async fn run(app: Shared, id: String, package: rigbrew_core::manifest::Package, 
                 };
                 let seconds = started.elapsed().as_secs_f32();
                 let saved = save(&app, &bytes, &mime);
+                if let Some(name) = saved.as_ref().filter(|_| playable).and_then(|v| v["path"].as_str()).and_then(|p| p.rsplit('/').next())
+                {
+                    crate::playable::soon(&app, app.root.join("videos").join(name));
+                }
                 app.record(
                     "video_generated",
                     json!({"package": package.id, "variant": variant, "seconds": seconds, "width": req.width, "height": req.height,
@@ -359,14 +368,16 @@ fn video_file(app: &App, name: &str) -> Option<(std::path::PathBuf, &'static str
         .then(|| (app.root.join("videos").join(name), mime))
 }
 
+/// A saved clip as the app's webview plays it: its playable copy where one is needed (see `playable`).
 pub async fn file_get(State(app): State<Shared>, Path(name): Path<String>) -> Response {
     let Some((path, mime)) = video_file(&app, &name) else {
         return fail(StatusCode::BAD_REQUEST, "bad video name");
     };
+    let (path, mime) = if mime == "video/webm" { crate::playable::served(&app, &path).await } else { (path, mime) };
     match tokio::fs::read(&path).await {
         Ok(bytes) => Response::builder()
             .header(header::CONTENT_TYPE, mime)
-            .header(header::CACHE_CONTROL, "private, max-age=31536000, immutable")
+            .header(header::CACHE_CONTROL, "no-store")
             .body(Body::from(bytes))
             .unwrap(),
         Err(_) => fail(StatusCode::NOT_FOUND, "no such video"),
@@ -377,6 +388,7 @@ pub async fn file_delete(State(app): State<Shared>, Path(name): Path<String>) ->
     let Some((path, _)) = video_file(&app, &name) else {
         return fail(StatusCode::BAD_REQUEST, "bad video name");
     };
+    crate::playable::remove(&path);
     match tokio::fs::remove_file(&path).await {
         Ok(()) => Json(json!({"deleted": name})).into_response(),
         Err(_) => fail(StatusCode::NOT_FOUND, "no such video"),

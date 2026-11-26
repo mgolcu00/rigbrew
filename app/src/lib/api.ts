@@ -348,7 +348,7 @@ export const videoJob = (id: string) => json<VideoJobState>('GET', `/v1/videos/j
 export const stopVideo = async (id: string) => {
 	await optional('DELETE', `/v1/videos/jobs/${enc(id)}`);
 };
-/** A saved clip (`<id>.webm`), fetched with the token and shown through an object URL. */
+/** A saved clip (`<id>.webm`), fetched with the token and shown through an object URL. On macOS it comes as an MP4 copy. */
 export const videoFile = async (name: string) => (await send('GET', `/v1/videos/files/${enc(name)}`)).blob();
 
 /** Saves a clip where the person chooses (app) or as a download (browser preview). */
@@ -696,6 +696,8 @@ export interface StudioView {
 	can_continue?: boolean;
 	/** Where the export of this film is. */
 	export?: StudioExport;
+	/** The exported file on disk; `current` when no edit came after what it was made from. Null before the first export. */
+	film?: { file: string; bytes: number; modified_ms: number; current: boolean } | null;
 	/** About how many seconds of work are left: `all` for every shot that is not made, `left` for what is waiting or being made. */
 	estimate?: { all: number; left: number };
 	/** Which shots name which cast member, by the member's id. */
@@ -873,6 +875,16 @@ export interface StudioExport {
 export const studioReveal = (id: string) => json<{ shown: string }>('POST', `/v1/studio/projects/${enc(id)}/reveal`);
 export const studioExport = (id: string) => json<StudioExport>('POST', `/v1/studio/projects/${enc(id)}/export`, {});
 export const studioExportState = (id: string) => json<StudioExport>('GET', `/v1/studio/projects/${enc(id)}/export`);
+/**
+ * An address a <video> plays a file of the film from by itself, in parts as it needs them: the
+ * exported film, or a shot's clip. It holds a short-lived token for that file alone (a <video>
+ * cannot send the bearer token), so it is asked for every time a player opens.
+ */
+export async function studioMedia(id: string, of: { shot: string; take?: number } | Record<string, never> = {}) {
+	const grant = await json<{ url: string; type: string; bytes: number }>('POST', `/v1/studio/projects/${enc(id)}/media`, of);
+	const { base } = await (connection ??= connect());
+	return { ...grant, url: base + grant.url };
+}
 export const studioClip = async (id: string, shot: string, take?: number) =>
 	(await send('GET', `/v1/studio/projects/${enc(id)}/clips/${enc(shot)}${take ? `.${take}` : ''}.webm`)).blob();
 /** One small picture of a made shot: of the take in use, or of the take named. */
@@ -967,6 +979,8 @@ export interface AgentTaskRow {
 	updated_ms: number;
 	/** When the person sent the request that is being worked on. Missing from an older service. */
 	request_ms?: number;
+	/** The film a conversation of Studio's assistant is about; empty or missing for a task of Code. */
+	film?: string;
 }
 
 /** A request that can be taken back. `request` counts the person's messages from 1. */
@@ -1018,14 +1032,22 @@ const taskOf = async (answer: Promise<{ task: AgentTask }>) => (await answer).ta
 
 /** `null` from a service that is too old to have Code. */
 export const agentTasks = async (folder = '') => (await optional<{ tasks: AgentTaskRow[] }>('GET', `/v1/agent/tasks?folder=${enc(folder)}`))?.tasks ?? null;
+/** The conversations of Studio's assistant on one film, newest first. */
+export const filmTasks = async (film: string) => (await optional<{ tasks: AgentTaskRow[] }>('GET', `/v1/agent/tasks?film=${enc(film)}`))?.tasks ?? [];
 export const agentTask = (id: string) => taskOf(json('GET', `/v1/agent/tasks/${enc(id)}`));
 /** Only what changes while the model writes, for asking several times a second. */
 export const agentTaskBrief = async (id: string) =>
 	(await json<{ task: AgentTaskRow & { writing?: string } }>('GET', `/v1/agent/tasks/${enc(id)}?brief=true`)).task;
 export const startAgentTask = (body: { folder: string; prompt: string; mode: AgentMode; web: boolean; connectors?: boolean; model?: string; images?: string[] }) =>
 	taskOf(json('POST', '/v1/agent/tasks', body));
+/** Starts a conversation of Studio's assistant on a film, with the shots selected in the tracks. */
+export const startFilmTask = (body: { film: string; prompt: string; mode: AgentMode; model?: string; selection: string[] }) =>
+	taskOf(json('POST', '/v1/agent/tasks', { ...body, web: false }));
 /** Continues a task, or, while it works, leaves the message for its next turn. `continue` goes on where it was stopped. */
-export const tellAgentTask = (id: string, body: { text: string; mode: AgentMode; web: boolean; connectors?: boolean; images?: string[]; continue?: boolean }) =>
+export const tellAgentTask = (
+	id: string,
+	body: { text: string; mode: AgentMode; web: boolean; connectors?: boolean; images?: string[]; continue?: boolean; selection?: string[] }
+) =>
 	taskOf(json('POST', `/v1/agent/tasks/${enc(id)}/message`, body));
 export const unqueueAgentMessage = (id: string, queued: string) => taskOf(json('DELETE', `/v1/agent/tasks/${enc(id)}/queue/${enc(queued)}`));
 /** Files of the folder whose path matches `query`, best first, to name one with @. */

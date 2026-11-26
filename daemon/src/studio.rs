@@ -32,6 +32,9 @@
 //!                                               file under all of it; {"scale"?, "quality"?, "name"?} instead of
 //!                                               the film's own)
 //!   POST   /v1/studio/projects/{id}/reveal      show the exported file in the system's file manager
+//!   POST   /v1/studio/projects/{id}/media       an address the app's <video> plays the exported film (or a clip)
+//!                                               from, see `studio/play.rs`; the film's answer says in `film`
+//!                                               whether the export holds the film as it is now
 //!   GET    /v1/studio/projects/{id}/export      where the export is: {"state", "file", "error"}
 //!   GET    /v1/studio/projects/{id}/sound?file=  a sound file of the film, to play in the app (up to 200 MB)
 //!   GET    /v1/studio/projects/{id}/sounds      the sound files in the film's folder and the ones added to it
@@ -45,7 +48,8 @@
 //!                                               description of one shot again, in the words of the film (not saved)
 //!   POST   /v1/studio/projects/{id}/shots/{shot}/take          {"take": n}: use that take of the shot
 //!   DELETE /v1/studio/projects/{id}/shots/{shot}/takes/{n}     delete a take and its clip
-//!   GET    /v1/studio/projects/{id}/clips/{shot}.webm          the take in use; `{shot}.{n}.webm` for one take
+//!   GET    /v1/studio/projects/{id}/clips/{shot}.webm          the take in use; `{shot}.{n}.webm` for one take;
+//!                                                 on macOS its playable MP4 copy (see `playable.rs`)
 //!   GET    /v1/studio/projects/{id}/clips/{shot}.jpg           one small picture of it, for the timeline
 //!
 //! A film is `<folder>/rigbrew-film.json` plus `<folder>/clips/<shot>.<take>.webm` (and `.jpg`; a film
@@ -80,6 +84,7 @@ use serde_json::{json, Value};
 use crate::cloud::now_ms;
 use crate::{fail, video, App, Shared};
 
+pub mod assist;
 mod board;
 mod brief;
 mod bring;
@@ -88,6 +93,7 @@ mod direct;
 mod dub;
 mod export;
 mod pace;
+mod play;
 mod sound;
 mod words;
 
@@ -779,6 +785,7 @@ fn view(app: &App, mut p: Project) -> Value {
     let seconds: f32 = p.shots.iter().map(Shot::length).sum();
     let continues = can_continue(app);
     let export = export_of(&p.id);
+    let film = play::film(&p);
     let mine = now.as_ref().filter(|(pid, _, _)| *pid == p.id).map(|(_, sid, _)| (sid.as_str(), elapsed.unwrap_or(0.0)));
     let (all, left) = time_left(&p, &paces_for(app, &p), &waiting, mine);
     // The shots that were taken out are the service's own business.
@@ -810,7 +817,7 @@ fn view(app: &App, mut p: Project) -> Value {
     let installed = |modality: Modality| installed_one(app, modality).is_ok();
     let jobs = json!({"import": job_of(&p.id, "import"), "dub": job_of(&p.id, "dub"), "listen": job_of(&p.id, "listen")});
     json!({"project": p, "progress": progress, "rendering": mine.is_some() || !waiting.is_empty(), "made": made, "seconds": seconds,
-           "can_continue": continues, "export": export, "estimate": {"all": all, "left": left},
+           "can_continue": continues, "export": export, "film": film, "estimate": {"all": all, "left": left},
            "cast_in": appears, "cues": cues, "language": dub::shown_language(&p), "own_language": dub::own_language(&p),
            "languages": languages, "spoken": dub::SPOKEN, "can_listen": dub::can_listen(app), "voices": dub::voices(app), "jobs": jobs,
            "has": {"video": installed(Modality::Video), "chat": installed(Modality::Chat), "voice": installed(Modality::Voice),
@@ -978,7 +985,7 @@ fn maybe<'de, T: Deserialize<'de>, D: serde::Deserializer<'de>>(d: D) -> Result<
     Option::<T>::deserialize(d).map(Some)
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 struct Save {
     #[serde(default)]
     look: Option<String>,
@@ -1167,13 +1174,45 @@ async fn save(State(app): State<Shared>, Path(id): Path<String>, Json(body): Jso
     let Some(mut p) = load(&app, &id) else {
         return fail(StatusCode::NOT_FOUND, "no such film, or its folder is gone");
     };
+    if let Err(e) = apply_save(&app, &mut p, body) {
+        return fail(StatusCode::BAD_REQUEST, e);
+    }
+    if let Err(e) = store(&mut p) {
+        return fail(StatusCode::INTERNAL_SERVER_ERROR, format!("the film could not be saved: {e}"));
+    }
+    Json(view(&app, p)).into_response()
+}
+
+/// The shot as it stands, as the workstation sends it back: its lines are kept as they are.
+fn shot_in(s: &Shot) -> ShotIn {
+    ShotIn {
+        id: Some(s.id.clone()),
+        prompt: s.prompt.clone(),
+        frames: Some(s.frames),
+        trim_start: s.trim_start,
+        trim_end: s.trim_end,
+        continues: s.continues,
+        join: s.join.clone(),
+        join_seconds: Some(s.join_seconds),
+        volume: Some(s.volume),
+        mute: s.mute,
+        seed: s.seed,
+        lines: None,
+        from: Some(s.from.clone()),
+    }
+}
+
+/// One change to a film, as the workstation sends it: what `body` has replaces what the film
+/// has, checked the same way whoever sends it (the person's edits, the assistant's). Nothing is
+/// stored here; on an error the film is left half changed and must not be stored.
+fn apply_save(app: &App, p: &mut Project, body: Save) -> Result<(), String> {
     if let Some(name) = body.name.map(|n| n.trim().chars().take(80).collect::<String>()).filter(|n| !n.is_empty()) {
         p.name = name;
     }
     let was = (p.size.clone(), p.look.clone(), p.cast.clone());
     if let Some(size) = body.size {
         if !valid_size(&size) {
-            return fail(StatusCode::BAD_REQUEST, "size must be WIDTHxHEIGHT, each 256 to 1280 and a multiple of 32");
+            return Err("size must be WIDTHxHEIGHT, each 256 to 1280 and a multiple of 32".into());
         }
         p.size = size;
     }
@@ -1181,10 +1220,7 @@ async fn save(State(app): State<Shared>, Path(id): Path<String>, Json(body): Jso
         p.look = look.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(300).collect();
     }
     if let Some(members) = body.cast {
-        match cast::merge_cast(&p.cast, members, new_id) {
-            Ok(list) => p.cast = list,
-            Err(e) => return fail(StatusCode::BAD_REQUEST, e),
-        }
+        p.cast = cast::merge_cast(&p.cast, members, new_id)?;
     }
     if let Some(seed) = body.seed {
         p.seed = seed.filter(|seed| (0..=u32::MAX as i64).contains(seed));
@@ -1203,35 +1239,12 @@ async fn save(State(app): State<Shared>, Path(id): Path<String>, Json(body): Jso
         p.duck = duck.clamp(0.0, 1.0);
     }
     // Without a list of shots the film keeps the ones it has, in a shape that may be new.
-    let shots = body.shots.unwrap_or_else(|| {
-        let as_it_is = |s: &Shot| ShotIn {
-            id: Some(s.id.clone()),
-            prompt: s.prompt.clone(),
-            frames: Some(s.frames),
-            trim_start: s.trim_start,
-            trim_end: s.trim_end,
-            continues: s.continues,
-            join: s.join.clone(),
-            join_seconds: Some(s.join_seconds),
-            volume: Some(s.volume),
-            mute: s.mute,
-            seed: s.seed,
-            lines: None,
-            from: Some(s.from.clone()),
-        };
-        p.shots.iter().map(as_it_is).collect()
-    });
+    let shots = body.shots.unwrap_or_else(|| p.shots.iter().map(shot_in).collect());
     let films = (Film { size: &was.0, look: &was.1, cast: &was.2 }, Film { size: &p.size, look: &p.look, cast: &p.cast });
-    match merge(&p.shots, &p.removed, shots, (&films.0, &films.1)) {
-        Ok((list, removed)) => (p.shots, p.removed) = (list, removed),
-        Err(e) => return fail(StatusCode::BAD_REQUEST, e),
-    }
+    (p.shots, p.removed) = merge(&p.shots, &p.removed, shots, (&films.0, &films.1))?;
     if let Some(tracks) = body.tracks {
         let (before, regions_before) = (p.tracks.len(), p.tracks.iter().map(|t| t.regions.len()).sum::<usize>());
-        match sound::merge_tracks(FsPath::new(&p.folder), &p.tracks, tracks, new_id, &p.sounds) {
-            Ok(list) => p.tracks = list,
-            Err(e) => return fail(StatusCode::BAD_REQUEST, e),
-        }
+        p.tracks = sound::merge_tracks(FsPath::new(&p.folder), &p.tracks, tracks, new_id, &p.sounds)?;
         let regions = p.tracks.iter().map(|t| t.regions.len()).sum::<usize>();
         if p.tracks.len() > before {
             app.record("studio_track_added", json!({"tracks": p.tracks.len()}));
@@ -1246,11 +1259,11 @@ async fn save(State(app): State<Shared>, Path(id): Path<String>, Json(body): Jso
     if let Some(chosen) = body.dub {
         // One language is heard at a time: choosing it unmutes its voice track and mutes the others.
         let chosen = words::language(&chosen);
-        let chosen = if chosen.eq_ignore_ascii_case(&dub::own_language(&p)) { String::new() } else { chosen };
+        let chosen = if chosen.eq_ignore_ascii_case(&dub::own_language(p)) { String::new() } else { chosen };
         // Only when the choice changes: after that the mutes are the person's own again.
         if !chosen.eq_ignore_ascii_case(&p.dub) {
             p.dub = chosen;
-            dub::hear_one(&mut p);
+            dub::hear_one(p);
         }
     }
     if let Some(master) = body.master.filter(|v| v.is_finite()) {
@@ -1262,7 +1275,7 @@ async fn save(State(app): State<Shared>, Path(id): Path<String>, Json(body): Jso
     if let Some(sound) = body.sound {
         let sound = sound.trim();
         if !sound.is_empty() && (!FsPath::new(sound).is_absolute() || sound.len() > 1024) {
-            return fail(StatusCode::BAD_REQUEST, "give the sound file by its full path");
+            return Err("give the sound file by its full path".into());
         }
         p.sound = sound.to_string();
     }
@@ -1275,21 +1288,23 @@ async fn save(State(app): State<Shared>, Path(id): Path<String>, Json(body): Jso
     if let Some(options) = body.export {
         p.export = options.tidy();
     }
-    if let Err(e) = store(&mut p) {
-        return fail(StatusCode::INTERNAL_SERVER_ERROR, format!("the film could not be saved: {e}"));
-    }
-    Json(view(&app, p)).into_response()
+    Ok(())
 }
 
 async fn forget(State(app): State<Shared>, Path(id): Path<String>) -> Response {
     let mut list = index(&app);
     let before = list.len();
+    let folder = list.iter().find(|(i, _)| *i == id).map(|(_, folder)| PathBuf::from(folder));
     list.retain(|(i, _)| *i != id);
     if list.len() == before {
         return fail(StatusCode::NOT_FOUND, "no such film");
     }
     with_queue(|q| q.waiting.retain(|(pid, _)| *pid != id));
     write_index(&app, &list).ok();
+    // The clips stay in the folder; the copies made for the app go.
+    if let Some(folder) = folder {
+        crate::playable::remove_all(&folder.join("clips"));
+    }
     Json(json!({"forgotten": id})).into_response()
 }
 
@@ -1532,6 +1547,7 @@ async fn keep_take(app: &Shared, project: &str, shot: &str, from: &FsPath, mut t
     let old = (dir.join(format!("{shot}.webm")), dir.join(format!("{shot}.jpg")));
     let adopted = (now.takes.is_empty() && old.0.is_file()).then(|| {
         let (clip, picture) = take_files(&p, shot, 1);
+        crate::playable::rename(&old.0, &clip);
         std::fs::rename(&old.0, clip).ok();
         std::fs::rename(&old.1, picture).ok();
         Take { n: 1, seconds: now.seconds, frames: now.frames, made_frames: now.made_frames, continued: now.continues, ..Take::default() }
@@ -1543,6 +1559,8 @@ async fn keep_take(app: &Shared, project: &str, shot: &str, from: &FsPath, mut t
     }
     // What the clip really holds, and a small picture of it for the timeline.
     take.made_frames = look_at(app, &clip, &picture).await;
+    // The copy the app plays, made while the next shot is being made.
+    crate::playable::soon(app, clip);
     let mut gone = Vec::new();
     set_shot(app, project, shot, |s| {
         s.takes.extend(adopted);
@@ -1550,6 +1568,7 @@ async fn keep_take(app: &Shared, project: &str, shot: &str, from: &FsPath, mut t
     });
     for n in gone {
         let (clip, picture) = take_files(&p, shot, n);
+        crate::playable::remove(&clip);
         std::fs::remove_file(clip).ok();
         std::fs::remove_file(picture).ok();
     }
@@ -1591,6 +1610,7 @@ async fn delete_take(State(app): State<Shared>, Path((id, shot, n)): Path<(Strin
         return fail(StatusCode::NOT_FOUND, "no such take");
     }
     let (clip, picture) = take_files(&p, &shot, n);
+    crate::playable::remove(&clip);
     std::fs::remove_file(clip).ok();
     std::fs::remove_file(picture).ok();
     if used {
@@ -1708,13 +1728,9 @@ async fn clip(State(app): State<Shared>, Path((id, name)): Path<(String, String)
         Some(n) => take_files(&p, shot, n),
         None => (clip_path(&p, shot), poster_path(&p, shot)),
     };
-    let file = if picture { poster } else { clip.clone() };
-    // A clip is asked for as ".webm" whatever it is: one brought in from a video is an MP4, and says so.
-    let kind = match (picture, file.extension().and_then(|e| e.to_str())) {
-        (true, _) => "image/jpeg",
-        (false, Some("mp4")) => "video/mp4",
-        (false, _) => "video/webm",
-    };
+    // A clip is asked for as ".webm" whatever it is: one brought in from a video is an MP4, and says
+    // so; a made one is handed over as its playable copy where the webview needs one.
+    let (file, kind) = if picture { (poster, "image/jpeg") } else { crate::playable::served(&app, &clip).await };
     // A film made before pictures were kept gets them when they are first asked for.
     if picture && !file.is_file() && clip.is_file() {
         let frames = look_at(&app, &clip, &file).await;
@@ -2251,6 +2267,8 @@ async fn begin_export(app: &Shared, p: Project, body: Export) -> Result<usize, (
             s.made_frames = frames;
         }
     }
+    // The film as it is saved now is what the file holds: an edit after this makes it out of date.
+    let edited = load(app, &id).map_or(p.updated_ms, |now| now.updated_ms);
     let shots = exported(&p);
     let count = shots.len();
     let clips: Vec<PathBuf> = shots.iter().map(|s| clip_path(&p, &s.id)).collect();
@@ -2445,7 +2463,7 @@ async fn begin_export(app: &Shared, p: Project, body: Export) -> Result<usize, (
                 set_export(
                     &id,
                     json!({"state": "done", "file": out.to_string_lossy(), "bytes": bytes, "shots": count, "seconds": graph.frames as f32 / 24.0,
-                           "subtitles": subtitles}),
+                           "subtitles": subtitles, "edited_ms": edited}),
                 );
             }
             Err(e) => {
@@ -2638,6 +2656,7 @@ pub fn router() -> Router<Shared> {
         .route("/v1/studio/projects/{id}/shots/{shot}/take", post(use_take))
         .route("/v1/studio/projects/{id}/shots/{shot}/takes/{n}", axum::routing::delete(delete_take))
         .route("/v1/studio/projects/{id}/clips/{name}", get(clip))
+        .route("/v1/studio/projects/{id}/media", post(play::media))
         .route("/v1/studio/brief", post(direct::brief))
         .route("/v1/studio/projects/{id}/import", get(bring::state).post(bring::import))
         .route("/v1/studio/projects/{id}/cast/look", post(direct::look))

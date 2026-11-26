@@ -33,6 +33,7 @@
 //!   GET    /v1/agents                     agents the person made; PUT {agents: [...]} replaces the list; DELETE removes them all
 //!   GET    /v1/agents/{id}                one agent; PUT {name, instruction, tools, starter} saves it; DELETE removes it
 //!   GET    /v1/artifacts/frame            the empty, locked-down page a chat artifact is shown in (no token: it holds nothing)
+//!   GET    /v1/media?token=               a file the service made, for a <video> (a token for one file instead of the bearer, see `media.rs`)
 //!   GET    /v1/images/files/{id}.png      a generated picture (saved by /v1/images/generations); DELETE removes it
 //!   POST   /v1/sync                       send queued events now
 //!   GET    /v1/app/config                 server's app config (updates, sponsors), cached for offline
@@ -45,7 +46,7 @@
 //!   POST   /v1/audio/transcriptions       OpenAI-compatible, multipart: "file" (16-bit PCM WAV), "model", "language"
 //!   POST   /v1/videos/generations         {"model", "prompt", "size", "frames", "steps", "seed"}: a clip, made in the background
 //!   GET    /v1/videos/jobs[/{id}]         progress of clips; DELETE /v1/videos/jobs/{id} stops one
-//!   GET    /v1/videos/files/{id}.webm     a saved clip; DELETE removes it
+//!   GET    /v1/videos/files/{id}.webm     a saved clip (an MP4 copy on macOS, see `playable.rs`); DELETE removes it
 //!   ...    /v1/studio/...                 films made of shots in a folder (see `studio.rs`)
 //!   POST   /v1/agent/tasks                Code: {"folder", "prompt", "model", "mode", "web", "connectors"} starts a task on a folder
 //!   GET    /v1/agent/tasks[/{id}]         tasks (?folder=), or one with its steps, its plan and the answer being written
@@ -73,6 +74,8 @@ mod cloud;
 mod community;
 mod connectors;
 mod library;
+mod media;
+mod playable;
 mod speech;
 mod studio;
 mod title;
@@ -1449,6 +1452,8 @@ async fn main() {
         .layer(middleware::from_fn_with_state(app.clone(), auth))
         // Added after the token check, so it needs none: a frame cannot send one, and the page is the same for everyone.
         .route("/v1/artifacts/frame", get(agents::artifact_frame))
+        // Nor can a <video>: this one takes a short-lived token for one file in its address (see `media.rs`).
+        .route("/v1/media", get(media::get))
         // The app's webview is a different origin. Only the app's own origins may call the API;
         // the bearer token is still required. Preflight requests carry no token and pass here.
         .layer(

@@ -33,6 +33,9 @@ pub struct Extra {
     /// How full the model's context was at its last turn, in tokens, by the engine's count.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<Context>,
+    /// The film a task of Studio's assistant works on (see `film`); empty for a task of Code.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub film: String,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
