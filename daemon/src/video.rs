@@ -85,6 +85,10 @@ pub struct VideoBody {
     /// A picture the clip starts from, base64 (JPEG or PNG). Needs a package that can see pictures.
     #[serde(default)]
     init_image: Option<String>,
+    /// One of the package's qualities (`defaults.qualities`): a quality with a schedule of its own
+    /// is made with it. The size is still `size`.
+    #[serde(default)]
+    quality: Option<String>,
 }
 
 impl VideoBody {
@@ -98,7 +102,14 @@ impl VideoBody {
             steps: None,
             seed: None,
             init_image: None,
+            quality: None,
         }
+    }
+
+    /// The same request at one of the package's qualities.
+    pub fn at_quality(mut self, quality: Option<String>) -> VideoBody {
+        self.quality = quality;
+        self
     }
 
     /// The same request with a seed of its own, so the same clip can be made again.
@@ -135,8 +146,9 @@ pub async fn generate(State(app): State<Shared>, Json(body): Json<VideoBody>) ->
         .and_then(|s| s.split_once('x'))
         .and_then(|(w, h)| Some((w.parse::<u32>().ok()?, h.parse::<u32>().ok()?)))
         .unwrap_or((832, 480));
-    if !(256..=1280).contains(&width) || !(256..=1280).contains(&height) || width % 32 != 0 || height % 32 != 0 {
-        return fail(StatusCode::BAD_REQUEST, "size must be WIDTHxHEIGHT, each 256 to 1280 and a multiple of 32");
+    let side = 256..=rigbrew_core::manifest::MAX_CLIP_SIDE;
+    if !side.contains(&width) || !side.contains(&height) || width % 32 != 0 || height % 32 != 0 {
+        return fail(StatusCode::BAD_REQUEST, "size must be WIDTHxHEIGHT, each 256 to 1344 and a multiple of 32");
     }
     // What the package says about itself (the manifest's `defaults`), else what the first video package wanted.
     let d = &package.defaults;
@@ -146,8 +158,13 @@ pub async fn generate(State(app): State<Shared>, Json(body): Json<VideoBody>) ->
     if !(5..=max_frames).contains(&frames) || (frames - 1) % frame_step != 0 {
         return fail(StatusCode::BAD_REQUEST, format!("frames must be {frame_step}k+1 between 5 and {max_frames}"));
     }
-    // A package with a fixed schedule (a distilled model) takes its own step count, whatever was asked.
-    let steps = if d["fixed_steps"].as_bool().unwrap_or(false) {
+    // A quality with a schedule of its own takes as many steps as it has; a package with a fixed
+    // schedule (a distilled model) takes its own step count, whatever was asked.
+    let sigmas =
+        body.quality.as_deref().and_then(|q| package.qualities().into_iter().find(|x| x.id == q)).map(|q| q.sigmas).unwrap_or_default();
+    let steps = if !sigmas.is_empty() {
+        sigmas.len() as u32 - 1
+    } else if d["fixed_steps"].as_bool().unwrap_or(false) {
         num("steps", 20)
     } else {
         body.steps.unwrap_or_else(|| num("steps", 20)).clamp(1, 50)
@@ -202,6 +219,7 @@ pub async fn generate(State(app): State<Shared>, Json(body): Json<VideoBody>) ->
         flow_shift: if d["cfg"].is_null() { Some(3.0) } else { d["flow_shift"].as_f64().map(|v| v as f32) },
         tiling: false,
         init_image,
+        sigmas,
     };
     tokio::spawn(run(app.clone(), id.clone(), package, req));
     (StatusCode::ACCEPTED, Json(json!({"job": id}))).into_response()

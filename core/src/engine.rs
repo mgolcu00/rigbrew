@@ -221,6 +221,8 @@ pub struct VideoRequest {
     pub tiling: bool,
     /// A picture the clip starts from (JPEG or PNG, base64), for packages that can continue from one.
     pub init_image: Option<String>,
+    /// A sampler schedule for this clip (ending at 0) instead of the one the engine was started with.
+    pub sigmas: Vec<f32>,
 }
 
 /// Progress as the engine reports it: a stage (`conditioning`, `sampling`, `vae_decode`, ...)
@@ -481,6 +483,9 @@ impl SdServer {
         }
         if let Some(image) = &req.init_image {
             body["init_image"] = json!(image);
+        }
+        if !req.sigmas.is_empty() {
+            body["sample_params"]["custom_sigmas"] = json!(req.sigmas);
         }
         self.submit("vid_gen", &body).await
     }
