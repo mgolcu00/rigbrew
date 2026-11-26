@@ -38,6 +38,7 @@ mod checks;
 mod devices;
 mod extra;
 mod files;
+mod kit;
 pub mod look;
 pub mod mcp;
 mod outline;
@@ -904,8 +905,8 @@ async fn work(app: &Shared, id: &str) -> Ended {
     let agents = &app.agent;
     let failed = |why: String| Ended { state: "failed", error: Some(why) };
     let Some(task) = agents.get(id) else { return failed("The task is gone.".into()) };
-    let folder = match Folder::open(&task.folder) {
-        Ok(f) => f,
+    let kit = match kit::Kit::open(&task) {
+        Ok(k) => k,
         Err(e) => return failed(e),
     };
     // A model from the manifest, or one the person added from the community.
@@ -928,16 +929,7 @@ async fn work(app: &Shared, id: &str) -> Ended {
         // What no longer fits leaves the conversation and stays as notes.
         agents.change(id, |t| recall::compact(&mut t.messages, &mut t.memory, budget));
         let Some(task) = agents.get(id) else { return failed("The task is gone.".into()) };
-        let mut skills = skills::load(&app.root, Some(folder.root()));
-        skills.retain(|s| s.source != "built-in" || see::skill_fits(&s.name, folder.root()));
-        let system = format!(
-            "{}{}{}{}{}",
-            system_prompt(&folder, task.mode, task.web, &skills),
-            see::rules(task.mode, folder.root()).iter().map(|l| format!("\n{l}")).collect::<String>(),
-            mcp::prompt(app, &task.mcp),
-            extra::context(&task),
-            task.pace.note(task.web)
-        );
+        let (system, mut tools) = kit.turn(app, &task);
         let mut messages = vec![json!({"role": "system", "content": system})];
         let mut sent = fit(&recall::conversation(&task.memory, &task.messages), budget);
         // The newest picture goes with the result of the step that took it, for a few turns,
@@ -953,10 +945,6 @@ async fn work(app: &Shared, id: &str) -> Ended {
             }
         }
         messages.extend(sent);
-        let mut tools = tool_defs(task.mode, task.web, !skills.is_empty());
-        tools.extend(see::tool_defs(task.mode, folder.root()));
-        tools.extend(skills::extra_tools(&skills));
-        tools.extend(mcp::tool_defs(app, &task.mcp));
         // A tool that is used up for this request is not offered again until the next one.
         tools.retain(|t| !t["function"]["name"].as_str().is_some_and(|name| task.pace.closed(name)));
         let body = json!({
@@ -1021,7 +1009,7 @@ async fn work(app: &Shared, id: &str) -> Ended {
             // The same last look as before `finish`, unless the text is a question to the person.
             if back.is_none() && !looked_back && !text.is_empty() && !text.trim_end().ends_with('?') {
                 looked_back = true;
-                back = see::before_finish(&task, folder.root());
+                back = kit.before_finish(&task);
             }
             agents.change(id, |t| {
                 if !text.is_empty() {
@@ -1033,7 +1021,7 @@ async fn work(app: &Shared, id: &str) -> Ended {
                 }
                 match &back {
                     Some(line) => t.messages.push(recall::hint(line)),
-                    None => verify::note_unchecked(t, &text),
+                    None => kit.answered(t, &text),
                 }
             });
             if back.is_some() {
@@ -1074,7 +1062,7 @@ async fn work(app: &Shared, id: &str) -> Ended {
                 let mut left = now.as_ref().and_then(|t| not_finished(&t.extra.plan)).filter(|_| held_open < MAX_SEND_BACKS);
                 if left.is_none() && !looked_back {
                     looked_back = true;
-                    left = now.as_ref().and_then(|t| see::before_finish(t, folder.root()));
+                    left = now.as_ref().and_then(|t| kit.before_finish(t));
                 } else if left.is_some() {
                     held_open += 1;
                 }
@@ -1092,7 +1080,7 @@ async fn work(app: &Shared, id: &str) -> Ended {
                     } else if text.is_empty() {
                         t.steps.push(Step::Note { text: "Finished.".into() });
                     }
-                    verify::note_unchecked(t, &said);
+                    kit.answered(t, &said);
                 });
                 return Ended { state: "done", error: None };
             }
@@ -1116,7 +1104,7 @@ async fn work(app: &Shared, id: &str) -> Ended {
             } else if let Some(held) = &held {
                 (held.text.clone(), if held.refused { "failed" } else { "done" })
             } else {
-                call_tool(app, id, &folder, &call, &name, &args).await
+                kit.call(app, id, &call, &name, &args).await
             };
             // Is the work going round in circles? A nudge goes to the model with the result; a
             // question goes to the person.
