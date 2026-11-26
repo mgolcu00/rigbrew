@@ -169,6 +169,11 @@
 		<button class="vb" onclick={() => studio.togglePlay()} aria-label={studio.playing ? 'Pause' : 'Play'} title="{studio.playing ? 'Pause' : 'Play'} (Space)"><StudioIcon name={studio.playing ? 'pause' : 'play'} size={11} /></button>
 		<span class="clock" bind:this={clock}>00:00:00:00</span>
 		<span class="what">{shown >= 0 ? `Shot ${studio.plan.parts[shown]?.index + 1} of ${studio.doc?.shots.length ?? 0}` : ''}</span>
+		{#if studio.viewerLarge && !studio.exportCurrent && studio.exportPlan.parts.length > 0}
+			<button class="st-btn primary vx" onclick={() => studio.exportFilm()} disabled={studio.view?.export?.state === 'working'} title="Join the made shots and the sound into one MP4 file, to play and share">
+				{studio.view?.export?.state === 'working' ? 'Exporting…' : 'Export'}
+			</button>
+		{/if}
 		<button class="vb" onclick={() => (studio.viewerLarge = !studio.viewerLarge)} aria-label={studio.viewerLarge ? 'Dock the viewer' : 'Make the viewer large'} title="{studio.viewerLarge ? 'Dock the viewer' : 'Large viewer'} (V)">
 			<StudioIcon name={studio.viewerLarge ? 'shrink' : 'expand'} size={12} />
 		</button>
@@ -320,6 +325,12 @@
 	.vb:hover {
 		color: var(--st-ink);
 		background: rgba(255, 255, 255, 0.09);
+	}
+
+	.vx {
+		height: 18px;
+		padding: 0 8px;
+		font-size: 10.5px;
 	}
 
 	.clock {

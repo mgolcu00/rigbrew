@@ -151,6 +151,10 @@ class Studio {
 	fits = $state(0);
 	viewerLarge = $state(false);
 	keysOpen = $state(false);
+	/** The film player (the exported file, whole): opened by the person, or by itself after an export. */
+	player = $state<'' | 'asked' | 'exported'>('');
+	/** When the exported file of each film was written, as last seen here: a newer one opens the player once. */
+	#exportSeen = new Map<string, number>();
 
 	// --- pictures and waveforms -------------------------------------------------------------------
 	/** Changes when a picture or a waveform arrives, so the lanes are drawn again. */
@@ -299,6 +303,7 @@ class Studio {
 		this.id = view.project.id;
 		this.doc = docOf(view.project);
 		if (other) {
+			this.player = '';
 			this.shotsSel = [];
 			this.regionsSel = [];
 			this.track = FILM;
@@ -322,6 +327,7 @@ class Studio {
 		this.doc = null;
 		this.id = '';
 		this.viewerLarge = false;
+		this.player = '';
 		clearInterval(this.#poll);
 		this.#poll = undefined;
 		this.refresh();
@@ -842,6 +848,41 @@ class Studio {
 		} catch (e) {
 			this.problem = say(e);
 		}
+	}
+
+	/** Whether the exported file holds the film as it is now. */
+	get exportCurrent() {
+		return Boolean(this.view?.film?.current) && this.view?.export?.state !== 'working';
+	}
+
+	/** Play film: the exported file in the player when it holds the film as it is now, else the timeline from its start in the large viewer. */
+	playFilm() {
+		if (!this.doc) return;
+		if (this.exportCurrent) {
+			this.pause();
+			this.player = 'asked';
+			app.track('studio_film_played', { opened: 'asked' });
+			return;
+		}
+		this.viewerLarge = true;
+		if (!this.playing) {
+			this.seek(this.cycle.on ? this.cycle.from : 0);
+			this.play();
+		}
+	}
+
+	/** Called whenever the film comes from the service: an export that has just been written opens the player, once. */
+	noticeExport() {
+		const film = this.view?.film;
+		if (!this.id || this.view?.export?.state === 'working') return;
+		const written = film?.modified_ms ?? 0;
+		const seen = this.#exportSeen.get(this.id);
+		this.#exportSeen.set(this.id, written);
+		if (seen === undefined || written <= seen || !film?.current || this.view?.export?.state !== 'done' || this.player) return;
+		this.pause();
+		this.viewerLarge = false;
+		this.player = 'exported';
+		app.track('studio_film_played', { opened: 'exported' });
 	}
 
 	// --- the chat model and the voice -------------------------------------------------------------
