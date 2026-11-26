@@ -17,7 +17,10 @@
 //!   GET    /v1/agent/tasks/{id}           state, steps so far, what waits for an answer, and the
 //!                                         answer being written (`writing`); ?brief=true leaves the steps out
 //!   POST   /v1/agent/tasks/{id}/approve   {call, allow, always?}
-//!   POST   /v1/agent/tasks/{id}/message   {text, mode?, web?, connectors?} continues the task
+//!   POST   /v1/agent/tasks/{id}/message   {text, images?, continue?, mode?, web?, connectors?} continues the
+//!                                         task, or waits for its next turn while it works
+//!   DELETE /v1/agent/tasks/{id}/queue/{q}  takes back a message that waits
+//!   GET    /v1/agent/files?folder=&q=     files to name with @
 //!   POST   /v1/agent/tasks/{id}/undo      takes back what the newest request changed
 //!   DELETE /v1/agent/tasks/{id}           stops it; ?remove=true also forgets it
 //!   GET    /v1/agent/skills?folder=       the skills a task there can use
@@ -35,6 +38,7 @@
 
 mod apps;
 mod checks;
+mod compose;
 mod devices;
 mod extra;
 mod files;
@@ -43,6 +47,7 @@ pub mod mcp;
 mod outline;
 mod pace;
 mod plan;
+mod project;
 mod recall;
 pub mod see;
 pub mod skills;
@@ -77,15 +82,31 @@ const RETRY_WAITS: [Duration; 3] = [Duration::from_secs(2), Duration::from_secs(
 /// plan still has steps to do) before it is taken as the answer.
 const MAX_SEND_BACKS: usize = 2;
 /// Characters of conversation sent to the model; older tool results are left out beyond it.
-/// The chat engine runs with a context of 8192 tokens, and the tools, the rules and the answer
-/// need their share of it.
+/// This is for a context of 8192 tokens, of which the tools, the rules and the answer need their
+/// share; a model with a longer one gets as many times more (see `history_chars`).
 const HISTORY_CHARS: usize = 12_000;
 const MAX_ANSWER_TOKENS: u32 = 3072;
+
+/// The characters of conversation a model with `context` tokens is sent.
+fn history_chars(context: u32) -> usize {
+    HISTORY_CHARS * (context.max(8192) / 8192) as usize
+}
+
+/// Tokens one answer may take, thinking included.
+fn answer_tokens(context: u32) -> u32 {
+    if context > 8192 {
+        MAX_ANSWER_TOKENS * 3
+    } else {
+        MAX_ANSWER_TOKENS
+    }
+}
 /// How often one request may be told that its tool call was cut off before the task gives up.
 const MAX_CUT_OFFS: usize = 3;
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_PROMPT_CHARS: usize = 4000;
 const MAX_RUNNING: usize = 4;
+/// Largest request body that starts or continues a task: the words and a few pictures.
+pub const MAX_BODY_BYTES: usize = 48 * 1024 * 1024;
 const MAX_KEPT: usize = 200;
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, Default)]
@@ -131,6 +152,15 @@ enum Step {
     /// What the task asks the person when it cannot get further by itself.
     Question {
         text: String,
+    },
+    /// Pictures the person sent with the message before.
+    Pictures {
+        images: Vec<String>,
+    },
+    /// What the model thought before it answered, and for how long.
+    Thought {
+        text: String,
+        ms: u64,
     },
 }
 
@@ -915,7 +945,8 @@ async fn work(app: &Shared, id: &str) -> Ended {
     let package = &package;
     agents.change(id, |t| repair(&mut t.messages));
     let writing = agents.running.lock().unwrap().get(id).map(|r| r.writing.clone()).unwrap_or_default();
-    let mut budget = HISTORY_CHARS;
+    let context = crate::context_of(app, package);
+    let mut budget = history_chars(context);
     // A tool call too long for one answer comes back from the engine as an error, not as a call.
     let mut cut_offs = 0;
     // Engine errors in a row, and answers without a tool call that were sent back in a row.
@@ -925,24 +956,31 @@ async fn work(app: &Shared, id: &str) -> Ended {
     // Whether the request was read back to the model once before it finished.
     let mut looked_back = false;
     loop {
+        // What the person sent while the last step ran joins the conversation now.
+        for skill in agents.change(id, compose::deliver).flatten().unwrap_or_default() {
+            read_skill(app, id, folder.root(), &skill);
+        }
         // What no longer fits leaves the conversation and stays as notes.
         agents.change(id, |t| recall::compact(&mut t.messages, &mut t.memory, budget));
         let Some(task) = agents.get(id) else { return failed("The task is gone.".into()) };
         let mut skills = skills::load(&app.root, Some(folder.root()));
         skills.retain(|s| s.source != "built-in" || see::skill_fits(&s.name, folder.root()));
         let system = format!(
-            "{}{}{}{}{}",
+            "{}{}{}{}{}{}",
             system_prompt(&folder, task.mode, task.web, &skills),
+            project::instructions(folder.root()),
             see::rules(task.mode, folder.root()).iter().map(|l| format!("\n{l}")).collect::<String>(),
             mcp::prompt(app, &task.mcp),
             extra::context(&task),
             task.pace.note(task.web)
         );
         let mut messages = vec![json!({"role": "system", "content": system})];
-        let mut sent = fit(&recall::conversation(&task.memory, &task.messages), budget);
+        let sees = see::sees(app, &task);
+        let read = |name: &str| look::read_shot(&agents.dir, id, name);
+        let mut sent = compose::with_pictures(fit(&recall::conversation(&task.memory, &task.messages), budget), sees, read);
         // The newest picture goes with the result of the step that took it, for a few turns,
         // when the model takes pictures at all.
-        if let Some(eye) = task.extra.eye.as_ref().filter(|e| !e.call.is_empty() && e.sends < look::EYE_SENDS && see::sees(app, &task)) {
+        if let Some(eye) = task.extra.eye.as_ref().filter(|e| !e.call.is_empty() && e.sends < look::EYE_SENDS && sees) {
             if let Some(png) = look::read_shot(&agents.dir, id, &eye.shot) {
                 sent = look::with_picture(sent, eye, &png);
                 agents.change(id, |t| {
@@ -966,15 +1004,15 @@ async fn work(app: &Shared, id: &str) -> Ended {
             "parallel_tool_calls": false,
             "stream": true,
             "temperature": 0.2,
-            "max_tokens": MAX_ANSWER_TOKENS,
-            "chat_template_kwargs": {"enable_thinking": false},
+            "max_tokens": answer_tokens(context),
+            "chat_template_kwargs": {"enable_thinking": extra::thinks(context), "reasoning_effort": extra::effort(context)},
         });
         let answer = crate::complete(app, package, body, &mut |so_far| writing.hear(so_far)).await;
         writing.clear();
         let answer = match answer {
             Ok(v) => v,
             // Too much for the model's context: send less of the history, once.
-            Err(e) if e.to_lowercase().contains("context") && budget > HISTORY_CHARS / 4 => {
+            Err(e) if e.to_lowercase().contains("context") && budget > history_chars(context) / 4 => {
                 budget /= 2;
                 continue;
             }
@@ -1006,7 +1044,10 @@ async fn work(app: &Shared, id: &str) -> Ended {
             Err(e) => return failed(e),
         };
         errors = 0;
-        agents.change(id, |t| t.turns += 1);
+        agents.change(id, |t| {
+            t.turns += 1;
+            extra::heard(t, &answer, context);
+        });
         let message = &answer["choices"][0]["message"];
         let cut_off = answer["choices"][0]["finish_reason"] == "length";
         let text = message["content"].as_str().unwrap_or("");
@@ -1156,7 +1197,11 @@ fn start(app: &Shared, id: &str, follow_up: bool) {
     let mut running = agents.running.lock().unwrap();
     let (task_app, task_id) = (app.clone(), id.to_string());
     let handle = tokio::spawn(async move {
-        let ended = work(&task_app, &task_id).await;
+        let mut ended = work(&task_app, &task_id).await;
+        // Messages the person sent while it worked are the next request.
+        while matches!(ended.state, "done" | "asking") && task_app.agent.change(&task_id, next_from_queue).unwrap_or(false) {
+            ended = work(&task_app, &task_id).await;
+        }
         // A request that failed leaves no app behind; one that is done keeps it for the person to see.
         if ended.state == "failed" {
             task_app.agent.apps.stop(&task_id);
@@ -1226,6 +1271,68 @@ async fn name(app: Shared, id: String) {
     }
 }
 
+/// Starts the next request of the person: their message is in the conversation by now.
+fn begin_request(t: &mut Task) {
+    t.state = "running".into();
+    t.request_ms = now_ms();
+    t.error = None;
+    t.turns = 0;
+    t.denied.clear();
+    t.pace.next_request();
+    extra::next_request(t);
+}
+
+/// When the work ended with messages waiting: the next request starts with them.
+fn next_from_queue(t: &mut Task) -> bool {
+    if t.extra.queued.is_empty() {
+        return false;
+    }
+    begin_request(t);
+    true
+}
+
+/// A skill a command named, read for the model as if it had called `use_skill` itself: the step
+/// shows it, and its instructions are in the conversation before the work starts.
+fn read_skill(app: &Shared, id: &str, root: &FsPath, name: &str) {
+    let Some(skill) = skills::load(&app.root, Some(root)).into_iter().find(|s| s.name == name) else { return };
+    let text = skills::used(app, &skill, "code");
+    let call = uuid::Uuid::new_v4().simple().to_string()[..12].to_string();
+    let args = json!({"name": name});
+    app.agent.change(id, |t| {
+        t.steps.push(Step::Tool {
+            call: call.clone(),
+            name: "use_skill".into(),
+            arguments: args.clone(),
+            status: "done".into(),
+            result: Some(text.clone()),
+            diff: None,
+            image: None,
+        });
+        t.messages.push(json!({"role": "assistant", "content": "", "tool_calls": [{"id": call, "type": "function", "function": {"name": "use_skill", "arguments": args.to_string()}}]}));
+        t.messages.push(json!({"role": "tool", "tool_call_id": call, "content": text}));
+    });
+}
+
+/// Characters one message of the person may bring along (files named with `@`, the change for
+/// `/review`) for a model with `context` tokens: a third of the conversation it is sent.
+fn room(context: u32) -> usize {
+    history_chars(context) / 3
+}
+
+/// What the person sent, as the model will read it: a command expanded, the files named with
+/// `@` brought along, as much as the model's context has room for. `Err` is said to the person,
+/// and nothing is sent.
+fn understood(app: &Shared, folder: &Folder, model: &str, text: &str) -> Result<(String, Option<String>), String> {
+    let skills = skills::load(&app.root, Some(folder.root()));
+    let room = room(app.package(model).map_or(8192, |p| crate::context_of(app, &p)));
+    let (asked, skill) = match project::expand(text, folder.root(), &skills, room) {
+        Some(Ok(e)) => (e.text, e.skill),
+        Some(Err(why)) => return Err(why),
+        None => (text.to_string(), None),
+    };
+    Ok((compose::with_mentions(&asked, folder, room), skill))
+}
+
 /// Takes the task out of the running ones and records how it went.
 fn finished(app: &Shared, id: &str) -> bool {
     let Some(was) = app.agent.running.lock().unwrap().remove(id) else { return false };
@@ -1259,6 +1366,9 @@ pub struct NewTask {
     /// "Use connectors": offer `find_tool` and `call_tool`.
     #[serde(default)]
     connectors: bool,
+    /// Pictures that go with the request: PNG, base64.
+    #[serde(default)]
+    images: Vec<String>,
 }
 
 pub async fn task_create(State(app): State<Shared>, Json(body): Json<NewTask>) -> Response {
@@ -1293,9 +1403,18 @@ pub async fn task_create(State(app): State<Shared>, Json(body): Json<NewTask>) -
     if app.agent.running.lock().unwrap().len() >= MAX_RUNNING {
         return fail(StatusCode::TOO_MANY_REQUESTS, format!("{MAX_RUNNING} tasks are already running. Stop one, or wait for it."));
     }
+    let (sent, skill) = match understood(&app, &folder, &package.id, prompt) {
+        Ok(u) => u,
+        Err(why) => return fail(StatusCode::BAD_REQUEST, why),
+    };
+    let id = uuid::Uuid::new_v4().simple().to_string();
+    let images = match compose::keep_pictures(&app.agent.dir, &id, &body.images) {
+        Ok(names) => names,
+        Err(why) => return fail(StatusCode::BAD_REQUEST, why),
+    };
     let now = now_ms();
-    let task = Task {
-        id: uuid::Uuid::new_v4().simple().to_string(),
+    let mut task = Task {
+        id,
         folder: folder.root().to_string_lossy().into_owned(),
         title: prompt.lines().next().unwrap_or("").chars().take(80).collect(),
         title_by: "words".into(),
@@ -1306,20 +1425,25 @@ pub async fn task_create(State(app): State<Shared>, Json(body): Json<NewTask>) -
         created_ms: now,
         updated_ms: now,
         request_ms: now,
-        steps: vec![Step::User { text: prompt.to_string() }],
+        steps: Vec::new(),
         pending: None,
         error: None,
         always: Vec::new(),
         denied: Vec::new(),
         turns: 0,
-        messages: vec![json!({"role": "user", "content": prompt})],
+        messages: Vec::new(),
         extra: Default::default(),
         mcp: mcp::TaskState::new(body.connectors),
         pace: Default::default(),
         memory: Default::default(),
     };
-    let (id, view) = (task.id.clone(), task.view());
+    compose::add(&mut task, prompt, &sent, &images);
+    let id = task.id.clone();
     app.agent.insert(task);
+    if let Some(skill) = skill {
+        read_skill(&app, &id, folder.root(), &skill);
+    }
+    let view = app.agent.get(&id).map(|t| t.view()).unwrap_or_default();
     start(&app, &id, false);
     Json(json!({"task": view})).into_response()
 }
@@ -1376,7 +1500,14 @@ pub async fn task_approve(State(app): State<Shared>, Path(id): Path<String>, Jso
 
 #[derive(Deserialize)]
 pub struct FollowUp {
+    #[serde(default)]
     text: String,
+    /// Pictures that go with it: PNG, base64.
+    #[serde(default)]
+    images: Vec<String>,
+    /// Go on where the task was stopped, with no new words.
+    #[serde(default, rename = "continue")]
+    go_on: bool,
     #[serde(default)]
     mode: Option<Mode>,
     #[serde(default)]
@@ -1387,7 +1518,7 @@ pub struct FollowUp {
 
 pub async fn task_message(State(app): State<Shared>, Path(id): Path<String>, Json(body): Json<FollowUp>) -> Response {
     let text = body.text.trim().to_string();
-    if text.is_empty() {
+    if text.is_empty() && body.images.is_empty() && !body.go_on {
         return fail(StatusCode::BAD_REQUEST, "Say what you would like done.");
     }
     if text.chars().count() > MAX_PROMPT_CHARS {
@@ -1396,23 +1527,64 @@ pub async fn task_message(State(app): State<Shared>, Path(id): Path<String>, Jso
             format!("That is too long for the model. Keep it under {MAX_PROMPT_CHARS} characters."),
         );
     }
+    let Some(task) = app.agent.get(&id) else { return not_found() };
+    let folder = match Folder::open(&task.folder) {
+        Ok(f) => f,
+        Err(e) => return fail(StatusCode::CONFLICT, e),
+    };
+    let (sent, skill) = match understood(&app, &folder, &task.model, &text) {
+        Ok(u) => u,
+        Err(why) => return fail(StatusCode::BAD_REQUEST, why),
+    };
+    let images = match compose::keep_pictures(&app.agent.dir, &id, &body.images) {
+        Ok(names) => names,
+        Err(why) => return fail(StatusCode::BAD_REQUEST, why),
+    };
+    let words = text.clone();
+    let sent = if sent.is_empty() && !images.is_empty() { "Look at the picture.".to_string() } else { sent };
+    // While it works, the message waits for the next turn.
+    let queued = app.agent.change(&id, |t| {
+        if !t.active() {
+            return Ok(false);
+        }
+        if text.is_empty() && images.is_empty() {
+            return Ok(true);
+        }
+        if t.extra.queued.len() >= compose::MAX_QUEUED {
+            return Err(());
+        }
+        let q = uuid::Uuid::new_v4().simple().to_string()[..12].to_string();
+        t.extra.queued.push(compose::Queued {
+            id: q,
+            text: words.clone(),
+            sent: sent.clone(),
+            images: images.clone(),
+            skill: skill.clone(),
+        });
+        Ok(true)
+    });
+    match queued {
+        None => return not_found(),
+        Some(Err(())) => return fail(StatusCode::TOO_MANY_REQUESTS, "Enough messages are waiting. Wait for the next turn."),
+        Some(Ok(true)) => return app.agent.get(&id).map_or_else(not_found, |t| Json(json!({"task": t.view()})).into_response()),
+        Some(Ok(false)) => {}
+    }
     if app.agent.running.lock().unwrap().len() >= MAX_RUNNING {
         return fail(StatusCode::TOO_MANY_REQUESTS, format!("{MAX_RUNNING} tasks are already running. Stop one, or wait for it."));
     }
     // Checked and changed in one step, so two messages cannot both start the work.
     let accepted = app.agent.change(&id, |t| {
         if t.active() {
-            return false;
+            return None;
         }
-        t.steps.push(Step::User { text: text.clone() });
-        t.messages.push(json!({"role": "user", "content": text}));
-        t.state = "running".into();
-        t.request_ms = now_ms();
-        t.error = None;
-        t.turns = 0;
-        t.denied.clear();
-        t.pace.next_request();
-        extra::next_request(t);
+        // What waited when the work was stopped goes first.
+        let waited = compose::deliver(t).unwrap_or_default();
+        if !text.is_empty() || !images.is_empty() {
+            compose::add(t, &words, &sent, &images);
+        } else if body.go_on {
+            t.messages.push(recall::hint("The person stopped you, and now asks you to go on from where you were."));
+        }
+        begin_request(t);
         if let Some(mode) = body.mode {
             t.mode = mode;
         }
@@ -1422,12 +1594,15 @@ pub async fn task_message(State(app): State<Shared>, Path(id): Path<String>, Jso
         if let Some(on) = body.connectors {
             t.mcp.on = on;
         }
-        true
+        Some(waited)
     });
-    match accepted {
+    match accepted.map(|a| a.map(|waited| waited.into_iter().chain(skill.clone()))) {
         None => not_found(),
-        Some(false) => fail(StatusCode::CONFLICT, "This task is still working. Wait for it, or stop it first."),
-        Some(true) => {
+        Some(None) => fail(StatusCode::CONFLICT, "This task is still working. Wait for it, or stop it first."),
+        Some(Some(skills)) => {
+            for skill in skills {
+                read_skill(&app, &id, folder.root(), &skill);
+            }
             start(&app, &id, true);
             match app.agent.get(&id) {
                 Some(task) => Json(json!({"task": task.view()})).into_response(),
@@ -1496,11 +1671,46 @@ pub async fn task_delete(State(app): State<Shared>, Path(id): Path<String>, Quer
 pub async fn skills_list(State(app): State<Shared>, Query(q): Query<FolderQuery>) -> Json<Value> {
     let folder = q.folder.as_deref().and_then(|f| Folder::open(f).ok());
     let all = skills::load(&app.root, folder.as_ref().map(|f| f.root()));
+    let instructions: Vec<String> =
+        folder.as_ref().map(|f| project::found(f.root()).into_iter().map(|(path, _)| path).collect()).unwrap_or_default();
     Json(json!({
         "skills": all.iter().map(|s| json!({"name": s.name, "description": s.description, "source": s.source})).collect::<Vec<_>>(),
         "dir": app.root.join("skills"),
         "folder_dir": ".rigbrew/skills",
+        "instructions": instructions,
     }))
+}
+
+/// `DELETE /v1/agent/tasks/{id}/queue/{q}`: the person takes back a message before it went in.
+pub async fn queue_remove(State(app): State<Shared>, Path((id, q)): Path<(String, String)>) -> Response {
+    let removed = app.agent.change(&id, |t| {
+        let before = t.extra.queued.len();
+        t.extra.queued.retain(|m| m.id != q);
+        before != t.extra.queued.len()
+    });
+    match removed {
+        None => not_found(),
+        Some(false) => fail(StatusCode::CONFLICT, "That message is no longer waiting."),
+        Some(true) => app.agent.get(&id).map_or_else(not_found, |t| Json(json!({"task": t.view()})).into_response()),
+    }
+}
+
+#[derive(Deserialize, Default)]
+pub struct FilesQuery {
+    folder: String,
+    #[serde(default)]
+    q: String,
+}
+
+/// `GET /v1/agent/files?folder=&q=`: the files of a folder whose path matches `q`, best first,
+/// for naming one with `@`.
+pub async fn files_list(Query(q): Query<FilesQuery>) -> Response {
+    let folder = match Folder::open(&q.folder) {
+        Ok(f) => f,
+        Err(e) => return fail(StatusCode::BAD_REQUEST, e),
+    };
+    let found = tokio::task::spawn_blocking(move || files::find(&folder, &q.q, 20)).await.unwrap_or_default();
+    Json(json!({"files": found})).into_response()
 }
 
 #[cfg(test)]

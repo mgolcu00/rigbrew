@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use super::files::Folder;
-use super::{devices, look, outline, plan, see, undo, Mode, Task};
+use super::{compose, devices, files, look, outline, plan, see, undo, Mode, Step, Task};
 use crate::Shared;
 
 /// Saved with the task and shown by the API next to its other fields.
@@ -27,6 +27,54 @@ pub struct Extra {
     /// The picture the model is shown on its next turns. Not shown by the API.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub eye: Option<look::Eye>,
+    /// Messages the person sent while the task worked: they go in at the next turn.
+    #[serde(default)]
+    pub queued: Vec<compose::Queued>,
+    /// How full the model's context was at its last turn, in tokens, by the engine's count.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<Context>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Context {
+    pub used: u32,
+    pub size: u32,
+}
+
+/// Longest thought kept with a step.
+const MAX_THOUGHT_CHARS: usize = 20_000;
+
+/// Whether the model is asked to think before it answers. A model with a short context (a small
+/// one) spends on thinking what it needs for the files it reads, and goes round in circles
+/// sooner: measured on the Code tasks, it does better without. One with a long context thinks.
+/// A model that always thinks does so either way.
+pub fn thinks(context: u32) -> bool {
+    context > 8192
+}
+
+/// How hard a model whose template takes `reasoning_effort` thinks: some think on every turn
+/// whatever they are told, and at their own default a turn of a Code task takes thousands of
+/// tokens of thinking. Medium kept the answers and took a fraction of the time; low for the rest.
+pub fn effort(context: u32) -> &'static str {
+    if thinks(context) {
+        "medium"
+    } else {
+        "low"
+    }
+}
+
+/// What the engine said about the turn besides the answer: how much of the context it took, and
+/// what the model thought, as a step of its own.
+pub fn heard(task: &mut Task, answer: &Value, size: u32) {
+    let usage = &answer["usage"];
+    let used = usage["prompt_tokens"].as_u64().unwrap_or(0) + usage["completion_tokens"].as_u64().unwrap_or(0);
+    if used > 0 {
+        task.extra.context = Some(Context { used: used.min(u32::MAX as u64) as u32, size });
+    }
+    let thought = answer["choices"][0]["message"]["reasoning_content"].as_str().unwrap_or("").trim();
+    if !thought.is_empty() {
+        task.steps.push(Step::Thought { text: files::cap(thought, MAX_THOUGHT_CHARS), ms: answer["thought_ms"].as_u64().unwrap_or(0) });
+    }
 }
 
 /// Tools of the harness itself. They change nothing in the folder, so every mode has them.
@@ -148,6 +196,26 @@ mod tests {
         assert_eq!(context(&reading), "");
         assert!(!rules(Mode::ReadOnly).iter().any(|l| l.contains("Commands") || l.contains("passes")));
         assert!(rules(Mode::Ask).iter().any(|l| l.contains("Do not use cd")));
+    }
+
+    #[test]
+    fn the_engine_s_count_and_the_thinking_are_kept() {
+        let root = files::scratch("heard");
+        let mut t = task(&root, "ask");
+        heard(&mut t, &json!({"choices": [{"message": {"content": "ok"}}]}), 8192);
+        assert_eq!((t.extra.context, t.steps.len()), (None, 1), "an engine that does not count leaves it as it was");
+        let answer = json!({
+            "choices": [{"message": {"content": "ok", "reasoning_content": "  The test wants 3.  "}}],
+            "usage": {"prompt_tokens": 3000, "completion_tokens": 200}, "thought_ms": 1200,
+        });
+        heard(&mut t, &answer, 32_768);
+        assert_eq!(t.extra.context, Some(Context { used: 3200, size: 32_768 }));
+        assert!(matches!(t.steps.last(), Some(Step::Thought { text, ms: 1200 }) if text == "The test wants 3."));
+        let view = t.view();
+        assert_eq!(view["context"], json!({"used": 3200, "size": 32_768}));
+        assert_eq!(view["queued"], json!([]));
+        assert!(!thinks(8192) && thinks(32_768));
+        assert_eq!((effort(8192), effort(32_768)), ("low", "medium"));
     }
 
     #[test]

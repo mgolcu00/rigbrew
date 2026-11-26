@@ -195,6 +195,46 @@ pub fn walk(start: &Path, depth: Option<usize>, name_heavy: bool) -> impl Iterat
         .flatten()
 }
 
+/// How well `path` matches what was typed: its letters in order, more for letters that follow
+/// each other, start a word or are in the file's own name, most when it is all there as it is.
+/// `None` when it does not match.
+fn closeness(typed: &str, path: &str) -> Option<i64> {
+    let lower: Vec<char> = path.to_lowercase().chars().collect();
+    let name_from = lower.iter().take(lower.len().saturating_sub(1)).rposition(|c| *c == '/').map_or(0, |i| i + 1);
+    let (mut score, mut at, mut last) = (0i64, 0usize, None::<usize>);
+    for c in typed.chars() {
+        let found = (at..lower.len()).find(|&i| lower[i] == c)?;
+        score += if last.is_some_and(|l| l + 1 == found) { 5 } else { 1 };
+        if found >= name_from {
+            score += 2;
+        }
+        if found == 0 || matches!(lower[found - 1], '/' | '_' | '-' | '.' | ' ') {
+            score += 3;
+        }
+        (last, at) = (Some(found), found + 1);
+    }
+    if !typed.is_empty() && path.to_lowercase().contains(typed) {
+        score += 20;
+    }
+    Some(score)
+}
+
+/// Files and folders whose path matches `query`, best first and shorter first, at most `max`:
+/// what the person picks from when they name one with `@`. Folders end with `/`.
+pub fn find(folder: &Folder, query: &str, max: usize) -> Vec<String> {
+    let typed: String = query.to_lowercase().chars().filter(|c| !c.is_whitespace()).collect();
+    let mut found: Vec<(i64, String)> = Vec::new();
+    for entry in walk(folder.root(), Some(12), false).filter(|e| e.depth() > 0).take(20_000) {
+        let path = folder.relative(entry.path());
+        let path = if entry.file_type().is_some_and(|t| t.is_dir()) { format!("{path}/") } else { path };
+        if let Some(score) = closeness(&typed, &path) {
+            found.push((score, path));
+        }
+    }
+    found.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.len().cmp(&b.1.len())).then_with(|| a.1.cmp(&b.1)));
+    found.into_iter().take(max).map(|(_, p)| p).collect()
+}
+
 /// `list_files`: a tree of the folder, `depth` levels deep, without what git ignores.
 pub fn list(folder: &Folder, path: &str, depth: usize) -> Result<String, String> {
     let start = folder.existing(path)?;
@@ -725,6 +765,23 @@ mod tests {
         assert_eq!(f.existing(real.join("src/main.txt").to_str().unwrap()).unwrap(), real.join("src/main.txt"));
         assert_eq!(f.target("src/new/deep.txt").unwrap(), real.join("src/new/deep.txt"));
         assert_eq!(f.relative(&real.join("src/main.txt")), "src/main.txt");
+    }
+
+    #[test]
+    fn files_are_found_by_a_few_letters_of_their_path() {
+        let (f, inside, _) = folder();
+        for path in ["src/parser.rs", "src/lib.rs", "docs/parsing-notes.md", "tests/parse_test.rs", "node_modules/p/index.js"] {
+            std::fs::create_dir_all(inside.join(path).parent().unwrap()).unwrap();
+            std::fs::write(inside.join(path), "x").unwrap();
+        }
+        let found = find(&f, "parse", 10);
+        assert_eq!(found[..2], ["src/parser.rs", "tests/parse_test.rs"], "{found:?}");
+        assert!(found.contains(&"docs/parsing-notes.md".to_string()) && !found.iter().any(|p| p.contains("node_modules")));
+        assert_eq!(find(&f, "slib", 10)[0], "src/lib.rs");
+        assert!(find(&f, "zzz", 10).is_empty());
+        let all = find(&f, "", 3);
+        assert_eq!(all.len(), 3);
+        assert!(find(&f, "src", 10).contains(&"src/".to_string()), "folders too");
     }
 
     #[test]

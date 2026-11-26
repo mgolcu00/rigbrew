@@ -97,7 +97,7 @@ pub fn is_git(root: &Path) -> bool {
 // --- git ---------------------------------------------------------------------------------------
 
 /// Runs git in the folder, confined like a command of the task, and returns what it printed.
-fn git(root: &Path, index: Option<&Path>, args: &[&str], input: Option<&[u8]>) -> Result<Vec<u8>, String> {
+pub(super) fn git(root: &Path, index: Option<&Path>, args: &[&str], input: Option<&[u8]>) -> Result<Vec<u8>, String> {
     use std::io::Write;
     let mut cmd = files::confined(root, "git");
     // No hooks, no file system monitor, no prompts: nothing of the repository's own runs here.
