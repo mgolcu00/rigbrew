@@ -213,7 +213,7 @@ class AppState {
 	 * and reviews. Nothing is accepted on anyone's behalf; the service keeps only basic usage
 	 * data. `?look` in the address, `__view?look=1`, or VITE_RIGBREW_LOOK=1 for the native window.
 	 */
-	#looking = import.meta.env.DEV && (import.meta.env.VITE_RIGBREW_LOOK === '1' || new URLSearchParams(location.search).has('look') || lookedBefore());
+	#looking = (import.meta.env.DEV || Boolean(import.meta.env.VITE_RIGBREW_PROBE)) && (import.meta.env.VITE_RIGBREW_LOOK === '1' || new URLSearchParams(location.search).has('look') || lookedBefore());
 
 	get consented() {
 		return this.consent !== null && this.consent.version === this.requiredConsent;
@@ -316,6 +316,10 @@ class AppState {
 			this.#view(Object.fromEntries(new URLSearchParams(location.search)));
 			import.meta.hot?.on('rigbrew:view', (view: Record<string, string>) => this.#view(view));
 		}
+		// Development only: a build made with VITE_RIGBREW_PROBE takes dev views from, and reports
+		// playback measurements to, a small server on this computer (see dev-probe.ts).
+		const probe: string | undefined = import.meta.env.VITE_RIGBREW_PROBE;
+		if (probe) import('./dev-probe.ts').then(({ startProbe }) => startProbe(probe, (view) => this.#view(view)));
 	}
 
 	/**
