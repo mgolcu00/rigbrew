@@ -23,6 +23,9 @@ interface Command {
 	keys?: string;
 	/** Clicks the first element that matches. */
 	click?: string;
+	/** The words of every element that matches, after `wait` milliseconds. */
+	text?: string;
+	wait?: number;
 	/** Reads the own sound of the first made shot as the mixer does, and says what came of it. */
 	sound?: boolean;
 }
@@ -43,6 +46,8 @@ export function startProbe(base: string, view: View) {
 			else if (cmd.do === 'fit') studio.fits++;
 			if (cmd.pps) studio.pps = cmd.pps;
 			if (cmd.seek !== undefined) studio.seek(cmd.seek);
+			const pos = (cmd as { pos?: [number, number] }).pos;
+			if (pos) await import('@tauri-apps/api/window').then(({ getCurrentWindow, LogicalPosition }) => getCurrentWindow().setPosition(new LogicalPosition(pos[0], pos[1])));
 			for (const [key, value] of Object.entries(cmd.layout ?? {})) studio.set(key as 'tab', value as 'mixer');
 			if (cmd.hover !== undefined) {
 				// The pointer at the middle of the element: what is under it there gets the event, as with a real
@@ -72,7 +77,11 @@ export function startProbe(base: string, view: View) {
 					find.dispatchEvent(new Event('input', { bubbles: true }));
 				}
 			}
-			if (cmd.measure) send(await measure(cmd.measure.seconds ?? 20, cmd.measure.label ?? ''));
+			if (cmd.text) {
+				// What is on the page, in words, a moment later: the page may not be drawn while the window is covered.
+				await sleep(cmd.wait ?? 0);
+				send({ text: [...document.querySelectorAll(cmd.text)].map((el) => el.textContent?.replace(/\s+/g, ' ').trim()) });
+			} else if (cmd.measure) send(await measure(cmd.measure.seconds ?? 20, cmd.measure.label ?? ''));
 			else if (Object.keys(cmd).length > 0) send({ done: cmd, width: innerWidth });
 		} catch (e) {
 			send({ error: String(e) });
