@@ -148,11 +148,16 @@ pub fn detect(root: &Path) -> Vec<Check> {
     if has(root, "mypy.ini") || pyproject.contains("[tool.mypy") || text_of(root, "setup.cfg").contains("[mypy") {
         add(&mut out, Kind::Types, "mypy .", not_installed("mypy"));
     }
-    if let Some(python) = verify::commands(root).iter().find(|c| c.starts_with("python3 -m ")) {
+    let own = verify::python(root);
+    if let Some(python) = verify::commands(root).iter().find(|c| c.starts_with(&format!("{own} -m "))) {
         let quiet = if python.ends_with("pytest") { " -q" } else { "" };
         let command = format!("{python}{quiet}");
-        let command = if cfg!(windows) { command.replacen("python3", "python", 1) } else { command };
-        add(&mut out, Kind::Tests, &command, not_installed(if cfg!(windows) { "python" } else { "python3" }));
+        if own != "python3" {
+            add(&mut out, Kind::Tests, &command, None);
+        } else {
+            let command = if cfg!(windows) { command.replacen("python3", "python", 1) } else { command };
+            add(&mut out, Kind::Tests, &command, not_installed(if cfg!(windows) { "python" } else { "python3" }));
+        }
     }
     if has(root, "Package.swift") {
         let missing = not_installed("swift");
@@ -608,6 +613,8 @@ mod tests {
             ]
         );
         assert_eq!(found(&[("test_shop.py", "import unittest\n")]), vec![(Tests, format!("{python} -m unittest"))]);
+        let venv = if cfg!(windows) { ".venv/Scripts/python.exe" } else { ".venv/bin/python" };
+        assert_eq!(found(&[("tests/test_shop.py", ""), (venv, "")]), vec![(Tests, format!("{venv} -m pytest -q"))]);
         let swift = if cfg!(target_os = "macos") { " --disable-sandbox" } else { "" };
         assert_eq!(
             found(&[("Package.swift", ""), ("Tests/AppTests/A.swift", "")]),

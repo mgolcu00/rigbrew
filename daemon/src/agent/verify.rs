@@ -41,6 +41,13 @@ fn python_tests(root: &Path) -> Vec<std::path::PathBuf> {
     out
 }
 
+/// The Python that runs this project: its own virtual environment when it has one (`.venv` or
+/// `venv`, where its test runner is installed), the one on the PATH otherwise.
+pub fn python(root: &Path) -> String {
+    let inside = if cfg!(windows) { "Scripts/python.exe" } else { "bin/python" };
+    [".venv", "venv"].iter().map(|dir| format!("{dir}/{inside}")).find(|p| root.join(p).is_file()).unwrap_or_else(|| "python3".into())
+}
+
 /// The program that runs this project's scripts, by the lock file it keeps.
 pub fn node_runner(root: &Path) -> &'static str {
     if has(root, "pnpm-lock.yaml") {
@@ -76,11 +83,12 @@ pub fn commands(root: &Path) -> Vec<String> {
         .iter()
         .any(|name| text_of(root, name).contains("pytest"));
     let tests = python_tests(root);
+    let python = python(root);
     if pytest_named || has(root, "pytest.ini") || has(root, "conftest.py") || has(root, "tests/conftest.py") {
-        out.push("python3 -m pytest".into());
+        out.push(format!("{python} -m pytest"));
     } else if !tests.is_empty() {
         let unittest = tests.iter().take(20).any(|p| std::fs::read_to_string(p).is_ok_and(|t| t.contains("unittest")));
-        out.push(if unittest { "python3 -m unittest".into() } else { "python3 -m pytest".into() });
+        out.push(format!("{python} -m {}", if unittest { "unittest" } else { "pytest" }));
     }
     let makefile = text_of(root, "Makefile");
     for target in ["test", "check", "build"] {
@@ -197,6 +205,9 @@ mod tests {
         assert_eq!(cmds(&[("tests/test_shop.py", "def test_total():\n    assert True\n")]), ["python3 -m pytest"]);
         assert_eq!(cmds(&[("test_shop.py", "import unittest\n")]), ["python3 -m unittest"]);
         assert!(cmds(&[("shop.py", "x = 1\n"), ("pyproject.toml", "[project]\n")]).is_empty());
+        // The project's own Python, where its test runner is installed.
+        let venv = if cfg!(windows) { ".venv/Scripts/python.exe" } else { ".venv/bin/python" };
+        assert_eq!(cmds(&[("tests/test_shop.py", ""), (venv, "")]), [format!("{venv} -m pytest")]);
         assert_eq!(cmds(&[("Makefile", "CC := cc\ntest: build\n\t./run\nbuild:\n\tcc x.c\ntesting:\n")]), ["make test", "make build"]);
         assert!(cmds(&[("Makefile", "test := 1\nall:\n\ttrue\n")]).is_empty());
         assert_eq!(
