@@ -126,10 +126,11 @@ pub fn expand(text: &str, root: &Path, skills: &[Skill], room: usize) -> Option<
                 None => "Then write AGENTS.md at the top of the folder.".into(),
             };
             plain(also(&format!(
-                "Explore this folder and write the instructions for people and coding agents who work in it. Read before you write: \
-                 the layout, the build and test commands, the conventions the code follows. {start} Keep it short and specific to \
-                 this project: what it is, how it is laid out, how to build, run and test it, and the rules to follow. Do not \
-                 change any other file."
+                "Explore this folder and write the instructions for people and coding agents who work in it. This is only about \
+                 writing them: change no other file, and fix nothing, even what is broken; say it in the instructions instead. \
+                 Read before you write: the layout, the build and test commands, the conventions the code follows. {start} Keep it \
+                 short and specific to this project: what it is, how it is laid out, how to build, run and test it, and the rules \
+                 to follow."
             )))
         }
         "review" => Some(uncommitted(root, room).map(|change| Expanded {
