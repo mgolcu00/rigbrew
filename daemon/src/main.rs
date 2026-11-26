@@ -45,7 +45,7 @@
 //!   POST   /v1/audio/transcriptions       OpenAI-compatible, multipart: "file" (16-bit PCM WAV), "model", "language"
 //!   POST   /v1/videos/generations         {"model", "prompt", "size", "frames", "steps", "seed"}: a clip, made in the background
 //!   GET    /v1/videos/jobs[/{id}]         progress of clips; DELETE /v1/videos/jobs/{id} stops one
-//!   GET    /v1/videos/files/{id}.webm     a saved clip; DELETE removes it
+//!   GET    /v1/videos/files/{id}.webm     a saved clip (an MP4 copy on macOS, see `playable.rs`); DELETE removes it
 //!   ...    /v1/studio/...                 films made of shots in a folder (see `studio.rs`)
 //!   POST   /v1/agent/tasks                Code: {"folder", "prompt", "model", "mode", "web", "connectors"} starts a task on a folder
 //!   GET    /v1/agent/tasks[/{id}]         tasks (?folder=), or one with its steps, its plan and the answer being written
@@ -73,6 +73,7 @@ mod cloud;
 mod community;
 mod connectors;
 mod library;
+mod playable;
 mod speech;
 mod studio;
 mod title;

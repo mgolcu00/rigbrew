@@ -75,7 +75,9 @@
 		problem = '';
 		const words = job.prompt.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40);
 		try {
-			const how = await saveVideo(`${words || 'clip'}-${job.seed}.webm`, await videoFile(job.file));
+			// On a Mac the clip comes as the MP4 copy the app plays, which plays everywhere.
+			const clip = await videoFile(job.file);
+			const how = await saveVideo(`${words || 'clip'}-${job.seed}.${clip.type === 'video/mp4' ? 'mp4' : 'webm'}`, clip);
 			if (how === 'cancelled') return;
 			app.track('video_saved', { package: job.package, via: how === 'saved' ? 'dialog' : 'download' });
 			saved = how === 'saved' ? 'Saved' : 'Downloaded';
@@ -150,7 +152,7 @@
 	{#if job.state !== 'waiting'}
 		<div class="actions">
 			{#if job.state === 'done' && !missing}
-				<button class="btn quiet" onclick={save} title="Save a copy of this clip as a WebM file"><Icon name={saved ? 'check' : 'download'} size={14} /> {saved || 'Save'}</button>
+				<button class="btn quiet" onclick={save} title="Save a copy of this clip"><Icon name={saved ? 'check' : 'download'} size={14} /> {saved || 'Save'}</button>
 			{/if}
 			<button class="btn quiet" onclick={copy} title="Copy the description to the clipboard"><Icon name={copied ? 'check' : 'copy'} size={14} /> {copied ? 'Copied' : flags.techDetails ? 'Copy prompt' : 'Copy description'}</button>
 		</div>

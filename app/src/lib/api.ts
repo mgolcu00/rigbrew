@@ -348,7 +348,7 @@ export const videoJob = (id: string) => json<VideoJobState>('GET', `/v1/videos/j
 export const stopVideo = async (id: string) => {
 	await optional('DELETE', `/v1/videos/jobs/${enc(id)}`);
 };
-/** A saved clip (`<id>.webm`), fetched with the token and shown through an object URL. */
+/** A saved clip (`<id>.webm`), fetched with the token and shown through an object URL. On macOS it comes as an MP4 copy. */
 export const videoFile = async (name: string) => (await send('GET', `/v1/videos/files/${enc(name)}`)).blob();
 
 /** Saves a clip where the person chooses (app) or as a download (browser preview). */
