@@ -11,15 +11,15 @@
 	// The picture of the film at the playhead, as the export will hold it: every shot from its trim
 	// start to its trim end, dissolves as two pictures over each other, fades through black, the
 	// film's own fades. Two video elements take turns: while one shows a shot, the other holds the
-	// next one ready and already running, hidden, so the cut is a swap. They are
-	// silent: the mixer plays each shot's own sound from its clip at its place (studio-audio.ts),
-	// at the level set here, turned down under what is said as the export turns it down. The
-	// subtitle of the moment lies over it.
+	// next one ready and already running, hidden, so the cut is a swap. They are silent: the mixer
+	// plays each shot's own sound from its clip at its place (studio-audio.ts), at the level set
+	// here, turned down under what is said as the export turns it down. The subtitle of the moment
+	// lies over it.
 	//
 	// The sound is the clock. A playing picture is never sought to follow it: one that runs ahead
-	// plays a little slower, one behind a little faster, measured on every frame it shows. It is
-	// sought only when the playhead jumps, or when it is far off (a clip that came late). When the
-	// film starts, the picture starts first and the sound joins at its first frame.
+	// plays slower, one behind faster, by as much as it is off, measured on every frame it shows.
+	// It is sought only when the playhead jumps, or when it is far off (a clip that came late).
+	// When the film starts, the picture starts first and the sound joins at its first frame.
 
 	const EDGE = 0.5; // seconds of the film's own fade in and fade out
 	/** Farther off than this, a playing picture is sought; closer, its speed is nudged. */

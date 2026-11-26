@@ -13,9 +13,11 @@ interface Command {
 	measure?: { seconds?: number; label?: string };
 	/** Pixels a second on the timeline: a zoomed-in timeline scrolls while the film plays. */
 	pps?: number;
+	/** The playhead to a moment of the film, in seconds, playing or not. */
+	seek?: number;
 	/** Panels of the Studio, as `studio.set` takes them. */
 	layout?: Record<string, unknown>;
-	/** The pointer comes to rest on the first element that matches, as for a help tag. */
+	/** The pointer comes to rest on the middle of the first element that matches, as for a help tag. */
 	hover?: string;
 	/** The list of keys and tools, opened, with these words typed into its search. */
 	keys?: string;
@@ -40,10 +42,15 @@ export function startProbe(base: string, view: View) {
 			else if (cmd.do === 'dock') studio.viewerLarge = false;
 			else if (cmd.do === 'fit') studio.fits++;
 			if (cmd.pps) studio.pps = cmd.pps;
+			if (cmd.seek !== undefined) studio.seek(cmd.seek);
 			for (const [key, value] of Object.entries(cmd.layout ?? {})) studio.set(key as 'tab', value as 'mixer');
 			if (cmd.hover !== undefined) {
-				const el = cmd.hover ? document.querySelector(cmd.hover) : document.body;
-				el?.dispatchEvent(new PointerEvent('pointerover', { bubbles: true, pointerType: 'mouse' }));
+				// The pointer at the middle of the element: what is under it there gets the event, as with a real
+				// pointer (a disabled control lets it through to what is behind).
+				const box = cmd.hover ? document.querySelector(cmd.hover)?.getBoundingClientRect() : undefined;
+				const [x, y] = box ? [box.left + box.width / 2, box.top + box.height / 2] : [0, 0];
+				const el = box ? document.elementFromPoint(x, y) : document.body;
+				el?.dispatchEvent(new PointerEvent('pointerover', { bubbles: true, pointerType: 'mouse', clientX: x, clientY: y }));
 			}
 			if (cmd.click) document.querySelector<HTMLElement>(cmd.click)?.click();
 			if (cmd.sound) {
