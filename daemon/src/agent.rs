@@ -11,8 +11,9 @@
 //! again after a short wait. When the service itself stops, the task is marked as cut off and
 //! the person's next message goes on from where it was.
 //!
-//!   POST   /v1/agent/tasks                {folder, prompt, model?, mode, web?, connectors?} starts a task
-//!   GET    /v1/agent/tasks?folder=        tasks, newest first
+//!   POST   /v1/agent/tasks                {folder, prompt, model?, mode, web?, connectors?} starts a task;
+//!                                         {film, prompt, model?, mode, selection?} one of Studio's assistant (see `film`)
+//!   GET    /v1/agent/tasks?folder=        tasks of Code, newest first; ?film= the assistant's on one film
 //!   PUT    /v1/agent/tasks/{id}           {title}: the person names the task; the name is then theirs
 //!   GET    /v1/agent/tasks/{id}           state, steps so far, what waits for an answer, and the
 //!                                         answer being written (`writing`); ?brief=true leaves the steps out
