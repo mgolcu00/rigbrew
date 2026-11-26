@@ -2488,8 +2488,9 @@ async fn begin_export(app: &Shared, p: Project, body: Export) -> Result<usize, (
         let started = std::time::Instant::now();
         // The film is made in three passes: the pictures and the mixed sound into a file of their
         // own (the sound as it is, in floating point); how loud that sound is; and the MP4, with the
-        // pictures as they are and the sound brought to its loudness.
-        let part = out.with_extension("part.mkv");
+        // pictures as they are and the sound brought to its loudness. The first file is a QuickTime
+        // movie: it counts time finely enough that every frame stays 1/24 of a second long.
+        let part = out.with_extension("part.mov");
         let tmp = out.with_extension("part.mp4");
         let mut cmd = tokio::process::Command::new(&ffmpeg);
         cmd.args(["-hide_banner", "-loglevel", "error", "-y"]);
@@ -2516,7 +2517,7 @@ async fn begin_export(app: &Shared, p: Project, body: Export) -> Result<usize, (
         cmd.args(["-map", &graph.video, "-map", &graph.audio]);
         // Apple's own encoder: H.264 in hardware. Plays everywhere.
         cmd.args(["-c:v", "h264_videotoolbox", "-b:v", &video_bits.to_string(), "-pix_fmt", "yuv420p", "-r", "24", "-c:a", "pcm_f32le"])
-            .args(["-f", "matroska"])
+            .args(["-f", "mov"])
             .arg(&part);
         let mut result = run_tool(cmd).await.map(|_| ());
         if result.is_ok() {
