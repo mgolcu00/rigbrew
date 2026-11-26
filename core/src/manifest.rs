@@ -104,6 +104,109 @@ pub struct Package {
     pub terms: Option<Terms>,
 }
 
+/// One way a video package makes its clips, from a quick draft to the size the model was made
+/// for. Listed in the package's `defaults.qualities`, fastest first; a manifest without them,
+/// and an app from before them, see only `defaults.sizes`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Quality {
+    /// "draft", "standard", "high".
+    pub id: String,
+    pub label: String,
+    /// Width and height for each shape: "landscape", "portrait", "square".
+    pub sizes: std::collections::BTreeMap<String, [u32; 2]>,
+    /// Peak memory of the engine at this quality for a five-second clip, measured. A machine
+    /// with less is not offered it.
+    #[serde(default)]
+    pub mem_mb: u64,
+    /// The sampler schedule for this quality (ending at 0) when it differs from the package's own.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sigmas: Vec<f32>,
+}
+
+impl Quality {
+    /// "WxH" for a shape, if this quality has it.
+    pub fn size(&self, shape: &str) -> Option<String> {
+        self.sizes.get(shape).map(|[w, h]| format!("{w}x{h}"))
+    }
+
+    /// Whether `size` ("WxH") is one of this quality's sizes.
+    pub fn has_size(&self, size: &str) -> bool {
+        self.sizes.values().any(|[w, h]| format!("{w}x{h}") == size)
+    }
+}
+
+/// The largest side a clip may have: the size the video model was made for, 1344 x 768.
+pub const MAX_CLIP_SIDE: u32 = 1344;
+
+fn usable_size([w, h]: [u32; 2]) -> bool {
+    [w, h].iter().all(|v| (256..=MAX_CLIP_SIDE).contains(v) && v % 32 == 0)
+}
+
+impl Package {
+    /// The qualities a video package offers, fastest first. One that lists none has one: its own sizes.
+    /// Entries this build cannot use (no id, no usable size) are left out, so a newer manifest still reads.
+    pub fn qualities(&self) -> Vec<Quality> {
+        let listed: Vec<Quality> = self.defaults["qualities"]
+            .as_array()
+            .map(|list| list.iter().filter_map(|q| serde_json::from_value::<Quality>(q.clone()).ok()).collect())
+            .unwrap_or_default();
+        let mut out: Vec<Quality> = listed
+            .into_iter()
+            .filter(|q| !q.id.is_empty())
+            .map(|mut q| {
+                q.sizes.retain(|_, s| usable_size(*s));
+                q.sigmas.retain(|s| s.is_finite() && *s >= 0.0);
+                if q.sigmas.len() < 2 {
+                    q.sigmas.clear();
+                }
+                q
+            })
+            .filter(|q| !q.sizes.is_empty())
+            .collect();
+        let mut seen = std::collections::HashSet::new();
+        out.retain(|q| seen.insert(q.id.clone()));
+        if out.is_empty() {
+            let sizes: std::collections::BTreeMap<String, [u32; 2]> = self.defaults["sizes"]
+                .as_object()
+                .map(|m| {
+                    m.iter()
+                        .filter_map(|(shape, v)| Some((shape.clone(), [v[0].as_u64()? as u32, v[1].as_u64()? as u32])))
+                        .filter(|(_, s)| usable_size(*s))
+                        .collect()
+                })
+                .unwrap_or_default();
+            if !sizes.is_empty() {
+                let mem_mb = self.variants.iter().map(|v| v.accel_mem_mb).min().unwrap_or(0);
+                out.push(Quality { id: "draft".into(), label: "Draft".into(), sizes, mem_mb, sigmas: Vec::new() });
+            }
+        }
+        out
+    }
+
+    /// The quality whose sizes include `size` ("WxH").
+    pub fn quality_of(&self, size: &str) -> Option<Quality> {
+        self.qualities().into_iter().find(|q| q.has_size(size))
+    }
+
+    /// The languages a voice package reads, by their English names (`defaults.languages`). A voice
+    /// from before the list reads English and Chinese, as the first one did.
+    pub fn languages(&self) -> Vec<String> {
+        let listed: Vec<String> = self.defaults["languages"]
+            .as_array()
+            .map(|l| l.iter().filter_map(|v| v.as_str()).map(str::trim).filter(|v| !v.is_empty()).map(str::to_string).collect())
+            .unwrap_or_default();
+        if !listed.is_empty() || self.modality != Modality::Voice {
+            return listed;
+        }
+        vec!["English".into(), "Chinese".into()]
+    }
+
+    /// Whether this voice package reads `language` (an English name, any case).
+    pub fn reads(&self, language: &str) -> bool {
+        self.languages().iter().any(|l| l.eq_ignore_ascii_case(language.trim()))
+    }
+}
+
 /// What a licence asks of the person, said before the download.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Terms {
@@ -277,4 +380,76 @@ fn check_file(f: &FileRef) -> Result<(), String> {
         return Err(format!("file path {:?} is not a clean relative path", f.path));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SHA: &str = "ee251661dffdebfa4a8c2555d2967b642f0efe9f2e350830a6e5c691935e23c3";
+
+    fn manifest(id: &str, modality: &str, defaults: &str) -> String {
+        format!(
+            r#"{{"schema":1,"generated":"2026-11-26","base_url":"https://models.rigbrew.dev/","packages":[{{"id":"{id}","name":"Pour 14B",
+               "modality":"{modality}","version":1,"engine":"sdcpp","access":"account","quality_floor":0.9,
+               "source":{{"name":"s","url":"https://x.y","license":"l","changes":"c"}},"defaults":{defaults},
+               "variants":[{{"id":"q4","accel_mem_mb":19070,"backends":["metal"],"quality":0.9,
+                             "files":[{{"role":"dit","path":"{id}/v1/dit.gguf","size":1,"sha256":"{SHA}"}}]}}]}}]}}"#
+        )
+    }
+
+    #[test]
+    fn a_package_from_before_qualities_has_one_made_of_its_sizes() {
+        // The defaults as the 2026-11-26 manifest has them.
+        let old = r#"{"steps":6,"fixed_steps":true,"cfg":1.0,"fps":24,"frame_step":8,"frames":121,"max_frames":241,"audio":true,
+                      "sizes":{"landscape":[640,384],"portrait":[384,640],"square":[512,512]},
+                      "lengths":[{"frames":49,"label":"2 s"},{"frames":121,"label":"5 s"}]}"#;
+        let m = Manifest::parse(&manifest("pour-14b", "video", old)).unwrap();
+        let q = m.packages[0].qualities();
+        assert_eq!(q.len(), 1);
+        assert_eq!((q[0].id.as_str(), q[0].label.as_str(), q[0].mem_mb), ("draft", "Draft", 19070));
+        assert_eq!(q[0].size("portrait").as_deref(), Some("384x640"));
+        assert!(q[0].has_size("512x512") && !q[0].has_size("512x896"));
+        assert!(q[0].sigmas.is_empty());
+        assert_eq!(m.packages[0].quality_of("640x384").map(|q| q.id), Some("draft".into()));
+    }
+
+    #[test]
+    fn qualities_are_read_from_the_defaults_and_what_cannot_be_used_is_left_out() {
+        let new = r#"{"steps":6,"sizes":{"landscape":[640,384]},"qualities":[
+            {"id":"draft","label":"Draft","sizes":{"landscape":[640,384],"portrait":[384,640]},"mem_mb":19000},
+            {"id":"standard","label":"Standard","sizes":{"landscape":[896,512],"portrait":[512,896],"odd":[500,500]},"mem_mb":21500,
+             "a_field_from_later":true},
+            {"id":"high","label":"High","sizes":{"landscape":[1344,768]},"mem_mb":27000,"sigmas":[1.0,0.99,0.5,0.0]},
+            {"id":"standard","label":"Again","sizes":{"landscape":[896,512]}},
+            {"id":"","label":"Nameless","sizes":{"landscape":[640,384]}},
+            {"id":"huge","label":"Huge","sizes":{"landscape":[2048,1152]}},
+            {"label":"Broken"}]}"#;
+        let m = Manifest::parse(&manifest("pour-14b", "video", new)).unwrap();
+        let q = m.packages[0].qualities();
+        let ids: Vec<&str> = q.iter().map(|q| q.id.as_str()).collect();
+        assert_eq!(ids, ["draft", "standard", "high"]);
+        assert_eq!(q[1].sizes.len(), 2, "a size that is not a multiple of 32 is left out");
+        assert_eq!(q[1].label, "Standard");
+        assert_eq!(q[2].size("landscape").as_deref(), Some("1344x768"));
+        assert_eq!(q[2].sigmas, [1.0, 0.99, 0.5, 0.0]);
+        assert_eq!(m.packages[0].quality_of("512x896").map(|q| q.id), Some("standard".into()));
+        assert_eq!(m.packages[0].quality_of("700x400"), None);
+        // What is read is written back as it was, so the app is shown the manifest as it is.
+        let again: Manifest = serde_json::from_str(&serde_json::to_string(&m).unwrap()).unwrap();
+        assert_eq!(again.packages[0].qualities(), q);
+    }
+
+    #[test]
+    fn a_voice_says_which_languages_it_reads() {
+        let old = Manifest::parse(&manifest("whistle-82m", "voice", r#"{"speakers":53}"#)).unwrap();
+        assert_eq!(old.packages[0].languages(), ["English", "Chinese"]);
+        assert!(old.packages[0].reads("english ") && !old.packages[0].reads("Turkish"));
+        let new = Manifest::parse(&manifest("chime-99m", "voice", r#"{"languages":["English","Turkish",""," German "]}"#)).unwrap();
+        assert_eq!(new.packages[0].languages(), ["English", "Turkish", "German"]);
+        assert!(new.packages[0].reads("turkish") && !new.packages[0].reads("Chinese"));
+        // Other kinds of package read nothing aloud.
+        let video = Manifest::parse(&manifest("pour-14b", "video", "{}")).unwrap();
+        assert!(video.packages[0].languages().is_empty());
+    }
 }
