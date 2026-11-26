@@ -39,7 +39,13 @@
 		back: 'M10 4 6 8l4 4',
 		cast: 'M8 8.2a2.6 2.6 0 1 0 0-5.2 2.6 2.6 0 0 0 0 5.2zM3 13.2c.5-2.4 2.5-3.6 5-3.6s4.5 1.2 5 3.6',
 		speech: 'M2.8 3.5h10.4v6.6H7.6l-2.9 2.6v-2.6H2.8zM5.3 6.8h5.4',
-		bring: 'M8 2.5v7M5.2 6.8 8 9.6l2.8-2.8M3 12.8h10'
+		bring: 'M8 2.5v7M5.2 6.8 8 9.6l2.8-2.8M3 12.8h10',
+		export: 'M8 10V2.8M5.3 5.4 8 2.7l2.7 2.7M3 8.5v4.3h10V8.5',
+		help: 'M8 2.5a5.5 5.5 0 1 0 0 11 5.5 5.5 0 0 0 0-11zM6.3 6.4a1.8 1.8 0 0 1 3.5.5c0 1.2-1.8 1.4-1.8 2.6M8 11.2v.1',
+		clap: 'M2.5 6.5h11v6.5h-11zM2.5 6.5l1-3h10l-1 3M6.5 3.5l-1 3M10 3.5l-1 3',
+		ask: 'M3 3.5h10v7H7.5L4.8 13v-2.5H3zM5.8 7v.1M8 7v.1M10.2 7v.1',
+		trim: 'M6 3H3.5v10H6M10 3h2.5v10H10M8 5.5v5',
+		filmplay: 'M2.5 3.5h11v9h-11zM6.8 6v4l3.4-2z'
 	} as const;
 	export type StudioIconName = keyof typeof filled | keyof typeof drawn;
 </script>
