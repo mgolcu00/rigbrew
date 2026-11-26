@@ -139,7 +139,9 @@
 		</div>
 	{:else}
 		<div class="detail empty">
-			<p class="st-note">No characters. A character has a name and a look that every shot naming them is made with.</p>
+			<StudioIcon name="cast" size={20} />
+			<p>No characters yet. Add one, and every shot that names them looks the same.</p>
+			<button class="st-btn primary" onclick={() => studio.addMember()}><StudioIcon name="plus" size={11} /> Add a character</button>
 		</div>
 	{/if}
 </div>
@@ -225,8 +227,22 @@
 		padding: 9px 10px;
 	}
 
+	/* No characters yet: a line and the button that adds the first. */
 	.detail.empty {
-		align-items: flex-start;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+		gap: 8px;
+		text-align: center;
+		color: var(--st-accent);
+	}
+
+	.detail.empty p {
+		max-width: 36ch;
+		margin: 0;
+		font-size: 12px;
+		line-height: 1.4;
+		color: var(--st-ink);
 	}
 
 	.portrait {

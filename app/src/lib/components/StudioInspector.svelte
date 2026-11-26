@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { tick, untrack } from 'svelte';
 	import { videoLengthsOf, videoSizesOf, type SizeName } from '#lib/chat.svelte.ts';
 	import { bytes as bytesOf } from '#lib/format.ts';
 	import { app } from '#lib/state.svelte.ts';
@@ -114,6 +115,19 @@
 	let idea = $state('');
 	let wanted = $state(6);
 	let narration = $state('');
+	let ideaBox = $state<HTMLTextAreaElement | null>(null);
+
+	// An empty film's Write the shots: the cursor goes into the idea, which is brought into view.
+	let ideaSeen = untrack(() => studio.ideaAsked);
+	$effect(() => {
+		const asked = studio.ideaAsked;
+		if (asked === ideaSeen) return;
+		ideaSeen = asked;
+		tick().then(() => {
+			ideaBox?.scrollIntoView({ block: 'center' });
+			ideaBox?.focus({ preventScroll: true });
+		});
+	});
 
 	async function write(replace: boolean) {
 		if (await studio.write(idea, wanted, replace)) idea = '';
@@ -670,7 +684,7 @@
 		</section>
 		<section class="st-sec">
 			<h3 class="st-h">Write the shots from an idea</h3>
-			<textarea class="st-ta" bind:value={idea} rows="3" placeholder="What is the film about? For example: a red fox finds a paper boat in a snowy forest and follows it down a stream" aria-label="What the film is about" disabled={studio.busy !== ''} onkeydown={(e) => e.stopPropagation()}></textarea>
+			<textarea class="st-ta" bind:this={ideaBox} bind:value={idea} rows="3" placeholder="What is the film about? For example: a red fox finds a paper boat in a snowy forest and follows it down a stream" aria-label="What the film is about" disabled={studio.busy !== ''} onkeydown={(e) => e.stopPropagation()}></textarea>
 			<div class="st-row">
 				<select class="st-in" bind:value={wanted} aria-label="How many shots">{#each [3, 4, 6, 8, 12, 16, 24, 36, 60] as n (n)}<option value={n}>{n} shots</option>{/each}</select>
 				<button class="st-btn" onclick={() => write(false)} disabled={!idea.trim() || studio.busy !== '' || !studio.canWrite}>{studio.busy === 'writing' ? 'Writing…' : doc.shots.length ? 'Add to the film' : 'Write the shots'}</button>

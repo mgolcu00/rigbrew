@@ -238,8 +238,18 @@
 		{:else}
 			<div class="start">
 				{#if !model}
-					<p class="needs">The assistant needs a chat model. <button class="link" onclick={() => app.go('models')}>Add one under Models</button></p>
+					<div class="empty">
+						<StudioIcon name="ask" size={18} />
+						<p>The assistant needs a chat model to understand what you ask.</p>
+						<button class="st-btn primary" onclick={() => app.go('models')}>Add one under Models</button>
+					</div>
 				{:else}
+					<div class="empty">
+						<StudioIcon name="ask" size={18} />
+						<p>Say what to change. The assistant edits the film while you watch.</p>
+						<button class="st-btn primary" onclick={() => input?.focus()}>Ask the assistant</button>
+					</div>
+					<p class="or">Or start from one of these:</p>
 					<ul class="firsts">
 						{#each firstPrompts as idea (idea)}
 							<li><button onclick={() => suggest(idea)}>{idea}</button></li>
@@ -579,7 +589,32 @@
 	.start {
 		display: grid;
 		align-content: end;
+		gap: 8px;
 		min-height: 100%;
+	}
+
+	/* Nothing asked yet: what the assistant is for in a line, and the button that starts. */
+	.empty {
+		display: grid;
+		justify-items: center;
+		gap: 8px;
+		margin: auto 0 14px;
+		text-align: center;
+		color: var(--st-accent);
+	}
+
+	.empty p {
+		max-width: 30ch;
+		margin: 0;
+		font-size: 12px;
+		line-height: 1.4;
+		color: var(--st-ink);
+	}
+
+	.or {
+		margin: 0;
+		font-size: 10.5px;
+		color: var(--st-faint);
 	}
 
 	.firsts {
@@ -603,11 +638,6 @@
 	.firsts button:hover {
 		color: var(--st-ink);
 		box-shadow: inset 0 0 0 1px var(--st-faint);
-	}
-
-	.needs {
-		margin: 0;
-		color: var(--st-muted);
 	}
 
 	/* --- the box to type in --- */
@@ -696,11 +726,6 @@
 
 	textarea::placeholder {
 		color: var(--st-faint);
-	}
-
-	.link {
-		color: var(--st-accent);
-		text-decoration: underline;
 	}
 
 	@keyframes pulse {

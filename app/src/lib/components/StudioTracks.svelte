@@ -67,6 +67,8 @@
 	const rowsEnd = $derived(rows.length ? rows[rows.length - 1].top + rows[rows.length - 1].height : 0);
 	const contentWidth = $derived(Math.max(width, Math.ceil(studio.length * studio.pps + Math.max(240, width * 0.6))));
 	const contentHeight = $derived(Math.max(height, rowsEnd + 60));
+	/** No shot is made and none is being made: the film waits for Make. */
+	const unmade = $derived(studio.shots.length > 0 && studio.shots.every((s) => s.state === 'empty' || s.state === 'failed') ? studio.shots.length : 0);
 	const zoom = (): Zoom => ({ pps: studio.pps, scroll: scrollX });
 
 	// --- what the pointer does ---------------------------------------------------------------------
@@ -1469,7 +1471,22 @@
 			{#if band}<div class="band" style:left="{band.x}px" style:top="{band.y}px" style:width="{band.w}px" style:height="{band.h}px"></div>{/if}
 			<div class="playhead" bind:this={playhead} aria-hidden="true"></div>
 			{#if studio.doc && studio.doc.shots.length === 0}
-				<p class="hint" style:top="{(rows[0]?.height ?? 78) / 2 - 8}px">Double-click here to add a shot, or write the shots from an idea in the Inspector.</p>
+				<div class="empty" style:top="{rowsEnd + 16}px">
+					<StudioIcon name="film" size={20} />
+					<p>No shots yet. Write them from an idea, or add one by hand.</p>
+					<div class="go">
+						<button class="st-btn primary" onclick={() => studio.askIdea()} disabled={!studio.canWrite} use:tag={{ id: 'write-shots', what: studio.canWrite ? 'Describe the film; the shots are written for you.' : 'Needs the chat model and the video model: add them under Models.' }}>Write the shots</button>
+						<button class="st-btn" onclick={() => studio.addShot()} use:tag={'add-shot'}><StudioIcon name="plus" size={11} /> Add a shot</button>
+					</div>
+				</div>
+			{:else if unmade}
+				<div class="empty" style:top="{rowsEnd + 16}px">
+					<StudioIcon name="clap" size={20} />
+					<p>{unmade === 1 ? 'The shot is not made yet.' : `None of the ${unmade} shots is made yet.`} {studio.canMake ? 'Make turns each description into a clip.' : 'Making them needs the video model.'}</p>
+					<div class="go">
+						<button class="st-btn primary" onclick={() => studio.make()} disabled={!studio.canMake || studio.todo === 0} use:tag={{ id: 'make', what: studio.canMake ? 'Makes the shots that are not made yet.' : 'Needs the video model: add it under Models.' }}><StudioIcon name="clap" size={12} /> Make {studio.todo === 1 ? 'the shot' : `${studio.todo} shots`}</button>
+					</div>
+				</div>
 			{/if}
 		</div>
 		<div class="spacer" style:width="{contentWidth}px" style:height="{contentHeight}px" style:margin-top="{-height}px"></div>
@@ -1794,12 +1811,36 @@
 		pointer-events: none;
 	}
 
-	.hint {
+	/* An empty film, or one whose shots are not made: a line and the button for the next step. */
+	.empty {
 		position: absolute;
-		left: 14px;
-		font-size: 11.5px;
-		color: var(--st-faint);
-		pointer-events: none;
+		left: 50%;
+		z-index: 2;
+		width: min(360px, calc(100% - 28px));
+		display: grid;
+		justify-items: center;
+		gap: 8px;
+		padding: 14px 16px;
+		border-radius: 6px;
+		background: rgba(21, 22, 25, 0.92);
+		box-shadow:
+			0 0 0 1px rgba(255, 255, 255, 0.06),
+			0 10px 30px rgba(0, 0, 0, 0.45);
+		transform: translateX(-50%);
+		text-align: center;
+		color: var(--st-accent);
+	}
+
+	.empty p {
+		margin: 0;
+		font-size: 12px;
+		line-height: 1.4;
+		color: var(--st-ink);
+	}
+
+	.empty .go {
+		display: flex;
+		gap: 6px;
 	}
 
 	.tip {

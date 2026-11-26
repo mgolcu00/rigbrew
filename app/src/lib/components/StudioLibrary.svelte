@@ -127,11 +127,11 @@
 				</div>
 			{/each}
 		{:else}
-			<div class="tools col">
+			<div class="tools col" class:gone={api.isTauri && studio.sounds.length === 0}>
 				{#if api.isTauri}
 					<div class="st-row">
-						<button class="st-btn" onclick={addFile} disabled={studio.busy !== ''}><StudioIcon name="plus" size={12} /> Sound file</button>
-						<button class="st-btn" onclick={addFolder} disabled={studio.busy !== ''}><StudioIcon name="folder" size={12} /> Folder</button>
+						<button class="st-btn" onclick={addFile} disabled={studio.busy !== ''} use:tag={'add-sound'}><StudioIcon name="plus" size={12} /> Sound file</button>
+						<button class="st-btn" onclick={addFolder} disabled={studio.busy !== ''} use:tag={'add-folder'}><StudioIcon name="folder" size={12} /> Folder</button>
 					</div>
 				{:else}
 					<div class="st-row">
@@ -141,7 +141,14 @@
 				{/if}
 			</div>
 			{#if studio.sounds.length === 0}
-				<p class="st-note pad">No sound files yet.</p>
+				<div class="empty">
+					<StudioIcon name="wave" size={20} />
+					<p>No sounds yet. Add music or effects, then drag them onto a track.</p>
+					{#if api.isTauri}
+						<button class="st-btn primary" onclick={addFile} disabled={studio.busy !== ''}><StudioIcon name="plus" size={12} /> Add a sound file</button>
+						<button class="st-btn quiet" onclick={addFolder} disabled={studio.busy !== ''} use:tag={'add-folder'}><StudioIcon name="folder" size={12} /> Or a folder of them</button>
+					{/if}
+				</div>
 			{/if}
 			<ul>
 				{#each studio.sounds as snd (snd.file)}
@@ -201,6 +208,28 @@
 	.tools.col {
 		flex-direction: column;
 		align-items: stretch;
+	}
+
+	.tools.gone {
+		display: none;
+	}
+
+	/* No sounds yet: a line and the button that adds the first. */
+	.empty {
+		display: grid;
+		justify-items: center;
+		gap: 8px;
+		padding: 22px 12px;
+		text-align: center;
+		color: var(--st-accent);
+	}
+
+	.empty p {
+		max-width: 24ch;
+		margin: 0;
+		font-size: 11.5px;
+		line-height: 1.4;
+		color: var(--st-ink);
 	}
 
 	ul {
