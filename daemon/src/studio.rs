@@ -32,6 +32,9 @@
 //!                                               file under all of it; {"scale"?, "quality"?, "name"?} instead of
 //!                                               the film's own)
 //!   POST   /v1/studio/projects/{id}/reveal      show the exported file in the system's file manager
+//!   POST   /v1/studio/projects/{id}/media       an address the app's <video> plays the exported film (or a clip)
+//!                                               from, see `studio/play.rs`; the film's answer says in `film`
+//!                                               whether the export holds the film as it is now
 //!   GET    /v1/studio/projects/{id}/export      where the export is: {"state", "file", "error"}
 //!   GET    /v1/studio/projects/{id}/sound?file=  a sound file of the film, to play in the app (up to 200 MB)
 //!   GET    /v1/studio/projects/{id}/sounds      the sound files in the film's folder and the ones added to it
@@ -89,6 +92,7 @@ mod direct;
 mod dub;
 mod export;
 mod pace;
+mod play;
 mod sound;
 mod words;
 
@@ -780,6 +784,7 @@ fn view(app: &App, mut p: Project) -> Value {
     let seconds: f32 = p.shots.iter().map(Shot::length).sum();
     let continues = can_continue(app);
     let export = export_of(&p.id);
+    let film = play::film(&p);
     let mine = now.as_ref().filter(|(pid, _, _)| *pid == p.id).map(|(_, sid, _)| (sid.as_str(), elapsed.unwrap_or(0.0)));
     let (all, left) = time_left(&p, &paces_for(app, &p), &waiting, mine);
     // The shots that were taken out are the service's own business.
@@ -811,7 +816,7 @@ fn view(app: &App, mut p: Project) -> Value {
     let installed = |modality: Modality| installed_one(app, modality).is_ok();
     let jobs = json!({"import": job_of(&p.id, "import"), "dub": job_of(&p.id, "dub"), "listen": job_of(&p.id, "listen")});
     json!({"project": p, "progress": progress, "rendering": mine.is_some() || !waiting.is_empty(), "made": made, "seconds": seconds,
-           "can_continue": continues, "export": export, "estimate": {"all": all, "left": left},
+           "can_continue": continues, "export": export, "film": film, "estimate": {"all": all, "left": left},
            "cast_in": appears, "cues": cues, "language": dub::shown_language(&p), "own_language": dub::own_language(&p),
            "languages": languages, "spoken": dub::SPOKEN, "can_listen": dub::can_listen(app), "voices": dub::voices(app), "jobs": jobs,
            "has": {"video": installed(Modality::Video), "chat": installed(Modality::Chat), "voice": installed(Modality::Voice),
@@ -2258,6 +2263,8 @@ async fn begin_export(app: &Shared, p: Project, body: Export) -> Result<usize, (
             s.made_frames = frames;
         }
     }
+    // The film as it is saved now is what the file holds: an edit after this makes it out of date.
+    let edited = load(app, &id).map_or(p.updated_ms, |now| now.updated_ms);
     let shots = exported(&p);
     let count = shots.len();
     let clips: Vec<PathBuf> = shots.iter().map(|s| clip_path(&p, &s.id)).collect();
@@ -2452,7 +2459,7 @@ async fn begin_export(app: &Shared, p: Project, body: Export) -> Result<usize, (
                 set_export(
                     &id,
                     json!({"state": "done", "file": out.to_string_lossy(), "bytes": bytes, "shots": count, "seconds": graph.frames as f32 / 24.0,
-                           "subtitles": subtitles}),
+                           "subtitles": subtitles, "edited_ms": edited}),
                 );
             }
             Err(e) => {
@@ -2645,6 +2652,7 @@ pub fn router() -> Router<Shared> {
         .route("/v1/studio/projects/{id}/shots/{shot}/take", post(use_take))
         .route("/v1/studio/projects/{id}/shots/{shot}/takes/{n}", axum::routing::delete(delete_take))
         .route("/v1/studio/projects/{id}/clips/{name}", get(clip))
+        .route("/v1/studio/projects/{id}/media", post(play::media))
         .route("/v1/studio/brief", post(direct::brief))
         .route("/v1/studio/projects/{id}/import", get(bring::state).post(bring::import))
         .route("/v1/studio/projects/{id}/cast/look", post(direct::look))

@@ -33,6 +33,7 @@
 //!   GET    /v1/agents                     agents the person made; PUT {agents: [...]} replaces the list; DELETE removes them all
 //!   GET    /v1/agents/{id}                one agent; PUT {name, instruction, tools, starter} saves it; DELETE removes it
 //!   GET    /v1/artifacts/frame            the empty, locked-down page a chat artifact is shown in (no token: it holds nothing)
+//!   GET    /v1/media?token=               a file the service made, for a <video> (a token for one file instead of the bearer, see `media.rs`)
 //!   GET    /v1/images/files/{id}.png      a generated picture (saved by /v1/images/generations); DELETE removes it
 //!   POST   /v1/sync                       send queued events now
 //!   GET    /v1/app/config                 server's app config (updates, sponsors), cached for offline
@@ -73,6 +74,7 @@ mod cloud;
 mod community;
 mod connectors;
 mod library;
+mod media;
 mod playable;
 mod speech;
 mod studio;
@@ -1405,6 +1407,8 @@ async fn main() {
         .layer(middleware::from_fn_with_state(app.clone(), auth))
         // Added after the token check, so it needs none: a frame cannot send one, and the page is the same for everyone.
         .route("/v1/artifacts/frame", get(agents::artifact_frame))
+        // Nor can a <video>: this one takes a short-lived token for one file in its address (see `media.rs`).
+        .route("/v1/media", get(media::get))
         // The app's webview is a different origin. Only the app's own origins may call the API;
         // the bearer token is still required. Preflight requests carry no token and pass here.
         .layer(

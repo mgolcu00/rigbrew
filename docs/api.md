@@ -8,7 +8,7 @@ existing clients work against your own machine.
 
 `rigbrewd` listens on `127.0.0.1` only, on a random port, and writes the port and a random token to
 `daemon.json` in the data folder (`~/Library/Application Support/Rigbrew` on macOS) with mode `0600`.
-Every request needs `Authorization: Bearer <token>` (all but `/v1/artifacts/frame`, see below).
+Every request needs `Authorization: Bearer <token>` (all but `/v1/artifacts/frame` and `/v1/media`, see below).
 
 ```sh
 D="$HOME/Library/Application Support/Rigbrew/daemon.json"
@@ -53,6 +53,7 @@ Browsers are refused unless the request comes from the app's own origin.
 | `POST /v1/studio/projects/{id}/narration` | `{text, at?, track?}`: the installed voice package reads it; the WAV is saved in the film's folder (`narration.wav`, `narration 2.wav`, ...) and becomes one region at `at` seconds on the track `track`, or on the track named "Narration", which is made when there is none. Answers with the film and `region: {track, id, seconds}`. |
 | `POST/GET /v1/studio/projects/{id}/export` | Join the made shots, with their trims, joins and volumes, and mix the sound tracks into them, into `<folder>/<name>.mp4` (H.264 and AAC, 24 frames per second). A film of plain cuts without tracks is joined as a list; dissolves, fades, volumes and tracks go through a filter graph: every region at its place, repeated, faded, at its gain and side, with muted tracks left out and soloed ones alone, the master volume last and the peaks held under full level. The film is as long as its pictures; sound after them is cut. A sound file that is gone stops the export with a message that names it. The film's `export: {scale, quality, name}` (saved through PUT, or given in the POST for one export) says how the file is written: `scale` 2 enlarges the picture to twice its width and height with Lanczos (no detail is added), `quality` is `small`, `balanced` or `best` (3.4, 7.9 or 15.7 Mbit/s at 640x384), `name` is the file's name without its ending. `{music, music_volume}` in the POST lays one more sound file under the whole film for that export. The answer of a finished export has `file`, `bytes` and `seconds`. GET says where the export is: `{state: none, working, done or failed, file, error}`. |
 | `POST /v1/studio/projects/{id}/reveal` | Show the exported file in the system's file manager (the film's folder when there is no file yet). |
+| `POST /v1/studio/projects/{id}/media` | `{}` for the exported film, `{shot, take?}` for a clip (its playable copy): a short-lived address the app's `<video>` plays it from, `{url: "/v1/media?token=…", type, bytes}`. `404` before the first export. The film's answer carries `film: {file, bytes, modified_ms, current}` (null before the first export): `current` is true when no edit came after what the file was made from. See [Playing the whole film](#playing-the-whole-film). |
 | `GET /v1/studio/projects/{id}/sound?file=` | A sound file of the film, so the app can play it: one in the film's folder, one added to its library, or one a region plays (up to 200 MB). Nothing else is read. |
 | `GET/POST/DELETE /v1/studio/projects/{id}/sounds` | The film's library of sounds: `{sounds: [{file, name, bytes, from: folder, added or used, missing}]}`, the sound files in its folder and one folder down, and the ones added from elsewhere. `POST {path}` adds a file, or every sound file directly in a folder; `DELETE ?file=` takes an added one out of the list (the file stays). |
 | `GET /v1/studio/projects/{id}/peaks?shot=` or `?file=` | The small picture of a sound for the timeline: `{rate: 50, seconds, peaks: [low, high, low, high, ...]}`, the lowest and highest value of every fiftieth of a second, each from -127 to 127, of the clip of a shot (the take in use) or of a sound file of the film. Read once with FFmpeg and kept next to the clips as `.peaks.json`. A clip without sound has no peaks. |
@@ -86,7 +87,8 @@ Browsers are refused unless the request comes from the app's own origin.
 | `GET/DELETE /v1/chats`, `GET/PUT/DELETE /v1/chats/{id}` | Saved conversations. `PUT {title, title_by, data}`; `data` is the app's own JSON, 8 MB at most. `title_by` says who wrote the title (`words`, `model` or `person`); left out, the chat keeps what it has. See [Titles](#titles). |
 | `POST /v1/title` | `{"text", "answer", "model", "load"}`: a name for a conversation that began with `text`. Answers `{"title", "by"}`; see [Titles](#titles). |
 | `GET/PUT/DELETE /v1/agents`, `GET/PUT/DELETE /v1/agents/{id}` | Agents the person made, kept in `agents.json` in the data folder. `PUT /v1/agents/{id}` takes `{name, instruction, tools, starter, connectors, skills}`: a name of at most 60 characters, an instruction of at most 4000, `tools` from `generate_image`, `read_aloud` and `generate_video`, an optional first message of at most 300, `connectors` (may it use connectors; off when left out) and `skills` (up to 12 names of skills pinned to it). The id is 1 to 40 of `a-z`, `0-9` and `-`. `PUT /v1/agents` takes `{agents: [...]}` and replaces the list. |
-| `GET /v1/artifacts/frame` | The empty page the app shows a chat artifact in. It allows inline styles and scripts and nothing from anywhere else, holds no data, and is the one address that needs no token. |
+| `GET /v1/artifacts/frame` | The empty page the app shows a chat artifact in. It allows inline styles and scripts and nothing from anywhere else, holds no data, and needs no token. |
+| `GET /v1/media?token=` | A file the service made, for the app's own `<video>`, which cannot send the bearer token: the token in the address is for one file. See [Playing the whole film](#playing-the-whole-film). |
 | `GET /v1/usage` | Totals for today, the last 7 days and all time, disk used per package, and what is waiting to be sent. |
 | `GET /v1/activity?days=365`, `GET /v1/activity/recent` | Day-by-day activity and a readable list of recent actions (the profile page). |
 | `GET/POST/DELETE /v1/consent` | The consent state; accept the current version; withdraw. |
@@ -123,6 +125,20 @@ removes its copy; forgetting a film removes the copies in its `clips/` folder an
 
 On Windows the webview is Chromium and on Linux WebKitGTK plays through GStreamer (`matroskademux`, `vp8dec`, raw
 PCM); both play the WebM as it is, and no copy is made there.
+
+### Playing the whole film
+
+An exported film is a file of 100 MB and more, and a `<video src>` cannot send the bearer token. So the app asks
+`POST /v1/studio/projects/{id}/media` for an address, and its `<video>` plays `GET /v1/media?token=…` by itself:
+the service answers `Range` requests (`206` with `Content-Range`, `Accept-Ranges: bytes`, `416` past the end), so
+the film starts at once and is never read into memory as one piece. Clips stay small and are fetched with the token
+as before, through object URLs, so Web Audio can mix their sound.
+
+A token is two random UUIDs (64 hex digits), for one file the service resolved itself (a film's export, a clip or its playable
+copy), never for a path the app sends. It goes after 20 minutes without a request, or after 12 hours; the app asks
+for a new one each time the player opens, and once more when an address stops answering. `/v1/media` answers only
+when it is asked for by `127.0.0.1`, `localhost` or `[::1]`, so a page that points a name of its own at this
+machine gets `403`. The app's content security policy lets media load from `http://127.0.0.1:*` and nowhere else.
 
 ## Titles
 

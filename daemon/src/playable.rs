@@ -176,6 +176,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(unix)]
     fn a_clip_has_its_copy_next_to_it() {
         assert_eq!(copy_of(Path::new("/f/clips/a1.2.webm")), Some(PathBuf::from("/f/clips/a1.2.play.mp4")));
         assert_eq!(copy_of(Path::new("/d/videos/0123abcd.webm")), Some(PathBuf::from("/d/videos/0123abcd.play.mp4")));
@@ -187,6 +188,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn the_copy_is_h264_and_aac_with_its_index_first() {
         let line: Vec<String> = args(Path::new("/f/clips/a1.1.webm"), Path::new("/f/clips/.a1.1.play.mp4.tmp"))
             .iter()
