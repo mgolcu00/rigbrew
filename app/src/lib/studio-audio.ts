@@ -1,7 +1,9 @@
 // The sound of the Studio workstation: every sound region through its own gain into the strip
 // of its track, every strip (volume, mute, solo, pan as balance) into the master, and meters on
-// all of them. The shots' own sound comes in from the viewer's video elements as one more strip.
-// It is also the clock the film plays by.
+// all of them. The shots' own sound is read from their clips and played the same way, each shot
+// through a level the viewer sets (its volume, its fades, the ducking), on one more strip. The
+// video elements are silent: a media element routed into the mixer makes WebKit show its
+// pictures in fits and starts. It is also the clock the film plays by.
 
 import { balance, fadeLevel, regionSpan } from './studio-edit.ts';
 
@@ -23,7 +25,12 @@ export interface PlayRegion {
 	gain: number;
 	fade_in: number;
 	fade_out: number;
+	/** A shot's own sound: the shot whose level (see `level`) it is heard through. */
+	shot?: string;
 }
+
+/** How many shots' sounds are kept read: a long film has many, and each is some megabytes. */
+const KEPT_CLIPS = 16;
 
 interface Strip {
 	input: GainNode;
@@ -46,7 +53,10 @@ export class StudioAudio {
 	#buffers = new Map<string, Promise<AudioBuffer | null>>();
 	#ready = new Map<string, AudioBuffer>();
 	#live: { src: AudioBufferSourceNode; gain: GainNode }[] = [];
-	#elements = new WeakMap<HTMLMediaElement, GainNode>();
+	/** The level of each shot's own sound, set by the viewer, and the value it was last set to. */
+	#levels = new Map<string, { node: GainNode; value: number }>();
+	/** What the clock plays now: a sound that is read late joins in if it is among them. */
+	#wanted: PlayRegion[] = [];
 	#scratch = new Float32Array(1024);
 	#preview: AudioBufferSourceNode | null = null;
 	/** Changes with every start and stop, so a file that is ready late knows whether it is still wanted. */
@@ -134,16 +144,25 @@ export class StudioAudio {
 		for (const [id, strip] of this.#strips) if (!this.#mix.some((s) => s.id === id)) strip.input.gain.setTargetAtTime(0, now, 0.012);
 	}
 
-	/** The gain a video element is heard through, into the strip of the shots' sound. */
-	element(el: HTMLMediaElement): GainNode {
-		let gain = this.#elements.get(el);
-		if (gain) return gain;
-		const ctx = this.ensure();
-		gain = ctx.createGain();
-		ctx.createMediaElementSource(el).connect(gain);
-		gain.connect(this.#strip(SHOTS).input);
-		this.#elements.set(el, gain);
-		return gain;
+	/** The level a shot's own sound is heard at: its volume, its fade and the ducking, from the viewer. */
+	level(shot: string, value: number) {
+		if (!this.ctx) return;
+		const have = this.#levels.get(shot);
+		if (have && Math.abs(have.value - value) < 0.0005) return;
+		const node = have?.node ?? this.#level(shot);
+		node.gain.setTargetAtTime(value, this.ctx.currentTime, 0.006);
+		this.#levels.set(shot, { node, value });
+	}
+
+	#level(shot: string): GainNode {
+		let have = this.#levels.get(shot);
+		if (!have) {
+			const node = this.ensure().createGain();
+			node.connect(this.#strip(SHOTS).input);
+			have = { node, value: 1 };
+			this.#levels.set(shot, have);
+		}
+		return have.node;
 	}
 
 	/** Reads a sound file once and keeps it decoded. `null` when it cannot be read or played. */
@@ -158,8 +177,18 @@ export class StudioAudio {
 				})
 				.catch(() => null);
 			this.#buffers.set(file, buffer);
+			// Asked for while the film plays: it joins in where it is wanted.
+			const run = this.#run;
+			for (const r of this.#wanted) if (r.file === file) buffer.then((late) => late && run === this.#run && this.running && this.#play(r, late));
+			if (file.startsWith('clip:')) this.#keep(file);
 		}
 		return buffer;
+	}
+
+	/** Only the clips' sounds read last are kept. */
+	#keep(file: string) {
+		const clips = [...this.#buffers.keys()].filter((k) => k.startsWith('clip:') && k !== file);
+		for (const old of clips.slice(0, Math.max(0, clips.length - KEPT_CLIPS + 1))) this.forget(old);
 	}
 
 	/** Whether a file was asked for and could not be read. */
@@ -173,20 +202,54 @@ export class StudioAudio {
 		this.#ready.delete(file);
 	}
 
-	/** Starts the clock at a moment of the film and every region that is still to be heard from there. */
-	start(at: number, regions: PlayRegion[]) {
+	/**
+	 * The context's moment that is heard at a moment of `performance.now()`: what the speakers play
+	 * then, which is later than what the context works on by the output's latency.
+	 */
+	#heard(perf: number): number {
+		const ctx = this.ctx!;
+		const stamp = ctx.getOutputTimestamp?.();
+		if (stamp?.performanceTime && stamp.contextTime !== undefined) return stamp.contextTime + (perf - stamp.performanceTime) / 1000;
+		const late = (ctx.baseLatency ?? 0) + ((ctx as AudioContext & { outputLatency?: number }).outputLatency ?? 0);
+		return ctx.currentTime - late + (perf - performance.now()) / 1000;
+	}
+
+	/** The moment of the film that is heard at a moment of `performance.now()`. */
+	heardAt(perf: number): number {
+		if (!this.running || !this.ctx) return this.#from;
+		return this.#from + Math.max(0, this.#heard(perf) - this.#since);
+	}
+
+	/**
+	 * Starts the clock at a moment of the film and every region that is still to be heard from
+	 * there. With `shownAt` (a moment of `performance.now()`) the film's moment `at` is heard
+	 * then: the sound joins pictures that are already on the screen.
+	 */
+	start(at: number, regions: PlayRegion[], shownAt?: number) {
 		const ctx = this.ensure();
 		this.#silence();
 		const run = ++this.#run;
 		this.#from = at;
-		this.#since = ctx.currentTime + 0.05;
+		this.#since = shownAt === undefined ? ctx.currentTime + 0.05 : this.#heard(shownAt);
 		this.running = true;
+		this.#schedule(regions, run);
+	}
+
+	#schedule(regions: PlayRegion[], run: number) {
+		this.#wanted = regions;
 		for (const r of regions) {
 			const buffer = this.#ready.get(r.file);
 			if (buffer) this.#play(r, buffer);
 			// A file that is still being read joins in when it is there.
 			else this.#buffers.get(r.file)?.then((late) => late && run === this.#run && this.running && this.#play(r, late));
 		}
+	}
+
+	/** The regions changed while the clock runs: they are set again from now, on the same clock. */
+	reschedule(regions: PlayRegion[]) {
+		if (!this.running || !this.ctx) return;
+		this.#silence();
+		this.#schedule(regions, ++this.#run);
 	}
 
 	#play(r: PlayRegion, buffer: AudioBuffer) {
@@ -209,7 +272,7 @@ export class StudioAudio {
 			level.linearRampToValueAtTime(0, when(span));
 		}
 		src.connect(gain);
-		gain.connect(this.#strip(r.track).input);
+		gain.connect(r.shot ? this.#level(r.shot) : this.#strip(r.track).input);
 		if (r.loops > 1) {
 			src.loop = true;
 			src.loopStart = r.offset;
@@ -244,6 +307,12 @@ export class StudioAudio {
 		this.running = false;
 		this.#run++;
 		this.#silence();
+	}
+
+	/** Stops the clock at a moment of the film: nothing is heard until it is started again. */
+	hold(at: number) {
+		this.stop();
+		this.#from = at;
 	}
 
 	/** The moment of the film the clock is at. */
@@ -304,6 +373,7 @@ export class StudioAudio {
 		this.ctx?.close().catch(() => {});
 		this.ctx = null;
 		this.#strips.clear();
+		this.#levels.clear();
 		this.#buffers.clear();
 		this.#ready.clear();
 	}

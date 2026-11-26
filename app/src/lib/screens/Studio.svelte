@@ -64,9 +64,10 @@
 		void studio.view?.export?.state;
 		untrack(() => studio.noticeExport());
 	});
-	// Regions that change while the film plays are set again from where the playhead is.
+	// Regions or shots that change while the film plays are set again from where the playhead is.
 	$effect(() => {
 		void JSON.stringify(studio.doc?.tracks.map((t) => [t.id, t.regions]));
+		void studio.plan;
 		untrack(() => studio.replay());
 	});
 

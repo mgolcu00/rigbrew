@@ -142,8 +142,17 @@ class Studio {
 	time = 0;
 	/** Changes when the playhead jumps while the film stands still, for what shows the moment in words. */
 	jumps = $state(0);
+	/**
+	 * While the film starts (Play, or a jump while it plays) the pictures start first and the sound
+	 * joins when the first of them is on the screen: see `soundFrom`. Not reactive.
+	 */
+	starting = false;
+	#startedAt = 0;
+	/** Counts the starts and jumps of the playing film: the one time a playing picture is sought. Not reactive. */
+	leaps = 0;
 	#listeners = new Set<(time: number) => void>();
 	#frame = 0;
+	#lastFrame = 0;
 	#beat: ReturnType<typeof setInterval> | undefined;
 	audio = new StudioAudio();
 
@@ -172,7 +181,7 @@ class Studio {
 	#asked = new Set<string>();
 	#queue: (() => Promise<void>)[] = [];
 	#working = 0;
-	#clips = new Map<string, Promise<string | null>>();
+	#clips = new Map<string, Promise<{ url: string; blob: Blob } | null>>();
 
 	// --- undo -------------------------------------------------------------------------------------
 	#histories = new Map<string, History<Doc>>();
@@ -1498,22 +1507,31 @@ class Studio {
 
 	/** The clip of a shot as something a video element plays. The last few are kept: a long film has many. */
 	clipOf(shot: string, take?: number): Promise<string | null> {
+		return this.#clip(shot, take).then((clip) => clip?.url ?? null);
+	}
+
+	/** The clip's bytes, as they play here: its own sound is read from them. A blob address cannot be fetched in the app's webview. */
+	clipBytes(shot: string): Promise<ArrayBuffer | null> {
+		return this.#clip(shot).then((clip) => clip?.blob.arrayBuffer() ?? null);
+	}
+
+	#clip(shot: string, take?: number): Promise<{ url: string; blob: Blob } | null> {
 		const s = this.shot(shot);
 		if (!s) return Promise.resolve(null);
 		const key = `${this.id}:${shot}:${take ?? s.take ?? 0}:${take ? 0 : (s.seconds ?? 0)}`;
-		let url = this.#clips.get(key);
+		let clip = this.#clips.get(key);
 		this.#clips.delete(key);
-		url ??= api
+		clip ??= api
 			.studioClip(this.id, shot, take)
-			.then((blob) => URL.createObjectURL(blob))
+			.then((blob) => ({ url: URL.createObjectURL(blob), blob }))
 			.catch(() => null);
-		this.#clips.set(key, url);
+		this.#clips.set(key, clip);
 		if (this.#clips.size > 14) {
 			const [oldest, old] = this.#clips.entries().next().value!;
 			this.#clips.delete(oldest);
-			old.then((u) => u && URL.revokeObjectURL(u));
+			old.then((c) => c && URL.revokeObjectURL(c.url));
 		}
-		return url;
+		return clip;
 	}
 
 	// --- the transport ----------------------------------------------------------------------------
@@ -1533,8 +1551,30 @@ class Studio {
 		return this.plan.total > 0 ? this.plan.total : this.length;
 	}
 
+	/** What the clock plays: every sound region, and the own sound of every made shot at its place. */
 	#regions(): PlayRegion[] {
-		return (this.doc?.tracks ?? []).flatMap((t) => t.regions.map((r) => ({ ...r, track: t.id })));
+		const regions: PlayRegion[] = (this.doc?.tracks ?? []).flatMap((t) => t.regions.map((r) => ({ ...r, track: t.id })));
+		for (const p of this.plan.parts) {
+			const s = this.shots[p.index];
+			if (p.made && s) regions.push({ track: SHOTS, shot: p.shot, file: this.soundKey(s), start: p.start, offset: p.from, length: p.length, loops: 1, gain: 1, fade_in: 0, fade_out: 0 });
+		}
+		return regions;
+	}
+
+	/** The name a shot's own sound is kept under: its clip as it is now. */
+	soundKey(s: StudioShot) {
+		return `clip:${this.id}:${s.id}:${s.take ?? 0}:${s.seconds ?? 0}`;
+	}
+
+	/** Reads a shot's own sound from its playable clip, once: the viewer asks for the shots around the playhead. */
+	shotSound(shot: string) {
+		const s = this.shot(shot);
+		if (!s || !hasClip(s)) return;
+		this.audio.load(this.soundKey(s), async () => {
+			const bytes = await this.clipBytes(shot);
+			if (!bytes) throw new Error('no clip');
+			return bytes;
+		});
 	}
 
 	/** The mix as it is now, to the sound engine. */
@@ -1546,15 +1586,40 @@ class Studio {
 		);
 	}
 
-	/** The regions changed while the film plays: they are set again from where the playhead is. */
+	/** The regions changed while the film plays: they are set again from where the playhead is, on the same clock. */
 	replay() {
-		if (this.playing) this.audio.start(this.time, this.#regions());
+		if (this.playing && !this.starting) this.audio.reschedule(this.#regions());
 	}
 
 	seek(seconds: number) {
-		this.time = Math.min(Math.max(0, seconds), Math.max(this.length, this.end));
-		if (this.playing) this.audio.start(this.time, this.#regions());
-		else this.jumps++;
+		const to = Math.min(Math.max(0, seconds), Math.max(this.length, this.end));
+		if (this.playing) this.#begin(to);
+		else {
+			this.time = to;
+			this.jumps++;
+		}
+		this.#tell();
+	}
+
+	/** The playing film starts at a moment, or jumps there: the pictures first, and the sound when they show. */
+	#begin(at: number) {
+		this.time = at;
+		this.audio.hold(at);
+		this.starting = true;
+		this.#startedAt = performance.now();
+		this.leaps++;
+	}
+
+	/**
+	 * The viewer shows the first picture from the film's moment `at` at `shownAt` (a moment of
+	 * performance.now()): the sound starts there with it. Without `shownAt` there is no picture
+	 * to wait for, and the sound starts at once.
+	 */
+	soundFrom(at: number, shownAt?: number) {
+		if (!this.playing || !this.starting) return;
+		this.starting = false;
+		this.audio.start(at, this.#regions(), shownAt);
+		this.time = this.audio.time();
 		this.#tell();
 	}
 
@@ -1570,9 +1635,9 @@ class Studio {
 		if (cycling && (this.time < this.cycle.from || this.time >= this.cycle.to - 0.02)) this.time = this.cycle.from;
 		else if (this.time >= this.end - 0.02) this.time = 0;
 		this.playing = true;
-		this.audio.start(this.time, this.#regions());
-		// Pictures are not drawn while the window is hidden; a slow beat keeps the film going.
-		this.#beat = setInterval(() => this.#advance(), 200);
+		this.#begin(this.time);
+		// Pictures are not drawn while the window is hidden; a slow beat keeps the film going then.
+		this.#beat = setInterval(() => performance.now() - this.#lastFrame > 250 && this.#advance(), 200);
 		this.#frame = requestAnimationFrame(this.#run);
 		app.track('studio_played', { shots: this.exportPlan.parts.length, tracks: this.doc.tracks.length });
 	}
@@ -1580,7 +1645,8 @@ class Studio {
 	pause() {
 		if (!this.playing) return;
 		this.playing = false;
-		this.time = this.audio.time();
+		if (!this.starting) this.time = this.audio.time();
+		this.starting = false;
 		this.audio.stop();
 		cancelAnimationFrame(this.#frame);
 		clearInterval(this.#beat);
@@ -1599,15 +1665,22 @@ class Studio {
 		else this.seek(this.cycle.on ? this.cycle.from : 0);
 	}
 
-	#run = () => {
+	#run = (now: number) => {
 		if (!this.playing) return;
+		this.#lastFrame = now;
 		this.#advance();
 		if (this.playing) this.#frame = requestAnimationFrame(this.#run);
 	};
 
 	#advance() {
 		if (!this.playing) return;
-		let t = this.audio.time();
+		// No picture came to start the sound with (a clip still on its way): it starts by itself.
+		if (this.starting && performance.now() - this.#startedAt > 600) this.soundFrom(this.time);
+		if (this.starting) {
+			this.#tell();
+			return;
+		}
+		const t = this.audio.time();
 		const cycling = this.cycle.on && this.cycle.to > this.cycle.from;
 		const end = cycling ? Math.min(this.cycle.to, this.end) : this.end;
 		if (t >= end) {
@@ -1618,11 +1691,8 @@ class Studio {
 				this.#tell();
 				return;
 			}
-			t = this.cycle.from;
-			this.time = t;
-			this.audio.start(t, this.#regions());
-		}
-		this.time = t;
+			this.#begin(this.cycle.from);
+		} else this.time = t;
 		this.#tell();
 	}
 
