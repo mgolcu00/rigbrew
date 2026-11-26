@@ -13,6 +13,7 @@
 
 	let wrap = $state<HTMLDivElement | null>(null);
 	let canvas = $state<HTMLCanvasElement | null>(null);
+	let line = $state<HTMLDivElement | null>(null);
 	let width = $state(0);
 	let height = $state(0);
 	let fonts = { text: 'sans-serif', data: 'monospace' };
@@ -252,14 +253,6 @@
 			g.fillRect(b, y, x1 - b, h);
 			handle(g, a, y, h, true);
 			handle(g, b, y, h, false);
-			// The playhead, when it is inside this shot.
-			if (part) {
-				const into = studio.time - part.start;
-				if (into >= 0 && into <= part.length) {
-					g.fillStyle = LOOK.playhead;
-					g.fillRect(Math.round(xOf(part.from + into)), TOP, 1, height - TOP);
-				}
-			}
 		} else if (shot) {
 			g.font = `500 12px ${fonts.text}`;
 			g.fillStyle = LOOK.faint;
@@ -338,12 +331,30 @@
 			}
 			handle(g, a, y, h, true);
 			handle(g, b, y, h, false);
-			const into = studio.time - r.start;
-			if (into >= 0 && into <= regionSpan(r)) {
-				g.fillStyle = LOOK.playhead;
-				g.fillRect(Math.round(xOf(r.offset + (into % r.length))), TOP, 1, height - TOP);
-			}
 		}
+		place();
+	}
+
+	/** Where the playhead is on what the Editor shows, when it is inside it. */
+	function playX(): number | null {
+		if (shot && hasClip(shot) && part) {
+			const into = studio.time - part.start;
+			return into >= 0 && into <= part.length ? xOf(part.from + into) : null;
+		}
+		if (!shot && found) {
+			const r = found.region;
+			const into = studio.time - r.start;
+			return into >= 0 && into <= regionSpan(r) ? xOf(r.offset + (into % r.length)) : null;
+		}
+		return null;
+	}
+
+	/** The playhead is a line of its own over the canvas: while the film plays only it moves, and nothing is drawn again. */
+	function place() {
+		if (!line) return;
+		const x = playX();
+		line.style.visibility = x === null || x < 0 || x > width ? 'hidden' : 'visible';
+		if (x !== null) line.style.transform = `translateX(${Math.round(x)}px)`;
 	}
 
 	$effect(() => {
@@ -355,7 +366,7 @@
 		void span;
 		draw();
 	});
-	const stopFrames = studio.onFrame(() => (shot || found) && draw());
+	const stopFrames = studio.onFrame(() => (shot || found) && place());
 
 	// --- handles --------------------------------------------------------------------------------------
 
@@ -503,6 +514,7 @@
 	</div>
 	<div class="stage" bind:this={wrap} onwheel={wheel}>
 		<canvas bind:this={canvas} style:width="{width}px" style:height="{height}px" onpointerdown={down} onpointermove={move} onpointerup={up} onpointercancel={up} aria-label="The selected shot or region, enlarged"></canvas>
+		<div class="eplay" bind:this={line} style:top="{TOP}px" style:height="{Math.max(0, height - TOP)}px" aria-hidden="true"></div>
 	</div>
 </div>
 
@@ -584,9 +596,20 @@
 	}
 
 	.stage {
+		position: relative;
 		flex: 1 1 0;
 		min-height: 0;
 		overflow: hidden;
+	}
+
+	.eplay {
+		position: absolute;
+		left: 0;
+		width: 1px;
+		background: var(--st-playhead);
+		pointer-events: none;
+		visibility: hidden;
+		will-change: transform;
 	}
 
 	canvas {

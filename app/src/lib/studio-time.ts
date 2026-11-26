@@ -124,19 +124,20 @@ export function snapTime(seconds: number, marks: readonly number[], pps: number,
 	return best === null ? { time: Math.max(0, snapFrame(seconds)), mark: null } : { time: best, mark: best };
 }
 
-/** Where in the window the playhead is held while the film plays: a little past the middle. */
-export const FOLLOW_AT = 0.62;
+/** Past this share of the window's width, the window turns a page while the film plays. */
+export const PAGE_AT = 0.92;
+/** Where the playhead is after a page is turned: near the left edge. */
+const PAGE_FROM = 0.08;
 
 /**
- * How far to scroll so a moment stays in view while it moves: nothing while it is in the left
- * part of the window; past `FOLLOW_AT` of its width the window moves with it, so the playhead
- * stands still and the film runs under it. A moment behind the window is brought back near the
- * left edge.
+ * How far to scroll so a moment stays in view while it moves: nothing while it is in the
+ * window; when it reaches the right edge (`PAGE_AT` of the width) the window turns a page, so
+ * the playhead is near the left edge again, as a pro app pages. The lanes are drawn again once
+ * a page, not on every frame. A moment behind the window is brought back near the left edge.
  */
 export function followScroll(seconds: number, z: Zoom, width: number): number {
 	const x = timeToX(seconds, z);
-	if (x > width * FOLLOW_AT) return Math.max(0, seconds * z.pps - width * FOLLOW_AT);
-	if (x < 0) return Math.max(0, seconds * z.pps - width * 0.12);
+	if (x > width * PAGE_AT || x < 0) return Math.max(0, seconds * z.pps - width * PAGE_FROM);
 	return z.scroll;
 }
 

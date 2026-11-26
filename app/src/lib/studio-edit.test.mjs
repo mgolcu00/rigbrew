@@ -142,14 +142,16 @@ test('a dragged edge snaps to region edges and the playhead, else to frames', ()
 	assert.equal(snapTime(-1, [], 100).time, 0);
 });
 
-test('the window follows the playhead and scrolls at its edges', () => {
+test('the window follows the playhead a page at a time', () => {
 	const z = { pps: 100, scroll: 0 };
 	assert.equal(followScroll(4, z, 1000), 0);
-	// Past the place it is held at, the window moves with the playhead: it stands still on the screen.
-	assert.equal(followScroll(6.2, z, 1000), 0);
-	assert.equal(followScroll(6.3, z, 1000), 10);
-	assert.equal(followScroll(9.9, z, 1000), 990 - 620);
-	assert.equal(followScroll(9.9, { pps: 100, scroll: 370 }, 1000), 370);
+	// Inside the window nothing moves; at its right edge the window turns a page.
+	assert.equal(followScroll(9.2, z, 1000), 0);
+	assert.ok(Math.abs(followScroll(9.3, z, 1000) - (930 - 80)) < 1e-9);
+	assert.equal(followScroll(9.9, { pps: 100, scroll: 850 }, 1000), 850);
+	// A playhead behind the window comes back near its left edge.
+	assert.equal(followScroll(2, { pps: 100, scroll: 850 }, 1000), 200 - 80);
+	assert.equal(followScroll(0.5, { pps: 100, scroll: 850 }, 1000), 0);
 	// The Editor's own zoom: a part of what it shows, held inside it, the moment under the pointer staying put.
 	const base = { from: 2, to: 10 };
 	assert.deepEqual(zoomedSpan(base, 1, 5), { from: 2, to: 10 });
@@ -161,7 +163,7 @@ test('the window follows the playhead and scrolls at its edges', () => {
 	assert.deepEqual(zoomSpanAround(base, { from: 4, to: 8 }, 0.1, 0.5), { zoom: 1, from: 2 });
 	assert.equal(zoomSpanAround(base, base, 1000, 0.5).zoom, 64);
 	// Behind the window (after a jump back): the same.
-	assert.equal(followScroll(1, { pps: 100, scroll: 500 }, 1000), 0);
+	assert.equal(followScroll(1, { pps: 100, scroll: 500 }, 1000), 20);
 	assert.equal(edgeScroll(500, 1000), 0);
 	assert.ok(edgeScroll(4, 1000) < edgeScroll(30, 1000) && edgeScroll(30, 1000) < 0);
 	assert.ok(edgeScroll(999, 1000) > edgeScroll(970, 1000) && edgeScroll(970, 1000) > 0);

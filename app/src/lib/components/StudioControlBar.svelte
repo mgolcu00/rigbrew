@@ -24,9 +24,12 @@
 		return at + 1;
 	}
 
+	/** The display is written when what it says changes (24 times a second while the film plays), not on every frame. */
+	let said = '';
 	function show(time: number) {
 		if (!big) return;
-		big.textContent = studio.layout.lcd === 'time' ? timecode(time) : `${two(shotAt(time))} / ${two(studio.doc?.shots.length ?? 0)}`;
+		const text = studio.layout.lcd === 'time' ? timecode(time) : `${two(shotAt(time))} / ${two(studio.doc?.shots.length ?? 0)}`;
+		if (text !== said || big.textContent !== text) big.textContent = said = text;
 	}
 	const stopFrames = studio.onFrame(show);
 	$effect(() => {
