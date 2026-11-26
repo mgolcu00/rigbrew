@@ -10,6 +10,7 @@ import { remembered } from './remember.ts';
 import { app } from './state.svelte.ts';
 import { MASTER, SHOTS, StudioAudio, type PlayRegion } from './studio-audio.ts';
 import {
+	AssistTurn,
 	History,
 	docMember,
 	docOf,
@@ -55,6 +56,8 @@ interface Layout {
 	inspector: boolean;
 	bottom: boolean;
 	tab: 'mixer' | 'editor' | 'cast';
+	/** What the right column shows under the viewer: the Inspector or the assistant. */
+	side: 'inspector' | 'assistant';
 	libraryWidth: number;
 	inspectorWidth: number;
 	bottomHeight: number;
@@ -73,6 +76,7 @@ const usualLayout: Layout = {
 	inspector: true,
 	bottom: false,
 	tab: 'mixer',
+	side: 'inspector',
 	libraryWidth: 220,
 	inspectorWidth: 300,
 	bottomHeight: 260,
@@ -178,6 +182,9 @@ class Studio {
 	#saving: Promise<void> = Promise.resolve();
 	#poll: ReturnType<typeof setInterval> | undefined;
 	clipboard: { regions: DocRegion[]; track: string } | null = null;
+	/** The request the assistant is working on, while it works: see `assistantBegin`. */
+	#turn: AssistTurn | null = null;
+	#assisting: Promise<void> = Promise.resolve();
 
 	// --- what follows from the film ---------------------------------------------------------------
 	project = $derived(this.view?.project ?? null);
@@ -299,6 +306,7 @@ class Studio {
 		this.id = view.project.id;
 		this.doc = docOf(view.project);
 		if (other) {
+			this.#release();
 			this.shotsSel = [];
 			this.regionsSel = [];
 			this.track = FILM;
@@ -316,6 +324,7 @@ class Studio {
 	}
 
 	async close() {
+		this.#release();
 		await this.saveNow();
 		this.pause();
 		this.view = null;
@@ -461,6 +470,87 @@ class Studio {
 		this.view = view;
 		if (!this.doc) return;
 		for (const s of view.project.shots) if (s.take) this.doc.takes[s.id] = s.take;
+	}
+
+	// --- the assistant ------------------------------------------------------------------------------
+
+	/** What the assistant does to the film, one thing after another. */
+	#assist(work: () => Promise<void>): Promise<void> {
+		this.#assisting = this.#assisting.then(work).catch((e) => {
+			this.problem = say(e);
+		});
+		return this.#assisting;
+	}
+
+	/**
+	 * The assistant starts a request on the open film. The film is saved first; while it works
+	 * nothing is saved over what it does, and the film as it is now is what one undo brings back.
+	 */
+	assistantBegin(film: string): Promise<void> {
+		return this.#assist(async () => {
+			if (this.#turn?.film === film || this.id !== film || !this.doc) return;
+			await this.saveNow();
+			if (this.id !== film || !this.doc) return;
+			this.#release();
+			this.#turn = new AssistTurn(film, $state.snapshot(this.doc) as Doc);
+			this.#held++;
+		});
+	}
+
+	/** The film as the service has it now, while the assistant works: the workstation shows it at once. */
+	assistantFollow(film: string): Promise<void> {
+		return this.#assist(async () => {
+			const turn = this.#turn;
+			if (!turn || turn.film !== film || this.id !== film || !this.doc) return;
+			const view = await api.studioRead(film);
+			if (this.#turn !== turn || this.id !== film || !this.doc) return;
+			const next = turn.follow($state.snapshot(this.doc) as Doc, docOf(view.project), this.#dirty);
+			this.view = view;
+			if (!next) return;
+			const sounds = JSON.stringify(next.tracks) !== JSON.stringify(this.doc.tracks);
+			this.doc = next;
+			this.shotsSel = this.shotsSel.filter((id) => next.shots.some((s) => s.id === id));
+			this.regionsSel = this.regionsSel.filter((id) => next.tracks.some((t) => t.regions.some((r) => r.id === id)));
+			this.edits++;
+			this.jumps++;
+			if (sounds) this.loadSounds();
+		});
+	}
+
+	/** The request ended: the film as the service has it, and all of it as one step of undo. */
+	async assistantEnd(film: string): Promise<void> {
+		await this.assistantFollow(film);
+		return this.#assist(async () => {
+			const turn = this.#turn;
+			if (!turn || turn.film !== film) return;
+			this.#release();
+			if (this.id !== film || !this.doc) return;
+			if (turn.end(this.history, $state.snapshot(this.doc) as Doc)) this.edits++;
+			// What was edited here while it worked is saved now, with its work in it.
+			if (this.#dirty) this.#touch();
+		});
+	}
+
+	/** The film is no longer held for the assistant (it ended, or another film was opened). */
+	#release() {
+		if (!this.#turn) return;
+		this.#turn = null;
+		this.#held--;
+	}
+
+	/** I shows the Inspector (in place of the assistant), and hides the column again. */
+	toggleInspector() {
+		if (this.layout.inspector && this.layout.side === 'assistant') this.set('side', 'inspector');
+		else this.set('inspector', !this.layout.inspector);
+	}
+
+	/** A shows the assistant next to the tracks, and hides it again. */
+	toggleAssistant() {
+		if (this.layout.inspector && this.layout.side === 'assistant') this.set('side', 'inspector');
+		else {
+			this.set('side', 'assistant');
+			this.set('inspector', true);
+		}
 	}
 
 	// --- selection --------------------------------------------------------------------------------
