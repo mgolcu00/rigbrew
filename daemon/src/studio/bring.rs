@@ -281,7 +281,7 @@ async fn run(app: &Shared, id: &str, file: &FsPath, ffmpeg: &FsPath) -> Result<(
             std::fs::remove_file(&picture).ok();
             continue;
         };
-        let take = Take { n: 1, seed: None, seconds: None, frames, made_frames: Some(frames), continued: false, ext: "mp4".into(), large };
+        let take = Take { n: 1, frames, made_frames: Some(frames), ext: "mp4".into(), large, ..Take::default() };
         shots.push(Shot {
             id: shot,
             frames,

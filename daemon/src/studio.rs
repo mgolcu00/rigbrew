@@ -162,6 +162,14 @@ pub struct Shot {
     /// start from a picture. Not looked at when the shot continues the one before.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub from: String,
+    /// "WxH" when this shot is made at a quality of its own; empty for the film's.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub size: String,
+}
+
+/// Width times height of "WxH"; a draft's when it cannot be read.
+fn pixels(size: &str) -> u32 {
+    size.split_once('x').and_then(|(w, h)| Some(w.parse::<u32>().ok()? * h.parse::<u32>().ok()?)).unwrap_or(pace::DRAFT_PIXELS)
 }
 
 fn is_none_yet(n: &u32) -> bool {
@@ -192,6 +200,7 @@ impl Default for Shot {
             made_from: None,
             lines: Vec::new(),
             from: String::new(),
+            size: String::new(),
         }
     }
 }
@@ -200,6 +209,15 @@ impl Shot {
     /// The length of the shot in seconds: of its clip when there is one, else what was asked for.
     fn length(&self) -> f32 {
         self.made_frames.filter(|_| self.state == "done" || self.state == "changed").unwrap_or(self.frames) as f32 / 24.0
+    }
+
+    /// The size the shot is made at: its own, else the film's.
+    fn size_in<'a>(&'a self, film: &'a str) -> &'a str {
+        if self.size.is_empty() {
+            film
+        } else {
+            &self.size
+        }
     }
 }
 
@@ -225,6 +243,13 @@ pub struct Take {
     /// The clip has twice the film's width and height (a clip from a video that had the pictures for it).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub large: bool,
+    /// "WxH" it was made at; empty for a take from before sizes were kept, made at the film's.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub size: String,
+    /// How loud its sound is (EBU R128 integrated, LUFS), once measured: the film brings every
+    /// shot toward one loudness, in the export and as the app plays it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lufs: Option<f32>,
 }
 
 /// A shot keeps this many takes; the oldest one that is not in use goes when another is made.
@@ -539,6 +564,43 @@ fn paces(app: &App) -> Vec<pace::Sample> {
     std::fs::read_to_string(app.root.join("studio-pace.json")).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default()
 }
 
+/// The longest a five-second shot may take here for its quality to be the one a film is made at
+/// when nobody chose.
+const USUAL_SHOT_SECONDS: f32 = 15.0 * 60.0;
+
+/// The qualities of the installed video package as the app is shown them: each with its sizes,
+/// what a five-second shot of it takes on this machine, and whether it fits this machine's memory.
+fn qualities_of(app: &App, seen: &[pace::Sample]) -> Vec<Value> {
+    let Ok(package) = installed_one(app, Modality::Video) else { return Vec::new() };
+    package
+        .qualities()
+        .into_iter()
+        .map(|q| {
+            let points = q.sizes.values().map(|[w, h]| w * h).max().unwrap_or(pace::DRAFT_PIXELS);
+            let five = pace::estimate(seen, 121, points, false);
+            let fits = q.mem_mb <= app.profile.accel_budget_mb;
+            json!({"id": q.id, "label": q.label, "sizes": q.sizes, "five": five, "fits": fits})
+        })
+        .collect()
+}
+
+/// The quality a film is made at when nobody chose: the best one that fits this machine and makes
+/// a five-second shot within a quarter of an hour here, else the fastest. Empty without a video package.
+fn usual_quality(list: &[Value]) -> String {
+    let fine = |q: &&Value| q["fits"] == true && q["five"].as_f64().is_some_and(|s| s <= USUAL_SHOT_SECONDS as f64);
+    list.iter().rev().find(fine).or(list.first()).and_then(|q| q["id"].as_str()).unwrap_or_default().to_string()
+}
+
+pub(crate) fn default_quality(app: &App) -> String {
+    usual_quality(&qualities_of(app, &paces(app)))
+}
+
+/// The size of a shape at the quality a film is made at when nobody chose.
+fn usual_size(app: &App, shape: &str) -> Option<String> {
+    let usual = default_quality(app);
+    installed_one(app, Modality::Video).ok()?.qualities().into_iter().find(|q| q.id == usual)?.size(shape).filter(|s| valid_size(s))
+}
+
 /// The measurements a film's times are read from: this machine's, or the film's own takes when
 /// this machine has made nothing since measurements are kept.
 fn paces_for(app: &App, p: &Project) -> Vec<pace::Sample> {
@@ -549,10 +611,12 @@ fn paces_for(app: &App, p: &Project) -> Vec<pace::Sample> {
     let mut own = Vec::new();
     for s in &p.shots {
         for t in &s.takes {
-            pace::remember(&mut own, pace::Sample { frames: t.frames, continued: t.continued, seconds: t.seconds.unwrap_or(0.0) });
+            let pixels = pixels(if t.size.is_empty() { s.size_in(&p.size) } else { &t.size });
+            pace::remember(&mut own, pace::Sample { frames: t.frames, continued: t.continued, seconds: t.seconds.unwrap_or(0.0), pixels });
         }
         if s.takes.is_empty() {
-            pace::remember(&mut own, pace::Sample { frames: s.frames, continued: s.continues, seconds: s.seconds.unwrap_or(0.0) });
+            let pixels = pixels(s.size_in(&p.size));
+            pace::remember(&mut own, pace::Sample { frames: s.frames, continued: s.continues, seconds: s.seconds.unwrap_or(0.0), pixels });
         }
     }
     own
@@ -563,7 +627,7 @@ fn paces_for(app: &App, p: &Project) -> Vec<pace::Sample> {
 fn time_left(p: &Project, seen: &[pace::Sample], waiting: &[String], now: Option<(&str, f32)>) -> (f32, f32) {
     let (mut all, mut left) = (0.0, 0.0);
     for (i, s) in p.shots.iter().enumerate() {
-        let needs = pace::estimate(seen, s.frames, s.continues && i > 0);
+        let needs = pace::estimate(seen, s.frames, pixels(s.size_in(&p.size)), s.continues && i > 0);
         let making = now.filter(|(id, _)| *id == s.id);
         if s.state != "done" && !s.prompt.is_empty() {
             all += needs;
@@ -648,8 +712,8 @@ fn valid_id(id: &str) -> bool {
 }
 
 fn valid_size(size: &str) -> bool {
-    size.split_once('x')
-        .is_some_and(|(w, h)| [w, h].iter().all(|v| v.parse::<u32>().is_ok_and(|n| (256..=1280).contains(&n) && n % 32 == 0)))
+    let side = |n: u32| (256..=rigbrew_core::manifest::MAX_CLIP_SIDE).contains(&n) && n.is_multiple_of(32);
+    size.split_once('x').is_some_and(|(w, h)| [w, h].iter().all(|v| v.parse::<u32>().is_ok_and(side)))
 }
 
 /// Where films go when the person does not choose a folder: `Movies/Rigbrew` in their home.
@@ -780,7 +844,10 @@ fn view(app: &App, mut p: Project) -> Value {
     let continues = can_continue(app);
     let export = export_of(&p.id);
     let mine = now.as_ref().filter(|(pid, _, _)| *pid == p.id).map(|(_, sid, _)| (sid.as_str(), elapsed.unwrap_or(0.0)));
-    let (all, left) = time_left(&p, &paces_for(app, &p), &waiting, mine);
+    let seen = paces_for(app, &p);
+    let (all, left) = time_left(&p, &seen, &waiting, mine);
+    let qualities = qualities_of(app, &seen);
+    let usual = usual_quality(&qualities);
     // The shots that were taken out are the service's own business.
     p.removed.clear();
     // Which shots name which character, the subtitles as the timeline holds them, and what is heard.
@@ -810,9 +877,9 @@ fn view(app: &App, mut p: Project) -> Value {
     let installed = |modality: Modality| installed_one(app, modality).is_ok();
     let jobs = json!({"import": job_of(&p.id, "import"), "dub": job_of(&p.id, "dub"), "listen": job_of(&p.id, "listen")});
     json!({"project": p, "progress": progress, "rendering": mine.is_some() || !waiting.is_empty(), "made": made, "seconds": seconds,
-           "can_continue": continues, "export": export, "estimate": {"all": all, "left": left},
+           "can_continue": continues, "export": export, "estimate": {"all": all, "left": left}, "qualities": qualities, "usual_quality": usual,
            "cast_in": appears, "cues": cues, "language": dub::shown_language(&p), "own_language": dub::own_language(&p),
-           "languages": languages, "spoken": dub::SPOKEN, "can_listen": dub::can_listen(app), "voices": dub::voices(app), "jobs": jobs,
+           "languages": languages, "spoken": dub::spoken(app), "can_listen": dub::can_listen(app), "voices": dub::voices(app), "jobs": jobs,
            "has": {"video": installed(Modality::Video), "chat": installed(Modality::Chat), "voice": installed(Modality::Voice),
                    "image": installed(Modality::Image)}})
 }
@@ -827,10 +894,20 @@ async fn list(State(app): State<Shared>) -> Json<Value> {
         .collect();
     // What a five-second shot takes here, for the start screen to say how long a film will take.
     let seen = paces(&app);
-    let pace = json!({"frames": 121, "plain": pace::estimate(&seen, 121, false), "continuing": pace::estimate(&seen, 121, true), "measured": !seen.is_empty()});
+    let qualities = qualities_of(&app, &seen);
+    let usual = usual_quality(&qualities);
+    // The pace is of the quality a film is made at when nobody chooses.
+    let points = qualities
+        .iter()
+        .find(|q| q["id"] == usual.as_str())
+        .and_then(|q| q["sizes"].as_object())
+        .and_then(|sizes| sizes.values().filter_map(|s| Some(s[0].as_u64()? as u32 * s[1].as_u64()? as u32)).max());
+    let points = points.unwrap_or(pace::DRAFT_PIXELS);
+    let pace = json!({"frames": 121, "plain": pace::estimate(&seen, 121, points, false), "continuing": pace::estimate(&seen, 121, points, true),
+                      "measured": !seen.is_empty()});
     Json(
         json!({"projects": films, "home": films_home().map(|h| h.to_string_lossy().to_string()), "pace": pace, "can_continue": can_continue(&app),
-               "voices": dub::voices(&app)}),
+               "voices": dub::voices(&app), "qualities": qualities, "usual_quality": usual}),
     )
 }
 
@@ -867,7 +944,12 @@ async fn create(State(app): State<Shared>, Json(body): Json<NewProject>) -> Resp
         .map(|(i, _)| i.clone())
         .or_else(|| existing.as_ref().map(|p| p.id.clone()).filter(|i| valid_id(i)))
         .unwrap_or_else(new_id);
+    let fresh = existing.is_none();
     let mut project = existing.unwrap_or_default();
+    // A new film is made at the quality this machine makes well, wide until it is told otherwise.
+    if let Some(size) = fresh.then(|| usual_size(&app, "landscape")).flatten() {
+        project.size = size;
+    }
     project.id = id.clone();
     project.folder = folder_text.clone();
     if project.name.is_empty() {
@@ -971,6 +1053,9 @@ struct ShotIn {
     lines: Option<Vec<words::SpokenIn>>,
     #[serde(default)]
     from: Option<String>,
+    /// "WxH" for a shot made at a quality of its own; empty or left out for the film's.
+    #[serde(default)]
+    size: Option<String>,
 }
 
 /// A value that may be left out (keep what is there), or be null (take it away).
@@ -1055,8 +1140,9 @@ struct Film<'a> {
 impl Film<'_> {
     /// What the clip of a shot of this film is made from (see `made_key`): what the video model
     /// is told (the description, the look of every character it names, the look of the film),
-    /// the length, and the picture it starts from: the shot before it, or a portrait.
-    fn key(&self, prompt: &str, frames: u32, before: Option<&str>, from: &str) -> String {
+    /// the length, the size (the shot's own, else the film's), and the picture it starts from:
+    /// the shot before it, or a portrait.
+    fn key(&self, size: &str, prompt: &str, frames: u32, before: Option<&str>, from: &str) -> String {
         let told = cast::told(self.look, self.cast, prompt);
         let portrait = self.cast.iter().find(|m| !from.is_empty() && m.id == from && m.portrait > 0);
         let starts = match (before, portrait) {
@@ -1064,7 +1150,7 @@ impl Film<'_> {
             (None, Some(m)) => format!("portrait:{}:{}", m.id, m.portrait),
             (None, None) => String::new(),
         };
-        made_key(self.size, &told, frames, Some(&starts))
+        made_key(if size.is_empty() { self.size } else { size }, &told, frames, Some(&starts))
     }
 }
 
@@ -1082,7 +1168,7 @@ fn merge(old: &[Shot], bin: &[Shot], new: Vec<ShotIn>, films: (&Film, &Film)) ->
     let stands = |at: usize| {
         let o = &old[at];
         let before = at.checked_sub(1).filter(|_| o.continues).map(|i| old[i].id.as_str());
-        was.key(&o.prompt, o.frames, before, &o.from)
+        was.key(&o.size, &o.prompt, o.frames, before, &o.from)
     };
     // What the clip of a shot in the film was made from: for a made shot, the shot as it stands.
     let was_key = |at: usize| if old[at].state == "done" { Some(stands(at)) } else { old[at].made_from.clone() };
@@ -1098,7 +1184,13 @@ fn merge(old: &[Shot], bin: &[Shot], new: Vec<ShotIn>, films: (&Film, &Film)) ->
         // The first shot has nothing to continue.
         let continues = s.continues && !out.is_empty();
         let from = s.from.filter(|f| cast_ids.contains(f)).unwrap_or_default();
-        let key = now.key(&prompt, frames, out.last().filter(|_| continues).map(|l| l.id.as_str()), &from);
+        // A quality of its own: left out, the shot keeps the one it has; at the film's size it has none.
+        let size = match s.size {
+            Some(size) => size,
+            None => old.iter().chain(bin).find(|o| o.id == id).map(|o| o.size.clone()).unwrap_or_default(),
+        };
+        let size = if valid_size(&size) && size != now.size { size } else { String::new() };
+        let key = now.key(&size, &prompt, frames, out.last().filter(|_| continues).map(|l| l.id.as_str()), &from);
         let again = |made_from: &Option<String>| if made_from.as_deref() == Some(key.as_str()) { "done" } else { "changed" };
         let mut shot = match (old.iter().position(|o| o.id == id), bin.iter().find(|o| o.id == id)) {
             (Some(at), _) => {
@@ -1123,6 +1215,7 @@ fn merge(old: &[Shot], bin: &[Shot], new: Vec<ShotIn>, films: (&Film, &Film)) ->
             (None, None) => Shot { id, prompt, frames, state: empty(), continues, ..Shot::default() },
         };
         shot.from = from;
+        shot.size = size;
         // What is said in a shot, how it joins the film and how loud it is change nothing about its clip.
         if let Some(lines) = s.lines {
             shot.lines = words::merge_lines(lines, &cast_ids, new_id);
@@ -1173,7 +1266,7 @@ async fn save(State(app): State<Shared>, Path(id): Path<String>, Json(body): Jso
     let was = (p.size.clone(), p.look.clone(), p.cast.clone());
     if let Some(size) = body.size {
         if !valid_size(&size) {
-            return fail(StatusCode::BAD_REQUEST, "size must be WIDTHxHEIGHT, each 256 to 1280 and a multiple of 32");
+            return fail(StatusCode::BAD_REQUEST, "size must be WIDTHxHEIGHT, each 256 to 1344 and a multiple of 32");
         }
         p.size = size;
     }
@@ -1218,6 +1311,7 @@ async fn save(State(app): State<Shared>, Path(id): Path<String>, Json(body): Jso
             seed: s.seed,
             lines: None,
             from: Some(s.from.clone()),
+            size: Some(s.size.clone()),
         };
         p.shots.iter().map(as_it_is).collect()
     });
@@ -1389,6 +1483,9 @@ async fn work(app: Shared) {
         let Some(p) = load(&app, &project) else { continue };
         let Some(s) = p.shots.iter().find(|s| s.id == shot).cloned() else { continue };
         let model = with_queue(|q| q.model.clone()).unwrap_or_default();
+        // The shot's own quality, else the film's; a quality with a schedule of its own is made with it.
+        let size = s.size_in(&p.size).to_string();
+        let quality = app.manifest.package(&model).and_then(|pk| pk.quality_of(&size)).map(|q| q.id);
         // A shot that continues the one before it starts from that shot's last picture.
         let first = if s.continues {
             let before = p
@@ -1399,7 +1496,7 @@ async fn work(app: Shared) {
                 .map(|i| clip_path(&p, &p.shots[i].id))
                 .filter(|c| c.is_file());
             match before {
-                Some(clip) => last_picture(&app, &clip, &p.size).await,
+                Some(clip) => last_picture(&app, &clip, &size).await,
                 None => None,
             }
         } else {
@@ -1413,7 +1510,12 @@ async fn work(app: Shared) {
         let job = loop {
             let resp = video::generate(
                 State(app.clone()),
-                Json(video::VideoBody::new(&model, &told, &p.size, s.frames).with_seed(seed).starting_from(first.clone())),
+                Json(
+                    video::VideoBody::new(&model, &told, &size, s.frames)
+                        .with_seed(seed)
+                        .starting_from(first.clone())
+                        .at_quality(quality.clone()),
+                ),
             )
             .await;
             let status = resp.status();
@@ -1478,6 +1580,7 @@ async fn work(app: Shared) {
                         frames: s.frames,
                         made_frames: None,
                         continued: first.is_some(),
+                        size: size.clone(),
                         ..Take::default()
                     },
                 )
@@ -1496,9 +1599,10 @@ async fn work(app: Shared) {
             });
         }
         if made {
-            app.record("studio_shot_made", json!({"frames": s.frames, "seconds": seconds, "continues": s.continues}));
+            app.record("studio_shot_made", json!({"frames": s.frames, "seconds": seconds, "continues": s.continues, "size": size}));
             let mut seen = paces(&app);
-            pace::remember(&mut seen, pace::Sample { frames: s.frames, continued: first.is_some(), seconds });
+            let points = if pixels(&size) == pace::DRAFT_PIXELS { 0 } else { pixels(&size) };
+            pace::remember(&mut seen, pace::Sample { frames: s.frames, continued: first.is_some(), seconds, pixels: points });
             std::fs::write(app.root.join("studio-pace.json"), serde_json::to_string(&seen).unwrap_or_default()).ok();
             stale_after(&app, &project, &shot);
         }
@@ -1543,6 +1647,10 @@ async fn keep_take(app: &Shared, project: &str, shot: &str, from: &FsPath, mut t
     }
     // What the clip really holds, and a small picture of it for the timeline.
     take.made_frames = look_at(app, &clip, &picture).await;
+    // And how loud its sound is, so the film plays every shot at one loudness.
+    if let Ok(ffmpeg) = crate::engine_tool(app, crate::EngineKind::Ffmpeg, "ffmpeg").await {
+        take.lufs = listen(&ffmpeg, &clip).await.1;
+    }
     let mut gone = Vec::new();
     set_shot(app, project, shot, |s| {
         s.takes.extend(adopted);
@@ -2164,24 +2272,9 @@ fn exported(p: &Project) -> Vec<&Shot> {
     p.shots.iter().filter(|s| (s.state == "done" || s.state == "changed") && clip_path(p, &s.id).is_file()).collect()
 }
 
-/// The concat list ffmpeg reads for a film of plain cuts: every shot with its trims.
-fn concat_list(p: &Project, shots: &[&Shot]) -> String {
-    let mut list = String::from("ffconcat version 1.0\n");
-    for s in shots {
-        let length = s.length();
-        list.push_str(&format!("file '{}'\n", clip_path(p, &s.id).to_string_lossy().replace('\'', "'\\''")));
-        if s.trim_start > 0.0 {
-            list.push_str(&format!("inpoint {:.3}\n", s.trim_start));
-        }
-        if s.trim_end > 0.0 {
-            list.push_str(&format!("outpoint {:.3}\n", (length - s.trim_end).max(s.trim_start + 0.1)));
-        }
-    }
-    list
-}
-
 /// The shots as the pieces of the film: what is kept of each clip, how it joins, how loud it is.
-fn pieces(shots: &[&Shot], sounds: &[bool], fit: Option<(u32, u32)>) -> Vec<export::Piece> {
+/// `sounds` says for each clip whether it has sound and how loud it measured.
+fn pieces(shots: &[&Shot], sounds: &[(bool, Option<f32>)], fit: Option<(u32, u32)>) -> Vec<export::Piece> {
     shots
         .iter()
         .enumerate()
@@ -2195,7 +2288,8 @@ fn pieces(shots: &[&Shot], sounds: &[bool], fit: Option<(u32, u32)>) -> Vec<expo
                 // A shot that continues the one before it joins it with nothing in between.
                 join: if i == 0 || s.continues { export::Join::Cut } else { export::Join::named(&s.join) },
                 volume: if s.mute { 0.0 } else { s.volume.clamp(0.0, 1.5) },
-                has_sound: sounds.get(i).copied().unwrap_or(true),
+                level: export::level(sounds.get(i).and_then(|(_, lufs)| *lufs)),
+                has_sound: sounds.get(i).is_none_or(|(has, _)| *has),
                 join_frames: ((s.join_seconds.clamp(0.25, 2.0) * 24.0).round() as u32).max(2),
                 fit,
             }
@@ -2208,6 +2302,36 @@ async fn has_sound(ffmpeg: &FsPath, clip: &FsPath) -> bool {
     let listed =
         tokio::process::Command::new(ffmpeg).args(["-hide_banner", "-i"]).arg(clip).stdin(std::process::Stdio::null()).output().await;
     listed.map(|o| String::from_utf8_lossy(&o.stderr).contains("Audio:")).unwrap_or(true)
+}
+
+/// Whether a clip has sound in it, as ffmpeg lists its streams, and how loud that sound is (EBU R128).
+async fn listen(ffmpeg: &FsPath, clip: &FsPath) -> (bool, Option<f32>) {
+    let listed = tokio::process::Command::new(ffmpeg)
+        .args(["-hide_banner", "-nostats", "-i"])
+        .arg(clip)
+        .args(["-map", "0:a:0?", "-af", "ebur128=framelog=quiet", "-f", "null", "-"])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .await;
+    match listed {
+        Ok(o) => {
+            let log = String::from_utf8_lossy(&o.stderr);
+            (log.contains("Audio:"), export::loudness(&log))
+        }
+        Err(_) => (true, None),
+    }
+}
+
+/// Runs a tool to its end: its log when it worked, else the last line it wrote.
+async fn run_tool(mut cmd: tokio::process::Command) -> Result<String, String> {
+    cmd.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped()).kill_on_drop(true);
+    match cmd.output().await {
+        Ok(o) if o.status.success() => Ok(String::from_utf8_lossy(&o.stderr).into_owned()),
+        Ok(o) => {
+            Err(String::from_utf8_lossy(&o.stderr).lines().last().unwrap_or("the shots could not be joined").chars().take(300).collect())
+        }
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 async fn export(State(app): State<Shared>, Path(id): Path<String>, body: Option<Json<Export>>) -> Response {
@@ -2254,9 +2378,16 @@ async fn begin_export(app: &Shared, p: Project, body: Export) -> Result<usize, (
     let shots = exported(&p);
     let count = shots.len();
     let clips: Vec<PathBuf> = shots.iter().map(|s| clip_path(&p, &s.id)).collect();
+    // Whether each clip has sound, and how loud it is: kept with the take, so the app plays the
+    // shots as loud as the export has them.
     let mut sounds = Vec::with_capacity(count);
-    for clip in &clips {
-        sounds.push(has_sound(&ffmpeg, clip).await);
+    for (shot, clip) in shots.iter().zip(&clips) {
+        let (has, lufs) = listen(&ffmpeg, clip).await;
+        let n = shot.take;
+        if lufs.is_some() && take_in_use(&p, &shot.id).is_some_and(|t| t.lufs != lufs) {
+            set_shot(app, &id, &shot.id, |s| s.takes.iter_mut().filter(|t| t.n == n).for_each(|t| t.lufs = lufs));
+        }
+        sounds.push((has, lufs));
     }
     let options = ExportOptions {
         scale: body.scale.unwrap_or(p.export.scale),
@@ -2265,20 +2396,21 @@ async fn begin_export(app: &Shared, p: Project, body: Export) -> Result<usize, (
     }
     .tidy();
     // A film that holds clips brought in from a video holds clips of another kind, and maybe of
-    // twice the size: every clip is brought to one size as it is joined. An enlarged export keeps
+    // twice the size; one whose shots were made at more than one quality holds clips of several
+    // sizes: every clip is brought to the film's size as it is joined. An enlarged export keeps
     // what the larger clips have.
     let takes: Vec<&Take> = shots.iter().filter_map(|s| take_in_use(&p, &s.id)).collect();
     let brought = takes.iter().any(|t| !t.ext.is_empty());
+    let mixed = takes.iter().any(|t| !t.size.is_empty() && t.size != p.size);
     let keeps_large = options.scale == 2 && takes.iter().any(|t| t.large);
-    let fit = brought.then(|| dub::export_size(&p, if keeps_large { 2 } else { 0 }));
+    let fit = (brought || mixed).then(|| dub::export_size(&p, if keeps_large { 2 } else { 0 }));
     let pieces = pieces(&shots, &sounds, fit);
-    // A film of plain cuts is read as one list; anything more is a filter graph over every clip.
-    let simple = export::plain(&pieces);
-    let film = if simple { export::as_it_is(export::film_frames(&pieces)) } else { export::joined(&pieces) };
+    // Every clip goes through one filter graph: its sound is levelled and faded at the cuts.
+    let film = export::joined(&pieces);
     let volume = body.music_volume.unwrap_or(p.sound_volume).clamp(0.0, 1.0);
     let (video_bits, sound_bits) = options.bitrates(&p.size);
     // The files the sound tracks play come after the clips (and the one sound file, when there is one).
-    let first_sound = if simple { 1 } else { count } + usize::from(music.is_some());
+    let first_sound = count + usize::from(music.is_some());
     let mut sound_files: Vec<PathBuf> = Vec::new();
     let mut missing: Option<String> = None;
     let mix = sound::heard(&p.shot_track, &p.tracks, p.master, p.duck, |file| {
@@ -2313,7 +2445,7 @@ async fn begin_export(app: &Shared, p: Project, body: Export) -> Result<usize, (
         fade_in: p.fade_in,
         fade_out: p.fade_out,
         scale: if keeps_large { 0 } else { options.scale },
-        music: music.as_ref().map(|_| (if simple { 1 } else { count }, volume)),
+        music: music.as_ref().map(|_| (count, volume)),
         mix: Some(mix),
         captions: burned.as_ref().map(|(_, note)| (captions_input, size.1.saturating_sub(note.height))),
     };
@@ -2339,15 +2471,9 @@ async fn begin_export(app: &Shared, p: Project, body: Export) -> Result<usize, (
         "file"
     };
     let language = words::language_code(&dub::shown_language(&p));
-    let list_path = folder.join(".rigbrew-export.txt");
     let graph_path = folder.join(".rigbrew-export-graph.txt");
-    let written = if simple { std::fs::write(&list_path, concat_list(&p, &shots)) } else { Ok(()) }.and_then(|()| {
-        if graph.filter.is_empty() {
-            Ok(())
-        } else {
-            std::fs::write(&graph_path, &graph.filter)
-        }
-    });
+    let fader = p.master as f64;
+    let written = if graph.filter.is_empty() { Ok(()) } else { std::fs::write(&graph_path, &graph.filter) };
     if let Err(e) = written {
         set_export(&id, json!({"state": "failed", "error": format!("the film's folder cannot be written to: {e}")}));
         return Err((StatusCode::INTERNAL_SERVER_ERROR, format!("the film's folder cannot be written to: {e}")));
@@ -2360,15 +2486,15 @@ async fn begin_export(app: &Shared, p: Project, body: Export) -> Result<usize, (
     let app2 = app.clone();
     tokio::spawn(async move {
         let started = std::time::Instant::now();
+        // The film is made in three passes: the pictures and the mixed sound into a file of their
+        // own (the sound as it is, in floating point); how loud that sound is; and the MP4, with the
+        // pictures as they are and the sound brought to its loudness.
+        let part = out.with_extension("part.mkv");
         let tmp = out.with_extension("part.mp4");
         let mut cmd = tokio::process::Command::new(&ffmpeg);
         cmd.args(["-hide_banner", "-loglevel", "error", "-y"]);
-        if simple {
-            cmd.args(["-f", "concat", "-safe", "0", "-i"]).arg(&list_path);
-        } else {
-            for clip in &clips {
-                cmd.arg("-i").arg(clip);
-            }
+        for clip in &clips {
+            cmd.arg("-i").arg(clip);
         }
         if let Some(m) = &music {
             // Music repeats under the whole film; a narration is said once. Either ends with the film.
@@ -2383,54 +2509,47 @@ async fn begin_export(app: &Shared, p: Project, body: Export) -> Result<usize, (
         if let Some(list) = &captions_list {
             cmd.args(["-f", "concat", "-safe", "0", "-i"]).arg(list);
         }
-        if track {
-            cmd.arg("-i").arg(&srt_path);
-        }
         if !graph.filter.is_empty() {
             // The graph of a long film is longer than a command line may be: it is read from a file.
             cmd.arg("-/filter_complex").arg(&graph_path);
         }
-        if !graph.filter.is_empty() || track {
-            cmd.args(["-map", &graph.video, "-map", &graph.audio]);
+        cmd.args(["-map", &graph.video, "-map", &graph.audio]);
+        // Apple's own encoder: H.264 in hardware. Plays everywhere.
+        cmd.args(["-c:v", "h264_videotoolbox", "-b:v", &video_bits.to_string(), "-pix_fmt", "yuv420p", "-r", "24", "-c:a", "pcm_f32le"])
+            .args(["-f", "matroska"])
+            .arg(&part);
+        let mut result = run_tool(cmd).await.map(|_| ());
+        if result.is_ok() {
+            let mut measure = tokio::process::Command::new(&ffmpeg);
+            measure.args(["-hide_banner", "-nostats", "-i"]).arg(&part).args(["-map", "0:a", "-af", export::MEASURE, "-f", "null", "-"]);
+            let measured = run_tool(measure).await.ok().and_then(|log| export::measured(&log));
+            let mut last = tokio::process::Command::new(&ffmpeg);
+            last.args(["-hide_banner", "-loglevel", "error", "-y", "-i"]).arg(&part);
+            if track {
+                last.arg("-i").arg(&srt_path);
+            }
+            last.args(["-map", "0:v", "-map", "0:a"]);
+            if track {
+                // The subtitle file: one text track, named by its language.
+                last.args(["-map", "1:0", "-c:s", "mov_text", "-metadata:s:s:0", &format!("language={language}")]);
+            }
+            last.args([
+                "-c:v",
+                "copy",
+                "-af",
+                &export::master(measured, fader),
+                "-ar",
+                "48000",
+                "-c:a",
+                "aac",
+                "-b:a",
+                &sound_bits.to_string(),
+            ])
+            .args(["-movflags", "+faststart", "-f", "mp4"])
+            .arg(&tmp);
+            result = run_tool(last).await.and_then(|_| std::fs::rename(&tmp, &out).map_err(|e| e.to_string()));
         }
-        if track {
-            // The subtitle file is the last input: one text track, named by its language.
-            let input = captions_input + usize::from(captions_list.is_some());
-            cmd.args(["-map", &format!("{input}:0"), "-c:s", "mov_text", "-metadata:s:s:0", &format!("language={language}")]);
-        }
-        // Apple's own encoders: H.264 in hardware and AAC. Plays everywhere.
-        cmd.args([
-            "-c:v",
-            "h264_videotoolbox",
-            "-b:v",
-            &video_bits.to_string(),
-            "-pix_fmt",
-            "yuv420p",
-            "-r",
-            "24",
-            "-c:a",
-            "aac",
-            "-b:a",
-            &sound_bits.to_string(),
-            "-movflags",
-            "+faststart",
-            "-f",
-            "mp4",
-        ])
-        .arg(&tmp);
-        cmd.stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped()).kill_on_drop(true);
-        let result = match cmd.output().await {
-            Ok(o) if o.status.success() => std::fs::rename(&tmp, &out).map_err(|e| e.to_string()),
-            Ok(o) => Err(String::from_utf8_lossy(&o.stderr)
-                .lines()
-                .last()
-                .unwrap_or("the shots could not be joined")
-                .chars()
-                .take(300)
-                .collect()),
-            Err(e) => Err(e.to_string()),
-        };
-        std::fs::remove_file(&list_path).ok();
+        std::fs::remove_file(&part).ok();
         std::fs::remove_file(&graph_path).ok();
         match result {
             Ok(()) => {
@@ -2438,7 +2557,7 @@ async fn begin_export(app: &Shared, p: Project, body: Export) -> Result<usize, (
                 app2.record(
                     "studio_exported",
                     json!({"shots": count, "seconds": started.elapsed().as_secs_f32(), "bytes": bytes, "music": music.is_some(),
-                           "film_seconds": graph.frames as f32 / 24.0, "dissolves": joins.0, "through_black": joins.1, "plain": simple,
+                           "film_seconds": graph.frames as f32 / 24.0, "dissolves": joins.0, "through_black": joins.1,
                            "tracks": track_count, "regions": region_count, "subtitles": subtitles,
                            "scale": options.scale.max(1), "quality": if options.quality.is_empty() { "balanced" } else { options.quality.as_str() }}),
                 );
@@ -2450,7 +2569,7 @@ async fn begin_export(app: &Shared, p: Project, body: Export) -> Result<usize, (
             }
             Err(e) => {
                 std::fs::remove_file(&tmp).ok();
-                app2.record("studio_export_failed", json!({"shots": count, "plain": simple}));
+                app2.record("studio_export_failed", json!({"shots": count}));
                 set_export(&id, json!({"state": "failed", "error": e}));
             }
         }
@@ -2786,11 +2905,9 @@ pub(crate) mod tests {
             ..Project::default()
         };
         let made = exported(&p);
-        assert_eq!(made.len(), 2);
-        let list = concat_list(&p, &made);
-        let lines: Vec<&str> = list.lines().collect();
-        assert!(lines[0].starts_with("ffconcat") && lines[1].ends_with("a1.webm'") && lines[2].ends_with("c3.webm'"));
-        assert_eq!(&lines[3..], ["inpoint 0.500", "outpoint 4.042"]);
+        assert_eq!(made.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), ["a1", "c3"]);
+        let parts = pieces(&made, &[(true, None), (true, None)], None);
+        assert_eq!((parts[1].start, parts[1].frames), (0.5, 85));
         assert_eq!(file_stem(&p.name), "A film take 2");
         assert_eq!(file_stem("///"), "film");
         // Trims always leave part of the shot.
@@ -2884,7 +3001,7 @@ pub(crate) mod tests {
         c.mute = true;
         let mut d = a.clone();
         d.join = "black".into();
-        let made = pieces(&[&a, &b, &c, &d], &[true, true, true, false], None);
+        let made = pieces(&[&a, &b, &c, &d], &[(true, Some(-36.0)), (true, Some(-14.0)), (true, None), (false, None)], None);
         // The first shot has no join; a shot that continues the one before it is always a cut.
         assert_eq!(
             made.iter().map(|x| x.join).collect::<Vec<_>>(),
@@ -2893,7 +3010,9 @@ pub(crate) mod tests {
         assert_eq!(made.iter().map(|x| x.frames).collect::<Vec<_>>(), [56, 26, 56, 56]);
         assert_eq!(made[1].start, 0.5);
         assert_eq!(made.iter().map(|x| x.volume).collect::<Vec<_>>(), [1.0, 1.4, 0.0, 1.0]);
-        assert!(!made[3].has_sound && !export::plain(&made));
+        assert!(!made[3].has_sound && made[0].has_sound);
+        // A quiet shot comes up toward the others and a loud one goes down; one not measured stays.
+        assert_eq!(made.iter().map(|x| x.level).collect::<Vec<_>>(), [12.0, -10.0, 0.0, 0.0]);
         // Joins and volume are kept by a save and leave the clip as it is.
         let kept = merge_shots(
             &[a.clone(), b.clone()],
@@ -2993,8 +3112,10 @@ pub(crate) mod tests {
             shots: vec![shot("a1", "a fox", "done"), second, third, shot("d4", "", "empty")],
             ..Project::default()
         };
-        let seen =
-            [pace::Sample { frames: 121, continued: true, seconds: 400.0 }, pace::Sample { frames: 49, continued: false, seconds: 90.0 }];
+        let seen = [
+            pace::Sample { frames: 121, continued: true, seconds: 400.0, pixels: 0 },
+            pace::Sample { frames: 49, continued: false, seconds: 90.0, pixels: 0 },
+        ];
         // Nothing is waiting: the two shots that are not made, and not the one without a description.
         assert_eq!(time_left(&p, &seen, &[], None), (490.0, 0.0));
         // The second is being made for 100 seconds and the third waits.
@@ -3002,7 +3123,13 @@ pub(crate) mod tests {
         // A shot that takes longer than expected still has a little left.
         assert_eq!(time_left(&p, &seen, &[], Some(("b2", 900.0))).1, 20.0);
         // A made shot that is made again counts as left, and not as missing.
-        assert_eq!(time_left(&p, &[], &["a1".into()], None), (121.0 / 24.0 * 80.0 + 49.0 / 24.0 * 25.0, 121.0 / 24.0 * 25.0));
+        let usual = |frames: u32, continued: bool| pace::estimate(&[], frames, 0, continued);
+        assert_eq!(time_left(&p, &[], &["a1".into()], None), (usual(121, true) + usual(49, false), usual(121, false)));
+        assert_eq!(usual(121, false), 121.0 / 24.0 * 25.0);
+        // A shot at a larger size needs more than a shot of the film's.
+        let mut larger = p.clone();
+        larger.shots[2].size = "896x512".into();
+        assert!(time_left(&larger, &seen, &[], None).0 > 490.0 + 90.0);
     }
 
     #[test]
@@ -3115,7 +3242,7 @@ pub(crate) mod tests {
         slow.made_frames = Some(96);
         slow.join = "dissolve".into();
         slow.join_seconds = 1.25;
-        assert_eq!(pieces(&[&shot("a1", "fox", "done"), &slow], &[true, true], None)[1].join_frames, 30);
+        assert_eq!(pieces(&[&shot("a1", "fox", "done"), &slow], &[(true, None), (true, None)], None)[1].join_frames, 30);
         // A film without tracks is stored as before, and one from before tracks is read as it is.
         let p = Project { id: "p".into(), name: "Film".into(), folder: "/films/fox".into(), ..Project::default() };
         let text = serde_json::to_string(&p).unwrap();
@@ -3203,8 +3330,10 @@ pub(crate) mod tests {
         let (all, _) = merge(&old, &[], same(&old), (&was, &ink)).unwrap();
         assert!(all.iter().all(|s| s.state == "changed"));
         // A film without a cast and without a look is made from what it always was.
-        assert_eq!(film("640x384").key("a fox", 121, None, ""), made_key("640x384", "a fox", 121, None));
-        assert_eq!(film("640x384").key("a fox", 121, Some("a1"), "m1"), made_key("640x384", "a fox", 121, Some("a1")));
+        assert_eq!(film("640x384").key("", "a fox", 121, None, ""), made_key("640x384", "a fox", 121, None));
+        assert_eq!(film("640x384").key("", "a fox", 121, Some("a1"), "m1"), made_key("640x384", "a fox", 121, Some("a1")));
+        // A shot made at a quality of its own is made from its own size.
+        assert_eq!(film("640x384").key("896x512", "a fox", 121, None, ""), made_key("896x512", "a fox", 121, None));
     }
 
     #[test]
@@ -3268,21 +3397,32 @@ pub(crate) mod tests {
 
     /// A service with nothing in it, or with a video model that counts as installed.
     pub(crate) fn bare_app(video: bool) -> (Shared, PathBuf) {
+        app_with(&if video { vec![package("pour-test", "video", "null")] } else { Vec::new() })
+    }
+
+    /// A package of the manifest with one file, `<id>/<id>.bin`, and the defaults given (JSON).
+    pub(crate) fn package(id: &str, modality: &str, defaults: &str) -> String {
+        format!(
+            r#"{{"id":"{id}","name":"{id}","modality":"{modality}","version":1,"engine":"sdcpp","access":"public",
+                 "source":{{"name":"s","url":"u","license":"l","changes":"c"}},"quality_floor":0.5,"defaults":{defaults},
+                 "variants":[{{"id":"q4","accel_mem_mb":1,"backends":[],"quality":1.0,"files":[{{"role":"dit","path":"{id}/{id}.bin","size":1,
+                 "sha256":"0000000000000000000000000000000000000000000000000000000000000000"}}]}}]}}"#
+        )
+    }
+
+    /// A service whose manifest has these packages, every one of them installed.
+    pub(crate) fn app_with(packages: &[String]) -> (Shared, PathBuf) {
         use std::collections::HashMap;
         let dir = std::env::temp_dir().join(format!("rigbrewd-studio-{}", uuid::Uuid::new_v4().simple()));
         std::fs::create_dir_all(&dir).unwrap();
-        let packages = if video {
-            r#"[{"id":"pour-test","name":"Pour","modality":"video","version":1,"engine":"sdcpp","access":"public",
-                 "source":{"name":"s","url":"u","license":"l","changes":"c"},"quality_floor":0.5,
-                 "variants":[{"id":"q4","accel_mem_mb":1,"backends":[],"quality":1.0,"files":[{"role":"dit","path":"pour-test/dit.gguf","size":1,
-                 "sha256":"0000000000000000000000000000000000000000000000000000000000000000"}]}]}]"#
-        } else {
-            "[]"
-        };
-        // The one file of the video model is there: that is what "installed" means.
-        std::fs::create_dir_all(dir.join("packages").join("pour-test")).unwrap();
-        std::fs::write(dir.join("packages").join("pour-test").join("dit.gguf"), "x").unwrap();
-        let manifest = format!(r#"{{"schema":1,"generated":"2026-11-20","base_url":"http://127.0.0.1:9/","packages":{packages}}}"#);
+        // The one file of each package is there: that is what "installed" means.
+        for p in packages {
+            let id = serde_json::from_str::<Value>(p).unwrap()["id"].as_str().unwrap().to_string();
+            std::fs::create_dir_all(dir.join("packages").join(&id)).unwrap();
+            std::fs::write(dir.join("packages").join(&id).join(format!("{id}.bin")), "x").unwrap();
+        }
+        let manifest =
+            format!(r#"{{"schema":1,"generated":"2026-11-20","base_url":"http://127.0.0.1:9/","packages":[{}]}}"#, packages.join(","));
         let app = App {
             profile: rigbrew_core::hardware::scan_with_data_dir(&dir),
             manifest: rigbrew_core::Manifest::parse(&manifest).unwrap(),
@@ -3398,5 +3538,70 @@ pub(crate) mod tests {
         assert_eq!(body["shots"].as_array().map(Vec::len), Some(2));
         assert_eq!(body["shots"][1]["prompt"], "A boat floats by.");
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    const QUALITIES: &str = r#"{"sizes":{"landscape":[640,384],"portrait":[384,640]},"qualities":[
+        {"id":"draft","label":"Draft","sizes":{"landscape":[640,384],"portrait":[384,640]},"mem_mb":1},
+        {"id":"standard","label":"Standard","sizes":{"landscape":[896,512],"portrait":[512,896]},"mem_mb":1},
+        {"id":"high","label":"High","sizes":{"landscape":[1344,768],"portrait":[768,1344]},"mem_mb":99999999}]}"#;
+
+    #[tokio::test]
+    async fn a_new_film_is_made_at_the_best_quality_this_machine_makes_well() {
+        let (app, dir) = app_with(&[package("pour-test", "video", QUALITIES)]);
+        let list = qualities_of(&app, &[]);
+        assert_eq!(list.iter().map(|q| q["id"].as_str().unwrap()).collect::<Vec<_>>(), ["draft", "standard", "high"]);
+        // Nothing measured yet: the usual pace, grown with the points of each quality.
+        let five: Vec<f64> = list.iter().map(|q| q["five"].as_f64().unwrap()).collect();
+        assert!((five[0] - 126.04).abs() < 0.1 && five[1] > 2.0 * five[0] && five[2] > 2.0 * five[1], "{five:?}");
+        // High needs more memory than any machine has; Standard fits and is fast enough.
+        assert_eq!(list.iter().map(|q| q["fits"].as_bool().unwrap()).collect::<Vec<_>>(), [true, true, false]);
+        assert_eq!(usual_quality(&list), "standard");
+        // A machine that made Standard shots slowly makes Draft films unless asked.
+        let slow = [pace::Sample { frames: 121, continued: false, seconds: 2000.0, pixels: 896 * 512 }];
+        assert_eq!(usual_quality(&qualities_of(&app, &slow)), "draft");
+        assert_eq!(usual_quality(&[]), "");
+        // A new film starts at that quality, wide; a film that is there keeps its size.
+        let folder = dir.join("film").to_string_lossy().to_string();
+        create(State(app.clone()), Json(NewProject { folder: folder.clone(), name: "Fox".into() })).await;
+        let id = index(&app)[0].0.clone();
+        assert_eq!(load(&app, &id).unwrap().size, "896x512");
+        let seen = view(&app, load(&app, &id).unwrap());
+        assert_eq!((seen["usual_quality"].as_str(), seen["qualities"].as_array().map(Vec::len)), (Some("standard"), Some(3)));
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_shot_can_be_made_at_a_quality_of_its_own() {
+        let mut a = shot("a1", "a fox", "done");
+        a.made_frames = Some(124);
+        let ask = |size: Option<&str>| {
+            vec![ShotIn {
+                id: Some("a1".into()),
+                prompt: "a fox".into(),
+                frames: Some(121),
+                size: size.map(str::to_string),
+                ..ShotIn::default()
+            }]
+        };
+        // A made shot asked for at another size is made again; its own size is kept with it.
+        let higher = merge_shots(std::slice::from_ref(&a), ask(Some("896x512")), false).unwrap();
+        assert_eq!((higher[0].state.as_str(), higher[0].size.as_str()), ("changed", "896x512"));
+        // Left out, a shot keeps the size it has; at the film's size it has none of its own.
+        let kept = merge_shots(&higher, ask(None), false).unwrap();
+        assert_eq!(kept[0].size, "896x512");
+        let back = merge_shots(&higher, ask(Some("640x384")), false).unwrap();
+        assert_eq!((back[0].state.as_str(), back[0].size.as_str()), ("done", ""));
+        // A size a clip cannot have is no size of its own.
+        assert_eq!(merge_shots(&[a.clone()], ask(Some("900x500")), false).unwrap()[0].size, "");
+        // A shot with a size of its own stays made when the film changes size around it.
+        let own = Shot { size: "896x512".into(), ..a.clone() };
+        let wide = Film { size: "640x384", look: "", cast: &[] };
+        let standard = Film { size: "512x896", ..wide };
+        let (moved, _) = merge(std::slice::from_ref(&own), &[], ask(None), (&wide, &standard)).unwrap();
+        assert_eq!((moved[0].state.as_str(), moved[0].size.as_str()), ("done", "896x512"));
+        // Its pace is counted at its own size.
+        assert_eq!(pixels(own.size_in("640x384")), 896 * 512);
+        assert_eq!(pixels(a.size_in("640x384")), pace::DRAFT_PIXELS);
+        assert!(valid_size("1344x768") && !valid_size("1376x768"));
     }
 }

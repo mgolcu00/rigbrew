@@ -26,16 +26,19 @@ pub(super) struct Wish {
     text: String,
 }
 
-/// The size a video package makes a shape in, and the length it has closest to five seconds.
-pub fn shape_of(package: &Package, shape: &str) -> ((u32, u32), u32) {
+/// The size a video package makes a shape in at a quality (its own sizes when it has no such
+/// quality), and the length it has closest to five seconds.
+pub fn shape_of(package: &Package, shape: &str, quality: &str) -> ((u32, u32), u32) {
     let usual = match shape {
         "portrait" => (384, 640),
         "square" => (512, 512),
         _ => (640, 384),
     };
+    let at = package.qualities().into_iter().find(|q| q.id == quality).and_then(|q| q.sizes.get(shape).copied());
     let own = &package.defaults["sizes"][shape];
-    let size = match (own[0].as_u64(), own[1].as_u64()) {
-        (Some(w), Some(h)) if super::valid_size(&format!("{w}x{h}")) => (w as u32, h as u32),
+    let size = match (at, own[0].as_u64(), own[1].as_u64()) {
+        (Some([w, h]), _, _) if super::valid_size(&format!("{w}x{h}")) => (w, h),
+        (_, Some(w), Some(h)) if super::valid_size(&format!("{w}x{h}")) => (w as u32, h as u32),
         _ => usual,
     };
     let lengths: Vec<u32> = package.defaults["lengths"]
@@ -46,14 +49,14 @@ pub fn shape_of(package: &Package, shape: &str) -> ((u32, u32), u32) {
 }
 
 /// The brief of a film as the app is answered with it: what the model chose, in the sizes and
-/// lengths the video model makes.
-pub fn brief_view(b: &brief::Brief, video: &Package) -> Value {
-    let ((width, height), frames) = shape_of(video, &b.shape);
+/// lengths the video model makes at `quality`.
+pub fn brief_view(b: &brief::Brief, video: &Package, quality: &str) -> Value {
+    let ((width, height), frames) = shape_of(video, &b.shape, quality);
     let seconds = brief::offered(b.seconds);
     let shots = ((seconds as f32 / (frames as f32 / 24.0)).round() as usize).clamp(1, MAX_STORYBOARD);
     let cast: Vec<Value> = b.cast.iter().map(|(name, look)| json!({"name": name, "look": look})).collect();
-    json!({"title": b.title, "shape": b.shape, "size": format!("{width}x{height}"), "seconds": seconds, "frames": frames, "shots": shots,
-           "look": b.look, "speech": b.speech, "language": b.language, "cast": cast})
+    json!({"title": b.title, "shape": b.shape, "size": format!("{width}x{height}"), "quality": quality, "seconds": seconds, "frames": frames,
+           "shots": shots, "look": b.look, "speech": b.speech, "language": b.language, "cast": cast})
 }
 
 pub(super) async fn brief(State(app): State<Shared>, Json(body): Json<Wish>) -> Response {
@@ -79,7 +82,9 @@ pub(super) async fn brief(State(app): State<Shared>, Json(body): Json<Wish>) -> 
         "studio_brief_written",
         json!({"shape": read.shape, "seconds": read.seconds, "cast": read.cast.len(), "speech": read.speech, "look": !read.look.is_empty()}),
     );
-    Json(brief_view(&read, video)).into_response()
+    // A film directed from a few words is made at the quality this machine makes well.
+    let quality = super::default_quality(&app);
+    Json(brief_view(&read, video, &quality)).into_response()
 }
 
 #[derive(Deserialize)]
@@ -217,7 +222,7 @@ mod tests {
             "TITLE: Night Market\nSHAPE: tall\nLENGTH: 50\nNARRATION: yes\nCAST:\n- Lena: a woman in her thirties with a silver bob",
             "x",
         );
-        let v = brief_view(&read, &package);
+        let v = brief_view(&read, &package, "");
         assert_eq!(
             (v["title"].as_str(), v["shape"].as_str(), v["size"].as_str()),
             (Some("Night Market"), Some("portrait"), Some("384x640"))
@@ -227,7 +232,19 @@ mod tests {
         assert_eq!(v["cast"], json!([{"name": "Lena", "look": "a woman in her thirties with a silver bob"}]));
         assert_eq!((v["speech"].as_bool(), v["language"].as_str()), (Some(true), Some("English")));
         // A package that says nothing about itself gets the usual shape and five seconds.
-        assert_eq!(shape_of(&video(Value::Null), "square"), ((512, 512), 121));
-        assert_eq!(shape_of(&video(json!({"sizes": {"landscape": [100, 7]}, "lengths": [{"frames": 33}]})), "landscape"), ((640, 384), 33));
+        assert_eq!(shape_of(&video(Value::Null), "square", ""), ((512, 512), 121));
+        assert_eq!(
+            shape_of(&video(json!({"sizes": {"landscape": [100, 7]}, "lengths": [{"frames": 33}]})), "landscape", ""),
+            ((640, 384), 33)
+        );
+        // At a quality the package has, the shape is made at that quality's size.
+        let qualities = video(json!({"sizes": {"portrait": [384, 640]}, "qualities": [
+            {"id": "draft", "label": "Draft", "sizes": {"portrait": [384, 640]}},
+            {"id": "standard", "label": "Standard", "sizes": {"portrait": [512, 896], "landscape": [896, 512]}}]}));
+        assert_eq!(shape_of(&qualities, "portrait", "standard").0, (512, 896));
+        assert_eq!(shape_of(&qualities, "portrait", "draft").0, (384, 640));
+        assert_eq!(shape_of(&qualities, "portrait", "high").0, (384, 640));
+        let v = brief_view(&read, &qualities, "standard");
+        assert_eq!((v["size"].as_str(), v["quality"].as_str()), (Some("512x896"), Some("standard")));
     }
 }

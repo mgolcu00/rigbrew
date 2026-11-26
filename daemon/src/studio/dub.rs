@@ -21,7 +21,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use rigbrew_core::manifest::Modality;
+use rigbrew_core::manifest::{Modality, Package};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -77,12 +77,43 @@ pub fn shown_language(p: &Project) -> String {
     }
 }
 
-/// The languages the installed voice reads. A line in another language is not read aloud: the
-/// voice leaves out the words it does not know, and what is left is no reading.
-pub const SPOKEN: [&str; 2] = ["English", "Chinese"];
+/// The voice packages this install has, else every one the manifest has.
+fn voice_packages(app: &App) -> Vec<&Package> {
+    let all: Vec<&Package> = app.manifest.packages.iter().filter(|p| p.modality == Modality::Voice).collect();
+    let installed: Vec<&Package> = all.iter().copied().filter(|p| !app.installed(p).is_empty()).collect();
+    if installed.is_empty() {
+        all
+    } else {
+        installed
+    }
+}
 
-pub fn voice_reads(language: &str) -> bool {
-    SPOKEN.iter().any(|l| l.eq_ignore_ascii_case(language.trim()))
+/// The languages the voices read (see `voice_packages`). A line in another language is not read
+/// aloud: a voice leaves out the words it does not know, and what is left is no reading.
+pub fn spoken(app: &App) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for language in voice_packages(app).iter().flat_map(|p| p.languages()) {
+        if !out.iter().any(|l| l.eq_ignore_ascii_case(&language)) {
+            out.push(language);
+        }
+    }
+    out
+}
+
+pub fn voice_reads(app: &App, language: &str) -> bool {
+    spoken(app).iter().any(|l| l.eq_ignore_ascii_case(language.trim()))
+}
+
+/// The installed voice that reads `language`: one that names it among its languages before one
+/// from before voices named them (which reads English and Chinese).
+pub fn voice_for<'a>(app: &'a App, language: &str) -> Option<&'a Package> {
+    let installed: Vec<&Package> = app
+        .manifest
+        .packages
+        .iter()
+        .filter(|p| p.modality == Modality::Voice && !app.installed(p).is_empty() && p.reads(language))
+        .collect();
+    installed.iter().find(|p| p.defaults["languages"].is_array()).or(installed.first()).copied()
 }
 
 /// The language whose voice track is heard: the one that is shown when it has a track, else the
@@ -142,16 +173,28 @@ fn hash(parts: &[&str]) -> String {
     format!("{hash:016x}")
 }
 
-/// How many voices the installed voice has: its file holds one block of numbers for each.
-pub fn voices(app: &App) -> u32 {
-    let Some(package) = app.manifest.packages.iter().find(|pk| pk.modality == Modality::Voice && !app.installed(pk).is_empty()) else {
-        return 0;
-    };
+/// How many voices an installed voice package has: as many as it says (`defaults.speakers`), else
+/// one for each block of numbers in its `voices.bin`.
+pub fn speakers(app: &App, package: &Package) -> u32 {
+    if let Some(n) = package.defaults["speakers"].as_u64() {
+        return (n as u32).clamp(1, 999);
+    }
     let bundle = app.installed(package).into_iter().next().and_then(|v| v.files.iter().find(|f| rigbrew_core::bundle::is_bundle(f)));
     let Some(bundle) = bundle else { return 0 };
     let bytes = std::fs::metadata(rigbrew_core::bundle::dir(&app.packages_dir(), bundle).join("voices.bin")).map(|m| m.len()).unwrap_or(0);
     // 510 lengths of 256 numbers, four bytes each.
     ((bytes / (510 * 256 * 4)) as u32).clamp(1, 999)
+}
+
+/// How many voices there are to choose from: of the installed voice that has the most.
+pub fn voices(app: &App) -> u32 {
+    app.manifest
+        .packages
+        .iter()
+        .filter(|pk| pk.modality == Modality::Voice && !app.installed(pk).is_empty())
+        .map(|pk| speakers(app, pk))
+        .max()
+        .unwrap_or(0)
 }
 
 #[derive(Deserialize, Default)]
@@ -174,11 +217,15 @@ pub(super) async fn dub(State(app): State<Shared>, Path(id): Path<String>, body:
     let own = own_language(&p);
     let language = body.and_then(|b| b.0.language).map(|l| words::language(&l)).filter(|l| !l.is_empty()).unwrap_or_else(|| own.clone());
     let translated = !language.eq_ignore_ascii_case(&own);
-    // A language the voice does not read is translated for the subtitles, and needs no voice.
-    let voice = match need(&app, Modality::Voice) {
-        Ok(package) => package.id.clone(),
-        Err(_) if translated && !voice_reads(&language) => String::new(),
-        Err(refusal) => return *refusal,
+    // The voice that reads the language. A language no voice reads is translated for the
+    // subtitles, and needs no voice.
+    let voice = match voice_for(&app, &language).map(|package| package.id.clone()) {
+        Some(voice) => voice,
+        None => match need(&app, Modality::Voice) {
+            Ok(package) => package.id.clone(),
+            Err(_) if translated && !voice_reads(&app, &language) => String::new(),
+            Err(refusal) => return *refusal,
+        },
     };
     if translated {
         if let Err(refusal) = need(&app, Modality::Chat) {
@@ -255,8 +302,8 @@ async fn run_dub(app: &Shared, id: &str, language: &str, translated: bool, voice
     if translated {
         translate(app, id, language).await?;
     }
-    if !voice_reads(language) {
-        // The voice does not read this language: the film is read in it (subtitles) and heard as it was.
+    if voice.is_empty() || !voice_reads(app, language) {
+        // No voice reads this language: the film is read in it (subtitles) and heard as it was.
         let mut p = load(app, id).ok_or("the film is gone")?;
         p.dub = language.to_string();
         hear_one(&mut p);
@@ -269,19 +316,19 @@ async fn run_dub(app: &Shared, id: &str, language: &str, translated: bool, voice
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let all: Vec<(&Shot, &Spoken)> = p.shots.iter().flat_map(|s| s.lines.iter().map(move |l| (s, l))).collect();
     // The reading of each line: its file and its length. A line that was read before, in the
-    // same words by the same voice, is not read again.
+    // same words by the same voice in the same language, is not read again.
     let mut read: Vec<(String, PathBuf, f32)> = Vec::new();
     for (n, (shot, line)) in all.iter().enumerate() {
         set_job(id, "dub", json!({"state": "working", "stage": "reading", "done": n, "of": all.len(), "language": language}));
         let text = line.text_in(language);
         let speaker = voice_of(&p, line);
-        let file = dir.join(format!("{}.wav", hash(&[text, &speaker.to_string()])));
+        let file = dir.join(format!("{}.wav", hash(&[text, &speaker.to_string(), voice, language])));
         if !file.is_file() {
             let answer = app
                 .http
                 .post(format!("http://127.0.0.1:{port}/v1/audio/speech"))
                 .bearer_auth(&app.token)
-                .json(&json!({"model": voice, "input": text, "voice": speaker}))
+                .json(&json!({"model": voice, "input": text, "voice": speaker, "language": language}))
                 .timeout(Duration::from_secs(600))
                 .send()
                 .await
@@ -718,7 +765,6 @@ mod tests {
         p.dub.clear();
         hear_one(&mut p);
         assert_eq!(p.tracks.iter().map(|t| t.mute).collect::<Vec<_>>(), [false, true]);
-        assert!(voice_reads(" english") && voice_reads("Chinese") && !voice_reads("Turkish"));
         // A reading that runs past the end of the film: its subtitle ends with the film.
         p.tracks[0].regions[0] = Region { start: 9.5, length: 3.0, line: "b/l2".into(), ..p.tracks[0].regions[0].clone() };
         let last = subtitles(&p, false).pop().unwrap();
@@ -762,6 +808,29 @@ mod tests {
         assert!(drawn(&p, &other, (640, 384)).is_none() && drawn(&p, &cues, (1280, 768)).is_none());
         std::fs::remove_file(kept.join("0.pam")).unwrap();
         assert!(drawn(&p, &cues, (640, 384)).is_none());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn each_language_is_read_by_the_voice_that_reads_it() {
+        use crate::studio::tests::{app_with, package};
+        let whistle = package("whistle-82m", "voice", "null");
+        let chime = package("chime-99m", "voice", r#"{"languages":["English","Turkish","German"],"speakers":10}"#);
+        let (both, dir) = app_with(&[whistle.clone(), chime.clone()]);
+        let id = |p: Option<&Package>| p.map(|p| p.id.clone()).unwrap_or_default();
+        // The voice that names its languages reads them; the first voice still reads Chinese.
+        assert_eq!(id(voice_for(&both, "Turkish")), "chime-99m");
+        assert_eq!(id(voice_for(&both, "english")), "chime-99m");
+        assert_eq!(id(voice_for(&both, "Chinese")), "whistle-82m");
+        assert!(voice_for(&both, "Klingon").is_none());
+        assert!(voice_reads(&both, " turkish") && voice_reads(&both, "Chinese") && !voice_reads(&both, "Klingon"));
+        assert_eq!(spoken(&both), ["English", "Chinese", "Turkish", "German"]);
+        assert_eq!(voices(&both), 10);
+        std::fs::remove_dir_all(dir).ok();
+        // With only the first voice, Turkish is not read.
+        let (old, dir) = app_with(&[whistle]);
+        assert!(voice_for(&old, "Turkish").is_none());
+        assert!(voice_reads(&old, " english") && voice_reads(&old, "Chinese") && !voice_reads(&old, "Turkish"));
         std::fs::remove_dir_all(dir).ok();
     }
 }

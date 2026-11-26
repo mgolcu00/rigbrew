@@ -4,13 +4,36 @@
 //!
 //! Everything is counted in frames at 24 a second, so the pictures and the sound of every shot
 //! are exactly as long as each other and a long film does not drift.
+//!
+//! The sound is finished as well as it is joined (measured on a 24-shot film of the video model,
+//! whose shots came out between -56 and -10 LUFS and clicked at 13 of 23 cuts):
+//! - every sound is brought to 48 kHz with a long resampling filter, flat to 15 kHz;
+//! - every shot is brought toward one loudness, at most 12 dB either way ([`level`]);
+//! - a hard cut fades the sound out and in over 6 ms on each side, so the step between two
+//!   clips is not heard as a click; the picture is not touched and nothing drifts;
+//! - the whole film is measured once it is mixed and brought to -16 LUFS, the loudness of
+//!   films and podcasts played on phones and laptops, under a limiter that keeps the true peak
+//!   below -1.5 dBTP once it is AAC ([`MEASURE`], [`master`]).
 
 const FPS: f64 = 24.0;
 /// Samples a second of everything that is mixed.
 const RATE: f64 = 48000.0;
 /// The film's own fade in and fade out.
 const EDGE_SECONDS: f64 = 0.5;
-const SOUND: &str = "aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo";
+/// To 48 kHz with a filter four times the usual length: a 15 kHz tone loses 0.0 dB instead of 1.3.
+const SOUND: &str = "aresample=48000:filter_size=128:kaiser_beta=12,aformat=sample_fmts=fltp:channel_layouts=stereo";
+/// Seconds of the fade on each side of a hard cut.
+const CUT_FADE: f64 = 0.006;
+/// The loudness every shot is brought toward, and how far at most.
+pub const SHOT_LUFS: f64 = -24.0;
+const SHOT_REACH_DB: f64 = 12.0;
+/// The loudness of the finished film.
+pub const FILM_LUFS: f64 = -16.0;
+/// The limiter's ceiling on samples: lower than the -1.5 dBTP the film may peak at, because the
+/// peaks between samples and the AAC encoder add about 0.5 dB (measured: -2 dBFS gave -1.4 dBTP).
+const LIMIT_DBFS: f64 = -2.5;
+/// The first pass over the mixed film: what its loudness is.
+pub const MEASURE: &str = "loudnorm=I=-16:TP=-1.5:LRA=11:print_format=json";
 
 /// How the film goes from one shot into the next.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -41,6 +64,8 @@ pub struct Piece {
     pub join: Join,
     /// 1.0 is the clip as it is; 0 is silence.
     pub volume: f32,
+    /// Decibels that bring the clip's sound toward the loudness of every other shot ([`level`]).
+    pub level: f32,
     /// Whether the clip has a sound stream at all.
     pub has_sound: bool,
     /// Frames the join into this piece lasts: a dissolve for all of them, a fade through black in two halves.
@@ -86,9 +111,9 @@ pub struct Mix {
 }
 
 impl Mix {
-    /// Nothing to mix: the film's sound goes out as it is.
+    /// Nothing to mix: the film's sound goes out as it is (the master is set at the end, see [`master`]).
     pub fn is_plain(&self) -> bool {
-        self.sounds.is_empty() && self.shots_gain == 1.0 && self.shots_pan == 0.0 && self.master == 1.0 && !self.ducks()
+        self.sounds.is_empty() && self.shots_gain == 1.0 && self.shots_pan == 0.0 && !self.ducks()
     }
 
     fn ducks(&self) -> bool {
@@ -153,13 +178,44 @@ fn join_of(pieces: &[Piece], i: usize) -> Join {
     }
 }
 
-/// True when the film is its clips one after another and nothing else: every join a cut, every
-/// shot at its own volume. Such a film is joined without a filter graph, which is faster.
-pub fn plain(pieces: &[Piece]) -> bool {
-    pieces.iter().enumerate().all(|(i, p)| join_of(pieces, i) == Join::Cut && p.volume == 1.0 && p.has_sound && p.fit.is_none())
+/// Decibels that bring a shot whose sound measured `lufs` toward [`SHOT_LUFS`], at most 12 dB
+/// either way; nothing for a shot that was not measured or is all but silent.
+pub fn level(lufs: Option<f32>) -> f32 {
+    match lufs {
+        Some(l) if l.is_finite() && l > -70.0 => (SHOT_LUFS - l as f64).clamp(-SHOT_REACH_DB, SHOT_REACH_DB) as f32,
+        _ => 0.0,
+    }
+}
+
+/// The integrated loudness in ffmpeg's `ebur128` summary, in LUFS: none for silence.
+pub fn loudness(log: &str) -> Option<f32> {
+    let summary = &log[log.rfind("Summary:")?..];
+    let value = summary.split("I:").nth(1)?.split("LUFS").next()?.trim().parse::<f32>().ok()?;
+    (value.is_finite() && value > -70.0).then_some(value)
+}
+
+/// The integrated loudness of the mixed film as the first pass ([`MEASURE`]) wrote it in its log.
+pub fn measured(log: &str) -> Option<f64> {
+    let json = log.get(log.rfind('{')?..=log.rfind('}')?)?;
+    let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    v["input_i"].as_str()?.trim().parse::<f64>().ok().filter(|i| i.is_finite() && *i > -70.0)
+}
+
+/// What is done last to the sound of the mixed film: it is brought from the loudness it measured
+/// to [`FILM_LUFS`] (moved by the master: 2 is 6 dB louder) in one step, and a limiter holds the
+/// peaks. One gain for the whole film keeps its shots where the mix put them; a film that could
+/// not be measured keeps its loudness.
+pub fn master(measured: Option<f64>, fader: f64) -> String {
+    if fader <= 0.0 {
+        return "volume=0".into();
+    }
+    let offset = 20.0 * fader.min(2.0).log10();
+    let gain = measured.map_or(offset, |i| (FILM_LUFS + offset - i).clamp(-30.0, 30.0));
+    format!("volume={gain:.2}dB,alimiter=limit={:.3}:attack=5:release=50:level=false:latency=true", 10f64.powf(LIMIT_DBFS / 20.0))
 }
 
 /// Frames of the whole film: every piece, less what dissolves share.
+#[cfg(test)]
 pub fn film_frames(pieces: &[Piece]) -> u32 {
     let shared: u32 = (1..pieces.len()).filter(|i| pieces[*i].join == Join::Dissolve).map(|i| overlap(&pieces[i - 1], &pieces[i])).sum();
     pieces.iter().map(|p| p.frames).sum::<u32>() - shared
@@ -184,8 +240,9 @@ pub fn joined(pieces: &[Piece]) -> Graph {
         );
         // Sound: the same stretch, padded with silence to the same length. A muted shot is silence.
         let heard = p.has_sound && p.volume > 0.0;
+        let gain = p.volume as f64 * 10f64.powf(p.level as f64 / 20.0);
         let mut a = if heard {
-            format!("[{i}:a]atrim=start={:.3},asetpts=PTS-STARTPTS,{SOUND},volume={:.2}", p.start, p.volume)
+            format!("[{i}:a]atrim=start={:.3},asetpts=PTS-STARTPTS,{SOUND},volume={gain:.2}", p.start)
         } else {
             "anullsrc=r=48000:cl=stereo".to_string()
         };
@@ -201,8 +258,20 @@ pub fn joined(pieces: &[Piece]) -> Graph {
                 a.push_str(&format!(",afade=t=out:st={:.4}:d={down:.4}", length - down));
             }
         }
+        // A hard cut on either side: the sound fades out and in over a few milliseconds there, so
+        // the step from one clip's sound to the next is not a click. The film's start and end count as cuts.
+        let mut edges = String::new();
+        if heard {
+            let next_cut = pieces.get(i + 1).is_none_or(|next| next.join == Join::Cut);
+            if join_of(pieces, i) == Join::Cut {
+                edges.push_str(&format!(",afade=t=in:st=0:d={CUT_FADE}:curve=qsin"));
+            }
+            if next_cut {
+                edges.push_str(&format!(",afade=t=out:st={:.4}:d={CUT_FADE}:curve=qsin", length - CUT_FADE));
+            }
+        }
         steps.push(format!("{v}[v{i}]"));
-        steps.push(format!("{a},apad=whole_dur={length:.4},atrim=end={length:.4}[a{i}]"));
+        steps.push(format!("{a},apad=whole_dur={length:.4},atrim=end={length:.4}{edges}[a{i}]"));
     }
     // Runs of pieces with no dissolve between them become one stream each.
     let mut runs: Vec<(String, String, u32, usize, usize)> = Vec::new();
@@ -241,6 +310,7 @@ pub fn joined(pieces: &[Piece]) -> Graph {
 }
 
 /// The film as one stream, before anything is done to it as a whole: input 0 is all of it.
+#[cfg(test)]
 pub fn as_it_is(frames: u32) -> Graph {
     Graph { filter: String::new(), video: "0:v".into(), audio: "0:a".into(), frames }
 }
@@ -332,13 +402,8 @@ pub fn finished(film: Graph, finish: &Finish) -> Graph {
         last.push(format!("amix=inputs={}:duration=first:dropout_transition=0:normalize=0", mixed.len()));
     }
     last.extend(hear);
-    if let Some(mix) = mix {
-        if mix.master != 1.0 {
-            last.push(format!("volume={:.3}", mix.master.max(0.0)));
-        }
-        // Several sounds on top of each other can be louder than a file can hold: the peaks are held down.
-        last.push("alimiter=limit=0.97:level=false:latency=true".into());
-    }
+    // Several sounds on top of each other can be louder than a file can hold: the mix is kept in
+    // floating point, and its loudness, the master and the peaks are set once, at the end ([`master`]).
     if !last.is_empty() {
         steps.push(format!("{}{}[a]", mixed.concat(), last.join(",")));
         out.audio = "[a]".into();
@@ -408,28 +473,36 @@ mod tests {
     const JOIN_FRAMES: u32 = 12;
 
     fn piece(frames: u32, join: Join) -> Piece {
-        Piece { start: 0.0, frames, join, volume: 1.0, has_sound: true, join_frames: JOIN_FRAMES, fit: None }
+        Piece { start: 0.0, frames, join, volume: 1.0, level: 0.0, has_sound: true, join_frames: JOIN_FRAMES, fit: None }
     }
 
     const PICTURE: &str = "setpts=PTS-STARTPTS,fps=24,tpad=stop=-1:stop_mode=clone";
     const LOOK: &str = "format=yuv420p,setsar=1,settb=AVTB";
 
     #[test]
-    fn a_film_of_cuts_needs_no_graph() {
-        let film = vec![piece(48, Join::Cut), piece(48, Join::Cut), piece(120, Join::Cut)];
-        assert!(plain(&film));
-        assert!(plain(&film[..1]));
-        // The join of the first piece is never looked at.
-        assert!(plain(&[piece(48, Join::Dissolve), piece(48, Join::Cut)]));
-        assert!(!plain(&[piece(48, Join::Cut), piece(48, Join::Dissolve)]));
-        assert!(!plain(&[piece(48, Join::Cut), piece(48, Join::Black)]));
+    fn the_sound_fades_for_a_few_milliseconds_at_every_cut() {
+        let film = vec![piece(48, Join::Cut), piece(48, Join::Cut), piece(120, Join::Dissolve), piece(48, Join::Black)];
+        let g = joined(&film);
+        let steps: Vec<&str> = g.filter.split(';').collect();
+        let (cut_in, cut_out) = (",afade=t=in:st=0:d=0.006:curve=qsin", ",afade=t=out:st=1.9940:d=0.006:curve=qsin");
+        // The film's start and the cut after the first shot.
+        assert!(steps[1].ends_with(&format!("atrim=end=2.0000{cut_in}{cut_out}[a0]")), "{}", steps[1]);
+        // A cut in, a dissolve out: the dissolve's own crossfade is the join there.
+        assert!(steps[3].ends_with(&format!("atrim=end=2.0000{cut_in}[a1]")), "{}", steps[3]);
+        // Dissolved in, and gone through black: the fades of those joins, nothing more.
+        assert!(steps[5].ends_with("atrim=end=5.0000[a2]") && steps[5].contains("afade=t=out:st=4.7500:d=0.2500"), "{}", steps[5]);
+        // Up from black, and the end of the film.
+        assert!(steps[7].ends_with(",atrim=end=2.0000,afade=t=out:st=1.9940:d=0.006:curve=qsin[a3]"), "{}", steps[7]);
+        assert_eq!(film_frames(&film), g.frames);
+        // A muted shot is silence: nothing to fade.
         let mut quiet = film.clone();
-        quiet[1].volume = 0.5;
-        assert!(!plain(&quiet));
-        let mut silent = film.clone();
-        silent[2].has_sound = false;
-        assert!(!plain(&silent));
-        assert_eq!(film_frames(&film), 216);
+        quiet[1].volume = 0.0;
+        assert!(joined(&quiet)
+            .filter
+            .split(';')
+            .nth(3)
+            .unwrap()
+            .starts_with("anullsrc=r=48000:cl=stereo,apad=whole_dur=2.0000,atrim=end=2.0000[a1]"));
         // Nothing to do to the whole film: the joined clips go to the file as they are.
         let whole = finished(as_it_is(216), &Finish::default());
         assert_eq!((whole.filter.as_str(), whole.video.as_str(), whole.audio.as_str()), ("", "0:v", "0:a"));
@@ -440,15 +513,56 @@ mod tests {
         let mut only = piece(56, Join::Dissolve);
         only.start = 0.5;
         only.volume = 1.5;
-        let g = joined(&[only]);
+        let g = joined(&[only.clone()]);
         assert_eq!(
             g.filter,
             format!(
                 "[0:v]trim=start=0.500,{PICTURE},trim=end_frame=56,{LOOK}[v0];\
-                 [0:a]atrim=start=0.500,asetpts=PTS-STARTPTS,{SOUND},volume=1.50,apad=whole_dur=2.3333,atrim=end=2.3333[a0]"
+                 [0:a]atrim=start=0.500,asetpts=PTS-STARTPTS,{SOUND},volume=1.50,apad=whole_dur=2.3333,atrim=end=2.3333,\
+                 afade=t=in:st=0:d=0.006:curve=qsin,afade=t=out:st=2.3273:d=0.006:curve=qsin[a0]"
             )
         );
         assert_eq!((g.video.as_str(), g.audio.as_str(), g.frames), ("[v0]", "[a0]", 56));
+        // A shot brought up 6 dB toward the others: its volume times two.
+        only.level = 6.0206;
+        assert!(joined(&[only]).filter.contains(",volume=3.00,apad="));
+    }
+
+    #[test]
+    fn every_shot_is_brought_toward_one_loudness_but_not_too_far() {
+        assert_eq!(level(Some(-24.0)), 0.0);
+        assert_eq!(level(Some(-30.5)), 6.5);
+        assert_eq!(level(Some(-10.5)), -12.0);
+        assert_eq!(level(Some(-56.1)), 12.0);
+        // Silence, and a clip that was not measured, are left as they are.
+        assert_eq!((level(Some(-75.0)), level(Some(f32::NEG_INFINITY)), level(None)), (0.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn the_loudness_is_read_from_ffmpeg() {
+        let ebur128 = "[Parsed_ebur128_0 @ 0x1] Summary:\n\n  Integrated loudness:\n    I:         -36.7 LUFS\n    Threshold: -47.0 LUFS\n\n  Loudness range:\n    LRA:         3.1 LU\n";
+        assert_eq!(loudness(ebur128), Some(-36.7));
+        assert_eq!(loudness("[Parsed_ebur128_0 @ 0x1] Summary:\n    I:         -70.0 LUFS\n"), None);
+        assert_eq!(loudness("no summary here"), None);
+        let first_pass =
+            "[Parsed_loudnorm_0 @ 0x2] \n{\n\t\"input_i\" : \"-24.66\",\n\t\"input_tp\" : \"3.93\",\n\t\"input_lra\" : \"12.70\",\n\
+                          \t\"input_thresh\" : \"-35.17\",\n\t\"target_offset\" : \"0.12\"\n}\n[out#0/null @ 0x3] video:0KiB audio:...";
+        assert_eq!(measured(first_pass), Some(-24.66));
+        assert_eq!(measured("{\"input_i\" : \"-inf\"}"), None);
+        assert_eq!(measured("nothing"), None);
+    }
+
+    #[test]
+    fn the_film_is_brought_to_its_loudness_under_a_limiter() {
+        let limit = "alimiter=limit=0.750:attack=5:release=50:level=false:latency=true";
+        // 8.66 dB up from where it measured, to -16 LUFS.
+        assert_eq!(master(Some(-24.66), 1.0), format!("volume=8.66dB,{limit}"));
+        // The master moves the film's loudness: twice is 6 dB louder, a half 6 dB quieter.
+        assert_eq!(master(Some(-24.66), 2.0), format!("volume=14.68dB,{limit}"));
+        assert_eq!(master(Some(-14.2), 0.5), format!("volume=-7.82dB,{limit}"));
+        // A film that could not be measured keeps its loudness; a master at nothing is silence.
+        assert_eq!(master(None, 1.0), format!("volume=0.00dB,{limit}"));
+        assert_eq!(master(Some(-20.0), 0.0), "volume=0");
     }
 
     #[test]
@@ -520,7 +634,12 @@ mod tests {
         let dissolves = (1..60).filter(|i| i % 3 == 0).count();
         assert_eq!(g.filter.matches("xfade=").count(), dissolves);
         assert_eq!(g.filter.matches("acrossfade=").count(), dissolves);
-        assert_eq!(g.filter.matches("fade=t=in:st=0").count(), 2 * (1..60).filter(|i| i % 5 == 0 && i % 3 != 0).count());
+        assert_eq!(g.filter.matches("fade=t=in:st=0:d=0.2500").count(), 2 * (1..60).filter(|i| i % 5 == 0 && i % 3 != 0).count());
+        // The sound fades in after every cut and out before every one, and at the film's two ends.
+        let cut = |i: usize| i == 0 || (!i.is_multiple_of(3) && !i.is_multiple_of(5));
+        let (ins, outs) = ((0..60).filter(|i| cut(*i)).count(), (0..60).filter(|i| *i == 59 || cut(i + 1)).count());
+        assert_eq!(g.filter.matches("afade=t=in:st=0:d=0.006").count(), ins);
+        assert_eq!(g.filter.matches(":d=0.006:curve=qsin").count(), ins + outs);
         assert_eq!(g.frames, 60 * 120 - 12 * dissolves as u32);
         assert_eq!(g.frames, film_frames(&film));
         // Every clip is read once for pictures and once for sound, and every label made is used.
@@ -597,8 +716,8 @@ mod tests {
         Mix { shots_gain: 1.0, shots_pan: 0.0, sounds, master: 1.0, duck: Vec::new(), duck_by: 0.0 }
     }
 
-    const REGION: &str = "asetpts=PTS-STARTPTS,aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo";
-    const LIMIT: &str = "alimiter=limit=0.97:level=false:latency=true";
+    const REGION: &str =
+        "asetpts=PTS-STARTPTS,aresample=48000:filter_size=128:kaiser_beta=12,aformat=sample_fmts=fltp:channel_layouts=stereo";
 
     #[test]
     fn no_tracks_leave_the_film_as_it_was() {
@@ -611,10 +730,10 @@ mod tests {
         silent.gain = 0.0;
         let outside =
             finished(as_it_is(96), &Finish { mix: Some(mix(vec![silent, sound(2, 4.0, 2.0), sound(3, -3.0, 2.0)])), ..Finish::default() });
-        assert_eq!(outside.filter, format!("[0:a]{LIMIT}[a]"));
-        // The master alone turns the film's own sound up or down, held under the limit.
+        assert_eq!((outside.filter.as_str(), outside.audio.as_str()), ("", "0:a"));
+        // The master is set with the film's loudness, at the end (see `master`).
         let quiet = finished(as_it_is(96), &Finish { mix: Some(Mix { master: 0.5, ..mix(vec![]) }), ..Finish::default() });
-        assert_eq!(quiet.filter, format!("[0:a]volume=0.500,{LIMIT}[a]"));
+        assert_eq!(quiet.filter, "");
     }
 
     #[test]
@@ -636,7 +755,7 @@ mod tests {
             )
         );
         // Regions that overlap are simply both in the mix; the shots' sound is first and gives the length.
-        assert_eq!(steps[2], format!("[0:a][s0][s1]amix=inputs=3:duration=first:dropout_transition=0:normalize=0,{LIMIT}[a]"));
+        assert_eq!(steps[2], "[0:a][s0][s1]amix=inputs=3:duration=first:dropout_transition=0:normalize=0[a]");
         assert_eq!((g.video.as_str(), g.audio.as_str()), ("0:v", "[a]"));
     }
 
@@ -678,7 +797,7 @@ mod tests {
         assert!(tail[5].starts_with("[i3_1]") && tail[5].ends_with("atrim=end=0.5000,pan=stereo|c0=0.500*c0|c1=1.000*c1[s1]"));
         assert_eq!(
             tail[6],
-            format!("[sa][m][s0][s1]amix=inputs=4:duration=first:dropout_transition=0:normalize=0,afade=t=out:st=3.0000:d=0.5000,volume=1.200,{LIMIT}[a]")
+            "[sa][m][s0][s1]amix=inputs=4:duration=first:dropout_transition=0:normalize=0,afade=t=out:st=3.0000:d=0.5000[a]"
         );
         assert_eq!((g.video.as_str(), g.audio.as_str(), g.frames), ("[v]", "[a]", 84));
     }
@@ -700,8 +819,6 @@ mod tests {
     fn clips_of_two_sizes_are_brought_to_one() {
         let mut large = piece(48, Join::Cut);
         large.fit = Some((1280, 768));
-        // A film that holds a clip of another size is never joined as a plain list.
-        assert!(!plain(&[piece(48, Join::Cut), large.clone()]));
         let g = joined(&[large]);
         assert!(g
             .filter

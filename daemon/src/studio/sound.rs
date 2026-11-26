@@ -512,7 +512,9 @@ mod tests {
         // A file that is gone is left out; with nothing to mix the film goes out as it is.
         let gone = heard(&strip, &[track("a", 1.0, false, false)], 1.0, 0.5, |_| None);
         assert!(gone.is_plain());
-        assert!(!heard(&strip, &[], 0.5, 0.5, files).is_plain());
+        // The master alone needs no mixing: it is set with the film's loudness, at the end.
+        let master = heard(&strip, &[], 0.5, 0.5, files);
+        assert!(master.is_plain() && master.master == 0.5);
         assert!(Strip { volume: 9.0, pan: -9.0, ..Strip::default() }.tidy() == Strip { volume: 2.0, pan: -1.0, mute: false, solo: false });
     }
 
