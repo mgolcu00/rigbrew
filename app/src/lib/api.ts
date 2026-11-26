@@ -967,6 +967,8 @@ export interface AgentTaskRow {
 	updated_ms: number;
 	/** When the person sent the request that is being worked on. Missing from an older service. */
 	request_ms?: number;
+	/** The film a conversation of Studio's assistant is about; empty or missing for a task of Code. */
+	film?: string;
 }
 
 /** A request that can be taken back. `request` counts the person's messages from 1. */
@@ -1014,13 +1016,18 @@ const taskOf = async (answer: Promise<{ task: AgentTask }>) => (await answer).ta
 
 /** `null` from a service that is too old to have Code. */
 export const agentTasks = async (folder = '') => (await optional<{ tasks: AgentTaskRow[] }>('GET', `/v1/agent/tasks?folder=${enc(folder)}`))?.tasks ?? null;
+/** The conversations of Studio's assistant on one film, newest first. */
+export const filmTasks = async (film: string) => (await optional<{ tasks: AgentTaskRow[] }>('GET', `/v1/agent/tasks?film=${enc(film)}`))?.tasks ?? [];
 export const agentTask = (id: string) => taskOf(json('GET', `/v1/agent/tasks/${enc(id)}`));
 /** Only what changes while the model writes, for asking several times a second. */
 export const agentTaskBrief = async (id: string) =>
 	(await json<{ task: AgentTaskRow & { writing?: string } }>('GET', `/v1/agent/tasks/${enc(id)}?brief=true`)).task;
 export const startAgentTask = (body: { folder: string; prompt: string; mode: AgentMode; web: boolean; connectors?: boolean; model?: string }) =>
 	taskOf(json('POST', '/v1/agent/tasks', body));
-export const tellAgentTask = (id: string, body: { text: string; mode: AgentMode; web: boolean; connectors?: boolean }) =>
+/** Starts a conversation of Studio's assistant on a film, with the shots selected in the tracks. */
+export const startFilmTask = (body: { film: string; prompt: string; mode: AgentMode; model?: string; selection: string[] }) =>
+	taskOf(json('POST', '/v1/agent/tasks', { ...body, web: false }));
+export const tellAgentTask = (id: string, body: { text: string; mode: AgentMode; web: boolean; connectors?: boolean; selection?: string[] }) =>
 	taskOf(json('POST', `/v1/agent/tasks/${enc(id)}/message`, body));
 export const answerAgentTask = (id: string, call: string, allow: boolean, always = false) =>
 	taskOf(json('POST', `/v1/agent/tasks/${enc(id)}/approve`, { call, allow, always }));

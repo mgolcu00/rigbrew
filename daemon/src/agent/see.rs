@@ -143,7 +143,7 @@ pub(super) fn sees(app: &Shared, task: &Task) -> bool {
 }
 
 /// Keeps a picture with the step that took it, and as the one the model looks at next.
-fn keep_picture(app: &Shared, id: &str, call: &str, png: &[u8], what: String) -> Option<String> {
+pub(super) fn keep_picture(app: &Shared, id: &str, call: &str, png: &[u8], what: String) -> Option<String> {
     let shot = look::keep_shot(&app.agent.dir, id, png)?;
     app.agent.change(id, |t| {
         if let Some(Step::Tool { image, .. }) = t.tool_step(call) {

@@ -577,3 +577,84 @@ export function takeWork(kind: 'import' | 'dub' | 'listen', mine: Doc, theirs: D
 	}
 	return out;
 }
+
+// --- the assistant's work -----------------------------------------------------------------------
+
+const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+const copy = <T>(x: T): T => JSON.parse(JSON.stringify(x));
+
+/** Things with an id, put together: theirs in their order, with what was changed, added or taken out here kept. */
+function mergeById<T extends { id: string }>(base: readonly T[], mine: readonly T[], theirs: readonly T[]): T[] {
+	const find = (list: readonly T[], id: string) => list.find((x) => x.id === id);
+	const out: T[] = [];
+	for (const t of theirs) {
+		const [m, b] = [find(mine, t.id), find(base, t.id)];
+		// Taken out here.
+		if (b && !m) continue;
+		out.push(copy(m && b && !same(m, b) ? m : t));
+	}
+	// Added here: after the one it follows here, or first.
+	mine.forEach((m, i) => {
+		if (find(base, m.id) || find(theirs, m.id)) return;
+		const before = mine
+			.slice(0, i)
+			.reverse()
+			.find((x) => out.some((o) => o.id === x.id));
+		out.splice(before ? out.findIndex((o) => o.id === before.id) + 1 : 0, 0, copy(m));
+	});
+	return out;
+}
+
+/**
+ * The film as the service has it (`theirs`) with what was edited here since `base` (`mine`) kept:
+ * a field edited here stays as it is here, every other one comes from the service. Shots, the
+ * cast and the tracks are put together one by one, by id.
+ */
+export function mergeDocs(base: Doc, mine: Doc, theirs: Doc): Doc {
+	const out = copy(theirs);
+	for (const key of Object.keys(theirs) as (keyof Doc)[]) {
+		if (key === 'shots' || key === 'cast' || key === 'tracks') continue;
+		if (!same(mine[key], base[key])) (out as unknown as Record<string, unknown>)[key] = copy(mine[key]);
+	}
+	out.shots = mergeById(base.shots, mine.shots, theirs.shots);
+	out.cast = mergeById(base.cast, mine.cast, theirs.cast);
+	out.tracks = mergeById(base.tracks, mine.tracks, theirs.tracks);
+	return out;
+}
+
+/** What one request of the assistant is called in the undo history. */
+export const ASSISTANT_STEP = 'What the assistant did';
+
+/**
+ * One request of the assistant on a film. The film before it is what one undo brings back,
+ * however many steps the assistant took; `base` is the film as the service had it last.
+ */
+export class AssistTurn {
+	readonly film: string;
+	readonly before: Doc;
+	base: Doc;
+
+	constructor(film: string, doc: Doc) {
+		this.film = film;
+		this.before = copy(doc);
+		this.base = copy(doc);
+	}
+
+	/**
+	 * The film as the service has it now: what the workstation shows next. What was edited
+	 * here meanwhile (`edited`) is kept. `null` when the service has nothing new.
+	 */
+	follow(mine: Doc, theirs: Doc, edited: boolean): Doc | null {
+		if (same(theirs, this.base)) return null;
+		const next = edited ? mergeDocs(this.base, mine, theirs) : copy(theirs);
+		this.base = copy(theirs);
+		return next;
+	}
+
+	/** The request ended with the film as `now`: one step in the history, when anything changed. */
+	end(history: History<Doc>, now: Doc): boolean {
+		if (same(this.before, now)) return false;
+		history.push(copy(this.before), ASSISTANT_STEP);
+		return true;
+	}
+}

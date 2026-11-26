@@ -15,6 +15,7 @@
 	import CodePreview from '#lib/components/CodePreview.svelte';
 	import ErrorLine from '#lib/components/ErrorLine.svelte';
 	import Icon from '#lib/components/Icon.svelte';
+	import ModeMenu from '#lib/components/ModeMenu.svelte';
 	import Shot from '#lib/components/Shot.svelte';
 
 	// Code: pick a folder, say what should be done, and watch a model on this computer do it one
@@ -57,7 +58,6 @@
 	}
 
 	const folderName = $derived(code.folder.split(/[/\\]/).filter(Boolean).pop() ?? code.folder);
-	const mode = $derived(modes.find((m) => m.id === code.mode) ?? modes[0]);
 	const nameOf = (folder: string) => folder.split(/[/\\]/).filter(Boolean).pop() ?? folder;
 	const others = $derived(code.recent.filter((f) => f !== code.folder));
 	const plan = $derived(task?.plan ?? []);
@@ -314,14 +314,7 @@
 	<div class="composer" class:off={!model}>
 		<textarea bind:this={input} bind:value={draft} oninput={grow} {onkeydown} rows="1" spellcheck="false" disabled={!model} {placeholder} aria-label="What should be done"></textarea>
 		<div class="tools">
-			<label class="perm" class:danger={code.mode === 'bypass'} title={mode.does}>
-				<span class="sr">Permissions</span>
-				<select value={code.mode} onchange={(e) => code.setMode(e.currentTarget.value as (typeof modes)[number]['id'])} aria-label="Permissions">
-					{#each modes as m (m.id)}
-						<option value={m.id}>{m.name}</option>
-					{/each}
-				</select>
-			</label>
+			<ModeMenu {modes} value={code.mode} onchange={(m) => code.setMode(m)} danger="bypass" />
 			{#if app.chatPackages.length > 1 && model}
 				<label class="perm" title="The model that does the work">
 					<span class="sr">Model</span>
@@ -1820,7 +1813,7 @@
 		}
 	}
 
-	/* The permission picker: one quiet menu in the box where you type. */
+	/* The model picker: one quiet menu in the box where you type, like the permission picker (ModeMenu). */
 	.perm {
 		display: inline-flex;
 		align-items: center;
@@ -1835,11 +1828,6 @@
 		color: var(--ink);
 		font: 500 13px/1 var(--rb-text);
 		cursor: pointer;
-	}
-
-	.perm.danger select {
-		background: var(--warn-soft);
-		color: var(--warn);
 	}
 
 </style>

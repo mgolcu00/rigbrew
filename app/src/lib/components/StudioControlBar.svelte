@@ -52,7 +52,8 @@
 <div class="bar" role="toolbar" aria-label="Control bar">
 	<div class="group">
 		<button class="cb" class:on={studio.layout.library} aria-pressed={studio.layout.library} onclick={() => studio.set('library', !studio.layout.library)} title="Library (Y)" aria-label="Library"><StudioIcon name="library" /></button>
-		<button class="cb" class:on={studio.layout.inspector} aria-pressed={studio.layout.inspector} onclick={() => studio.set('inspector', !studio.layout.inspector)} title="Inspector (I)" aria-label="Inspector"><StudioIcon name="inspector" /></button>
+		<button class="cb" class:on={studio.layout.inspector && studio.layout.side !== 'assistant'} aria-pressed={studio.layout.inspector && studio.layout.side !== 'assistant'} onclick={() => studio.toggleInspector()} title="Inspector (I)" aria-label="Inspector"><StudioIcon name="inspector" /></button>
+		<button class="cb" class:on={studio.layout.inspector && studio.layout.side === 'assistant'} aria-pressed={studio.layout.inspector && studio.layout.side === 'assistant'} onclick={() => studio.toggleAssistant()} title="Assistant (A)" aria-label="Assistant"><StudioIcon name="spark" /></button>
 		<button class="cb" class:on={studio.layout.bottom && studio.layout.tab === 'mixer'} aria-pressed={studio.layout.bottom && studio.layout.tab === 'mixer'} onclick={() => studio.bottom('mixer')} title="Mixer (X)" aria-label="Mixer"><StudioIcon name="mixer" /></button>
 		<button class="cb" class:on={studio.layout.bottom && studio.layout.tab === 'editor'} aria-pressed={studio.layout.bottom && studio.layout.tab === 'editor'} onclick={() => studio.bottom('editor')} title="Editor (E)" aria-label="Editor"><StudioIcon name="editor" /></button>
 		<button class="cb" class:on={studio.layout.bottom && studio.layout.tab === 'cast'} aria-pressed={studio.layout.bottom && studio.layout.tab === 'cast'} onclick={() => studio.bottom('cast')} title="Cast (K)" aria-label="Cast"><StudioIcon name="cast" /></button>

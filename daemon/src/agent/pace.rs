@@ -69,6 +69,8 @@ pub fn kind_of(tool: &str) -> Kind {
         "list_files" | "read_file" | "search" | "outline" | "use_skill" | "read_skill_file" | "find_tool" => Kind::Lookup,
         // Looking at the page or the phone again with nothing changed is a look-up like any other.
         "look_at_page" | "simulator" => Kind::Lookup,
+        // Reading a film in Studio, or looking at a shot of it.
+        "read_film" | "read_shot" | "look_at_shot" => Kind::Lookup,
         "web_search" => Kind::Search,
         "fetch_url" => Kind::Page,
         "edit_file" | "write_file" | "append_file" => Kind::Change,

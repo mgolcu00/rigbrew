@@ -27,6 +27,9 @@ pub struct Extra {
     /// The picture the model is shown on its next turns. Not shown by the API.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub eye: Option<look::Eye>,
+    /// The film a task of Studio's assistant works on (see `film`); empty for a task of Code.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub film: String,
 }
 
 /// Tools of the harness itself. They change nothing in the folder, so every mode has them.
