@@ -67,6 +67,8 @@ class Code {
 	task = $state<AgentTask | null>(null);
 	skills = $state<AgentSkill[]>([]);
 	skillsDir = $state('');
+	/** The project's own instruction files the model reads (AGENTS.md and the like), as paths from the folder. */
+	instructions = $state<string[]>([]);
 	problem = $state('');
 	/** False when the service is too old to have Code. */
 	available = $state(true);
@@ -166,6 +168,7 @@ class Code {
 				const found = await api.agentSkills(this.folder);
 				this.skills = found?.skills ?? [];
 				this.skillsDir = found?.dir ?? '';
+				this.instructions = found?.instructions ?? [];
 			}
 		} catch (e) {
 			this.problem = say(e);
@@ -267,17 +270,21 @@ class Code {
 		this.problem = '';
 	}
 
-	/** Starts a task, or continues the open one. Returns whether it was accepted. */
-	async send(text: string, model?: string): Promise<boolean> {
+	/**
+	 * Starts a task, or continues the open one; while it works the message waits for its next
+	 * turn. `images` are PNG data addresses. Returns whether it was accepted.
+	 */
+	async send(text: string, model?: string, images: string[] = []): Promise<boolean> {
 		const prompt = text.trim();
-		if (!prompt || !this.folder || this.busy) return false;
+		if ((!prompt && !(this.task && images.length)) || !this.folder || this.busy) return false;
 		this.busy = true;
 		this.problem = '';
+		const pictures = images.length ? { images } : {};
 		try {
 			this.#show(
 				this.task
-					? await api.tellAgentTask(this.task.id, { text: prompt, mode: this.mode, web: this.web, connectors: this.connectors })
-					: await api.startAgentTask({ folder: this.folder, prompt, mode: this.mode, web: this.web, connectors: this.connectors, ...(model ? { model } : {}) })
+					? await api.tellAgentTask(this.task.id, { text: prompt, mode: this.mode, web: this.web, connectors: this.connectors, ...pictures })
+					: await api.startAgentTask({ folder: this.folder, prompt, mode: this.mode, web: this.web, connectors: this.connectors, ...(model ? { model } : {}), ...pictures })
 			);
 			this.#watch();
 			return true;
@@ -286,6 +293,34 @@ class Code {
 			return false;
 		} finally {
 			this.busy = false;
+		}
+	}
+
+	/** Goes on where the open task was stopped. */
+	async goOn() {
+		const task = this.task;
+		if (!task || active(task) || this.busy) return;
+		this.busy = true;
+		this.problem = '';
+		try {
+			this.#show(await api.tellAgentTask(task.id, { text: '', continue: true, mode: this.mode, web: this.web, connectors: this.connectors }));
+			this.#watch();
+		} catch (e) {
+			this.problem = say(e);
+		} finally {
+			this.busy = false;
+		}
+	}
+
+	/** Takes back a message that waits for the next turn. */
+	async unqueue(id: string) {
+		const task = this.task;
+		if (!task) return;
+		try {
+			this.#show(await api.unqueueAgentMessage(task.id, id));
+		} catch (e) {
+			this.problem = say(e);
+			await this.open(task.id);
 		}
 	}
 

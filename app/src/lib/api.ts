@@ -930,7 +930,19 @@ export interface AgentScreen {
 	at_ms: number;
 }
 
-export type AgentStep = { kind: 'user' | 'model' | 'note' | 'question'; text: string } | AgentToolStep;
+export type AgentStep =
+	| { kind: 'user' | 'model' | 'note' | 'question'; text: string }
+	| AgentToolStep
+	/** Pictures the person sent with the message before (see `agentShot`), and what the model thought before it answered. */
+	| { kind: 'pictures'; images: string[] }
+	| { kind: 'thought'; text: string; ms: number };
+
+/** A message the person sent while the task worked: it goes in at the next turn. */
+export interface AgentQueued {
+	id: string;
+	text: string;
+	images?: string[];
+}
 
 /** A step that waits for the person: a change to a file (with its diff), a command, or a connector's tool. */
 export interface AgentPending {
@@ -990,6 +1002,10 @@ export interface AgentTask extends AgentTaskRow {
 	app?: AgentApp | null;
 	page?: AgentPage;
 	device?: AgentScreen;
+	/** Messages that wait for the next turn. Missing from an older service. */
+	queued?: AgentQueued[];
+	/** How full the model's context was at its last turn, in tokens. */
+	context?: { used: number; size: number };
 }
 
 export interface AgentSkill {
@@ -1006,10 +1022,15 @@ export const agentTask = (id: string) => taskOf(json('GET', `/v1/agent/tasks/${e
 /** Only what changes while the model writes, for asking several times a second. */
 export const agentTaskBrief = async (id: string) =>
 	(await json<{ task: AgentTaskRow & { writing?: string } }>('GET', `/v1/agent/tasks/${enc(id)}?brief=true`)).task;
-export const startAgentTask = (body: { folder: string; prompt: string; mode: AgentMode; web: boolean; connectors?: boolean; model?: string }) =>
+export const startAgentTask = (body: { folder: string; prompt: string; mode: AgentMode; web: boolean; connectors?: boolean; model?: string; images?: string[] }) =>
 	taskOf(json('POST', '/v1/agent/tasks', body));
-export const tellAgentTask = (id: string, body: { text: string; mode: AgentMode; web: boolean; connectors?: boolean }) =>
+/** Continues a task, or, while it works, leaves the message for its next turn. `continue` goes on where it was stopped. */
+export const tellAgentTask = (id: string, body: { text: string; mode: AgentMode; web: boolean; connectors?: boolean; images?: string[]; continue?: boolean }) =>
 	taskOf(json('POST', `/v1/agent/tasks/${enc(id)}/message`, body));
+export const unqueueAgentMessage = (id: string, queued: string) => taskOf(json('DELETE', `/v1/agent/tasks/${enc(id)}/queue/${enc(queued)}`));
+/** Files of the folder whose path matches `query`, best first, to name one with @. */
+export const agentFiles = async (folder: string, query: string) =>
+	(await json<{ files: string[] }>('GET', `/v1/agent/files?folder=${enc(folder)}&q=${enc(query)}`)).files;
 export const answerAgentTask = (id: string, call: string, allow: boolean, always = false) =>
 	taskOf(json('POST', `/v1/agent/tasks/${enc(id)}/approve`, { call, allow, always }));
 export const undoAgentTask = (id: string) => taskOf(json('POST', `/v1/agent/tasks/${enc(id)}/undo`));
@@ -1024,7 +1045,8 @@ export const stopAgentApp = (id: string) => taskOf(json('DELETE', `/v1/agent/tas
 export const agentDeviceShot = (id: string) => taskOf(json('POST', `/v1/agent/tasks/${enc(id)}/device`));
 /** A picture a task took. It needs the token, so it is fetched and shown through an object URL. */
 export const agentShot = async (task: string, name: string) => (await send('GET', `/v1/agent/tasks/${enc(task)}/shots/${enc(name)}.png`)).blob();
-export const agentSkills = (folder: string) => optional<{ skills: AgentSkill[]; dir: string; folder_dir: string }>('GET', `/v1/agent/skills?folder=${enc(folder)}`);
+export const agentSkills = (folder: string) =>
+	optional<{ skills: AgentSkill[]; dir: string; folder_dir: string; instructions?: string[] }>('GET', `/v1/agent/skills?folder=${enc(folder)}`);
 
 /** Asks for one video or sound file with the system's own dialog. `null` when cancelled, or outside the app. */
 export async function pickFile(kind: 'video' | 'sound', title = 'Choose a file'): Promise<string | null> {

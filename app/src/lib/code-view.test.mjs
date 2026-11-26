@@ -34,6 +34,29 @@ test('a run of look-ups is one row, and a change, a command, a question or an an
 	assert.equal(rows[1].at, 1);
 });
 
+test('pictures go with the message, and a thought is a row except before a look-up', () => {
+	const thought = (text, ms = 1500) => ({ kind: 'thought', text, ms });
+	const rows = fold([
+		said('user', 'why is this red?'),
+		{ kind: 'pictures', images: ['a1', 'b2'] },
+		thought('Let me look.'),
+		tool('read_file', { path: 'a.css' }),
+		thought('Read one more.'),
+		tool('read_file', { path: 'b.css' }),
+		thought('Found it.', 4000),
+		tool('edit_file', { path: 'a.css' }),
+		thought('Done.'),
+		said('model', 'Fixed.'),
+		thought('Still going')
+	]);
+	assert.deepEqual(
+		rows.map((r) => (r.kind === 'lookups' ? `lookups:${r.steps.length}` : r.kind === 'step' ? r.step.name : r.kind)),
+		['user', 'lookups:2', 'thought', 'edit_file', 'thought', 'model', 'thought']
+	);
+	assert.deepEqual(rows[0].images, ['a1', 'b2']);
+	assert.deepEqual([rows[2].text, rows[2].ms], ['Found it.', 4000]);
+});
+
 test('a failed plan update is shown, and tools of a connector are never folded', () => {
 	const rows = fold([tool('read_file', { path: 'a' }), tool('update_plan', {}, 'failed'), tool('find_tool', { query: 'issues' }), tool('call_tool', { connector: 'git', tool: 'log' }), tool('read_file', { path: 'b' })]);
 	assert.deepEqual(

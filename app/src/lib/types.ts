@@ -27,6 +27,8 @@ export interface Variant {
 	disk_mb: number;
 	accel_mem_mb: number;
 	metrics: Metrics;
+	/** The build has a vision part: the model takes pictures. Missing from an older service. */
+	vision?: boolean;
 }
 
 export type Recommendation =

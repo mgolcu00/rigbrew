@@ -4,6 +4,7 @@
 	import { shownArguments } from '#lib/chattools.ts';
 	import { code, isActive, modes, purposeOf } from '#lib/code.svelte.ts';
 	import { activityOf, diffCount, fold, lineOf, summary, tails } from '#lib/code-view.ts';
+	import { appCommand, contextShown, thoughtFor } from '#lib/code-compose.ts';
 	import { WORD_MIN_MS, WORD_MS, elapsed, nextWord, type Activity } from '#lib/code-words.ts';
 	import { connectors } from '#lib/connectors.svelte.ts';
 	import { ago } from '#lib/format.ts';
@@ -12,6 +13,7 @@
 	import { skills } from '#lib/skills.svelte.ts';
 	import { app } from '#lib/state.svelte.ts';
 	import { isMac, machine, mod } from '#lib/words.ts';
+	import CodeComposer from '#lib/components/CodeComposer.svelte';
 	import CodePreview from '#lib/components/CodePreview.svelte';
 	import ErrorLine from '#lib/components/ErrorLine.svelte';
 	import Icon from '#lib/components/Icon.svelte';
@@ -24,8 +26,10 @@
 	// far and how to stop. A change to a file or a command stops at a card and waits for a yes.
 
 	let draft = $state('');
+	/** Pictures pasted or dropped into the box: PNG data addresses. */
+	let pictures = $state<string[]>([]);
 	let typed = $state(code.folder);
-	let input = $state<HTMLTextAreaElement>();
+	let composer = $state<CodeComposer>();
 	let thread = $state<HTMLElement>();
 
 	const task = $derived(code.task);
@@ -39,6 +43,11 @@
 		chosenModel = id;
 		remembered.set('code.model', id);
 	}
+	/** The model takes pictures: its installed build has a vision part. */
+	const sees = $derived(Boolean(model?.variants.some((v) => model.installed.includes(v.id) && v.vision)));
+	const choices = $derived({ model: app.chatPackages.map((p) => ({ id: p.id, name: p.name })), mode: modes.map((m) => ({ id: m.id, name: m.name })) });
+	/** "34% of context", from the engine's count at the last turn. */
+	const fullness = $derived(contextShown(task?.context));
 	// The name of the open task: click it to change it. A name typed here is never written over.
 	let renaming = $state(false);
 	let newTitle = $state('');
@@ -82,37 +91,28 @@
 		tick().then(() => thread?.scrollTo({ top: thread.scrollHeight }));
 	});
 
-	function grow() {
-		if (!input) return;
-		input.style.height = 'auto';
-		input.style.height = `${Math.min(input.scrollHeight, 200)}px`;
+	/** A command the app does itself: a new task in this folder, another model, other permissions. */
+	function onapp(name: 'clear' | 'model' | 'mode', value?: string) {
+		const named = (list: { id: string; name: string }[]) => list.find((c) => c.id === value || c.name.toLowerCase().startsWith((value ?? '').toLowerCase()))?.id;
+		if (name === 'clear') {
+			code.close();
+			pictures = [];
+		} else if (name === 'model' && value && named(choices.model)) chooseModel(named(choices.model) ?? '');
+		else if (name === 'mode' && value && named(choices.mode)) code.setMode(named(choices.mode) as (typeof modes)[number]['id']);
+		draft = '';
+		composer?.focus();
 	}
 
+	// While it works a message waits for the next turn; the service puts it in then.
 	async function send() {
-		if (working || !draft.trim()) return;
-		const text = draft;
-		if (await code.send(text, model?.id)) {
+		const own = appCommand(draft);
+		if (own) return onapp(own.name as 'clear' | 'model' | 'mode', own.rest);
+		if (!draft.trim() && !(task && pictures.length)) return;
+		if (await code.send(draft, model?.id, pictures)) {
 			draft = '';
-			await tick();
-			grow();
+			pictures = [];
 		}
 	}
-
-	// Enter sends and Shift+Enter makes a new line. With Cmd or Ctrl held, Enter belongs to the
-	// card that waits for an answer (see `onkey`).
-	function onkeydown(event: KeyboardEvent) {
-		if (event.key === 'Enter' && !event.shiftKey && !event.isComposing && !event.metaKey && !event.ctrlKey) {
-			event.preventDefault();
-			send();
-		}
-	}
-
-	/** Esc was pressed once: the line above the box says to press it again. It forgets after a moment. */
-	let stopping = $state(false);
-	let forget: ReturnType<typeof setTimeout> | undefined;
-	$effect(() => {
-		if (!working) stopping = false;
-	});
 
 	// --- the line above the box while it works: a word, the time so far, how to stop -----------
 
@@ -149,34 +149,26 @@
 	});
 
 	// Keys that work anywhere on the screen: Cmd or Ctrl with Enter allows the step that waits,
-	// Esc pressed twice stops the work.
+	// Esc stops the work where it is (Continue takes it up again).
 	function onkey(event: KeyboardEvent) {
 		if (event.isComposing || !task) return;
 		if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
 			if (task.pending && !code.busy) {
 				event.preventDefault();
 				code.answer(true);
-			} else if (!working && document.activeElement === input) {
-				event.preventDefault();
-				send();
 			}
 		} else if (event.key === 'Escape' && working) {
 			event.preventDefault();
-			clearTimeout(forget);
-			if (stopping) {
-				stop();
-			} else {
-				stopping = true;
-				forget = setTimeout(() => (stopping = false), 3000);
-			}
+			stop();
 		}
 	}
 
 	async function stop() {
-		stopping = false;
-		clearTimeout(forget);
 		await code.stop();
 	}
+
+	/** The work ended before it was done: it can go on from where it was. */
+	const resumable = $derived(Boolean(task && !working && (task.state === 'stopped' || task.state === 'interrupted' || task.state === 'failed')));
 
 	// --- what the newest request changed -------------------------------------------------------
 
@@ -310,10 +302,9 @@
 	</ul>
 {/snippet}
 
-{#snippet composer(placeholder: string, _explain: boolean)}
-	<div class="composer" class:off={!model}>
-		<textarea bind:this={input} bind:value={draft} oninput={grow} {onkeydown} rows="1" spellcheck="false" disabled={!model} {placeholder} aria-label="What should be done"></textarea>
-		<div class="tools">
+{#snippet composerBox(placeholder: string)}
+	<CodeComposer bind:this={composer} bind:draft bind:pictures {placeholder} disabled={!model} folder={code.folder} skills={code.skills} {sees} {choices} onsend={send} {onapp}>
+		{#snippet tools()}
 			<label class="perm" class:danger={code.mode === 'bypass'} title={mode.does}>
 				<span class="sr">Permissions</span>
 				<select value={code.mode} onchange={(e) => code.setMode(e.currentTarget.value as (typeof modes)[number]['id'])} aria-label="Permissions">
@@ -343,13 +334,15 @@
 				</label>
 			{/if}
 			<span class="grow"></span>
+			{#if fullness && !busy}<span class="meter" title="How much of what the model can hold in mind the task used at its last turn">{fullness}</span>{/if}
 			{#if working}
+				{#if draft.trim() || pictures.length}<button class="go" onclick={send} disabled={code.busy} title="Goes in at the next turn">Queue</button>{/if}
 				<button class="go stop" onclick={stop} title="Stops the work where it is (Esc)">Stop</button>
 			{:else}
-				<button class="go" onclick={send} disabled={!draft.trim() || !model || code.busy}>Send</button>
+				<button class="go" onclick={send} disabled={(!draft.trim() && !(task && pictures.length)) || !model || code.busy}>Send</button>
 			{/if}
-		</div>
-	</div>
+		{/snippet}
+	</CodeComposer>
 {/snippet}
 
 <section class="screen code" class:split={previewable && code.preview} aria-label="Code">
@@ -447,7 +440,17 @@
 					<ol class="turns">
 						{#each rows as row (row.at)}
 							{#if row.kind === 'user'}
-								<li class="turn you"><p class="said selectable">{row.text}</p></li>
+								<li class="turn you">
+									{#if row.text}<p class="said selectable">{row.text}</p>{/if}
+									{#if row.images?.length}<div class="shots">{#each row.images as image (image)}<Shot task={task.id} name={image} alt="A picture you sent" small />{/each}</div>{/if}
+								</li>
+							{:else if row.kind === 'thought'}
+								<li class="step thought">
+									<details>
+										<summary><span class="mark" aria-hidden="true"></span><span class="verb">{thoughtFor(row.ms)}</span></summary>
+										<div class="inside"><p class="thinking selectable">{row.text}</p></div>
+									</details>
+								</li>
 							{:else if row.kind === 'model' || row.kind === 'question'}
 								<li class="turn model" class:question={row.kind === 'question'}>
 									<!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
@@ -565,6 +568,9 @@
 
 					{#if task.error}{#if task.state === 'failed'}<ErrorLine error={task.error} where="code" />{:else}<p class="ended selectable">{task.error}</p>{/if}
 					{:else if task.state === 'stopped'}<p class="ended">Stopped</p>{/if}
+					{#if resumable}
+						<div class="answers earlier"><button class="plainbtn" onclick={() => code.goOn()} disabled={code.busy} title="Goes on from where it was">Continue</button></div>
+					{/if}
 					{#if code.problem}<ErrorLine error={code.problem} where="code" />{/if}
 				</div>
 			</div>
@@ -578,10 +584,22 @@
 							<span class="word" aria-hidden="true">{word}</span>
 							<span class="time" aria-hidden="true">{elapsed(now - started)}</span>
 							<span class="grow"></span>
-							<span class="esc" class:armed={stopping} aria-hidden="true">{stopping ? 'esc again to stop' : 'esc to stop'}</span>
+							{#if fullness}<span class="time">{fullness}</span>{/if}
+							<span class="esc" aria-hidden="true">esc to interrupt</span>
 						</div>
 					{/if}
-					{@render composer(task.pending ? 'Answer above first' : working ? '' : task.state === 'asking' ? 'Your answer' : 'Ask for the next thing', false)}
+					{#if task.queued?.length}
+						<ul class="queued" aria-label="Waiting for the next turn">
+							{#each task.queued as q (q.id)}
+								<li>
+									<span class="tag">Queued</span>
+									<span class="said">{q.text || 'A picture'}</span>
+									<button class="drop" onclick={() => code.unqueue(q.id)} title="Take it back" aria-label="Take back the queued message">×</button>
+								</li>
+							{/each}
+						</ul>
+					{/if}
+					{@render composerBox(task.pending ? 'Answer above first' : working ? 'Queue a message' : task.state === 'asking' ? 'Your answer' : 'Ask for the next thing')}
 				</div>
 			</div>
 		{:else}
@@ -591,13 +609,14 @@
 					{#if !model}
 						<p class="lede">Code needs a chat model. <button class="link" onclick={() => app.go('models')}>Install one under Models</button>, then come back.</p>
 					{/if}
-					{@render composer('Say it in plain words', true)}
+					{@render composerBox('Say it in plain words')}
+					{#if code.instructions.length}<p class="reads" title="The model follows the instructions in these files">{code.instructions.join(' · ')}</p>{/if}
 					{#if code.problem}<ErrorLine error={code.problem} where="code" />{/if}
 
 					{#if code.tasks.length === 0}
 						<ul class="ideas">
 							{#each ideas as idea (idea)}
-								<li><button onclick={() => ((draft = idea), input?.focus())} disabled={!model}>{idea}</button></li>
+								<li><button onclick={() => ((draft = idea), composer?.focus())} disabled={!model}>{idea}</button></li>
 							{/each}
 						</ul>
 					{:else}
@@ -1317,6 +1336,27 @@
 		margin: 0;
 	}
 
+	.turn.you .shots {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 6px;
+		margin-top: 6px;
+	}
+
+	.turn.you .said + .shots {
+		margin-top: 8px;
+	}
+
+	.thinking {
+		max-height: 320px;
+		overflow: auto;
+		font-size: 13px;
+		line-height: 1.55;
+		color: var(--muted);
+		white-space: pre-wrap;
+		overflow-wrap: anywhere;
+	}
+
 	.question .prose {
 		padding-left: 12px;
 		border-left: 2px solid var(--accent);
@@ -1581,10 +1621,6 @@
 		font-variant-numeric: tabular-nums;
 	}
 
-	.esc.armed {
-		color: var(--warn);
-	}
-
 	/* The word still changes; the mark stands still. */
 	@media (prefers-reduced-motion: reduce) {
 		.brew i {
@@ -1593,59 +1629,68 @@
 		}
 	}
 
-	/* --- the box to type in --- */
+	/* --- the box to type in (see CodeComposer) --- */
 	.dock {
 		flex: none;
 		padding: 0 0 12px;
 	}
 
-	.composer {
-		display: flex;
-		flex-direction: column;
-		border: 1px solid var(--line);
-		border-radius: 18px;
-		padding: 4px 6px;
-		background: var(--bg);
-		box-shadow: 0 1px 2px color-mix(in srgb, var(--ink) 6%, transparent), 0 8px 24px -12px color-mix(in srgb, var(--ink) 18%, transparent);
-		transition: border-color var(--quick);
+	.meter {
+		flex: none;
+		font-size: 12px;
+		color: var(--faint);
+		font-variant-numeric: tabular-nums;
 	}
 
-	.composer:focus-within {
-		border-color: var(--accent);
-	}
-
-	.composer.off {
-		background: var(--well);
-	}
-
-	textarea {
-		width: 100%;
-		min-width: 0;
-		max-height: 200px;
-		padding: 12px 12px 6px;
-		border: 0;
-		background: transparent;
-		resize: none;
-		font: 15px/1.5 var(--rb-text);
-		cursor: text;
-		scrollbar-width: none;
-	}
-
-	textarea:focus-visible {
-		outline: none;
-	}
-
-	textarea::placeholder {
+	.reads {
+		justify-self: center;
+		font: 12px var(--rb-data);
 		color: var(--faint);
 	}
 
-	.tools {
+	/* Messages that go in at the next turn. */
+	.queued {
+		display: grid;
+		gap: 4px;
+		margin: 0 0 6px;
+		padding: 0 10px;
+		list-style: none;
+	}
+
+	.queued li {
 		display: flex;
-		flex-wrap: wrap;
-		align-items: center;
-		gap: 10px;
-		min-height: 30px;
-		padding: 2px 6px 6px 8px;
+		align-items: baseline;
+		gap: 8px;
+		min-width: 0;
+		font-size: 13px;
+		color: var(--muted);
+	}
+
+	.queued .tag {
+		flex: none;
+		font-size: 12px;
+		color: var(--faint);
+	}
+
+	.queued .said {
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		font-size: 13px;
+	}
+
+	.queued .drop {
+		flex: none;
+		width: 20px;
+		height: 20px;
+		border-radius: 6px;
+		color: var(--faint);
+	}
+
+	.queued .drop:hover {
+		background: var(--hover);
+		color: var(--ink);
 	}
 
 	.switch {

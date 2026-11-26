@@ -23,18 +23,32 @@ const lookups: Record<string, Group> = {
 export const isLookup = (step: AgentStep): step is AgentToolStep => step.kind === 'tool' && step.name in lookups && step.status !== 'waiting';
 
 export type Row =
-	| { kind: 'user' | 'model' | 'note' | 'question'; at: number; text: string }
+	| { kind: 'user'; at: number; text: string; images?: string[] }
+	| { kind: 'model' | 'note' | 'question'; at: number; text: string }
+	| { kind: 'thought'; at: number; text: string; ms: number }
 	| { kind: 'step'; at: number; step: AgentToolStep }
 	| { kind: 'lookups'; at: number; steps: AgentToolStep[] };
 
 /**
  * The steps as rows. A run of look-ups is one row; it ends when a change, a command, a
  * question or an answer comes. The plan has its own place on the screen, so a step that only
- * updated it is no row and does not end a run.
+ * updated it is no row and does not end a run. Pictures the person sent go with their message.
+ * What the model thought is a row of its own before what it did next, except before a look-up:
+ * there it would only break the run.
  */
 export function fold(steps: readonly AgentStep[]): Row[] {
 	const rows: Row[] = [];
 	steps.forEach((step, at) => {
+		if (step.kind === 'pictures') {
+			const last = rows.at(-1);
+			if (last?.kind === 'user') last.images = [...(last.images ?? []), ...step.images];
+			return;
+		}
+		if (step.kind === 'thought') {
+			const next = steps.slice(at + 1).find((s) => s.kind !== 'thought');
+			if (!next || !isLookup(next)) rows.push({ kind: 'thought', at, text: step.text, ms: step.ms });
+			return;
+		}
 		if (step.kind !== 'tool') {
 			rows.push({ kind: step.kind, at, text: step.text });
 			return;
